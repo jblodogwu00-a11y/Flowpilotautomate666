@@ -1,0 +1,922 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // =========================================================================
+    // 0. GLOBAL SAFETY NET (Default Deny)
+    // =========================================================================
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // 1. HARDENED GLOBAL PRIMITIVES
+    // =========================================================================
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn();
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        (request.auth.token.email_verified == true && request.auth.token.email == 'jonajukej777@gmail.com')
+      );
+    }
+
+    function isWorkspaceOwner(workspaceId) {
+      return exists(/databases/$(database)/documents/workspaces/$(workspaceId)) &&
+        get(/databases/$(database)/documents/workspaces/$(workspaceId)).data.ownerId == request.auth.uid;
+    }
+
+    // =========================================================================
+    // 2. ENTITY VALIDATION BLUEPRINTS
+    // =========================================================================
+
+    function isValidWorkspace(data) {
+      return data.keys().hasAll([
+        'ownerId', 'name', 'category', 'timezone', 'currency', 'senderName',
+        'whatsappConnected', 'smsConnected', 'emailConnected',
+        'notifyNewLeads', 'notifyCampaigns', 'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'ownerId', 'name', 'category', 'timezone', 'currency', 'senderName',
+        'whatsappConnected', 'smsConnected', 'emailConnected',
+        'notifyNewLeads', 'notifyCampaigns', 'createdAt', 'updatedAt'
+      ]) &&
+      data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId == request.auth.uid &&
+      data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
+      data.category is string && data.category.size() <= 32 && data.category in ['creator', 'freelancer', 'coach', 'agency', 'smb'] &&
+      data.timezone is string && data.timezone.size() >= 1 && data.timezone.size() <= 64 &&
+      data.currency is string && data.currency.size() <= 10 && data.currency in ['USD', 'EUR', 'GBP', 'NGN', 'CAD'] &&
+      data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 100 &&
+      data.whatsappConnected is bool &&
+      data.smsConnected is bool &&
+      data.emailConnected is bool &&
+      data.notifyNewLeads is bool &&
+      data.notifyCampaigns is bool &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidUserPrivateProfile(data) {
+      return data.keys().hasAll([
+        'ownerId', 'email', 'replyToEmail', 'phone', 'mailingAddress',
+        'whatsappPhoneId', 'smsSenderId', 'emailProviderDomain', 'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'ownerId', 'email', 'replyToEmail', 'phone', 'mailingAddress',
+        'whatsappPhoneId', 'smsSenderId', 'emailProviderDomain',
+        'whatsappBusinessNumber', 'customDomainEmail', 'useCustomDomainEmail',
+        'messagingIdentitiesJson', 'gatewayConfigJson',
+        'createdAt', 'updatedAt'
+      ]) &&
+      data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId == request.auth.uid &&
+      data.email is string && data.email.size() >= 3 && data.email.size() <= 150 &&
+      data.replyToEmail is string && data.replyToEmail.size() >= 3 && data.replyToEmail.size() <= 150 &&
+      data.phone is string && data.phone.size() <= 32 &&
+      data.mailingAddress is string && data.mailingAddress.size() <= 250 &&
+      data.whatsappPhoneId is string && data.whatsappPhoneId.size() <= 64 &&
+      data.smsSenderId is string && data.smsSenderId.size() <= 32 &&
+      data.emailProviderDomain is string && data.emailProviderDomain.size() <= 120 &&
+      (!('whatsappBusinessNumber' in data) || (data.whatsappBusinessNumber is string && data.whatsappBusinessNumber.size() <= 64)) &&
+      (!('customDomainEmail' in data) || (data.customDomainEmail is string && data.customDomainEmail.size() <= 150)) &&
+      (!('useCustomDomainEmail' in data) || data.useCustomDomainEmail is bool) &&
+      (!('messagingIdentitiesJson' in data) || (data.messagingIdentitiesJson is string && data.messagingIdentitiesJson.size() <= 10000)) &&
+      (!('gatewayConfigJson' in data) || (data.gatewayConfigJson is string && data.gatewayConfigJson.size() <= 8000)) &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidWorkspaceMember(data) {
+      return data.keys().hasAll([
+        'workspaceId', 'ownerId', 'memberName', 'memberEmail', 'role', 'status', 'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'workspaceId', 'ownerId', 'memberName', 'memberEmail', 'role', 'status', 'createdAt', 'updatedAt'
+      ]) &&
+      data.workspaceId is string && data.workspaceId.size() >= 1 && data.workspaceId.size() <= 128 && data.workspaceId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId == request.auth.uid &&
+      data.memberName is string && data.memberName.size() >= 1 && data.memberName.size() <= 100 &&
+      data.memberEmail is string && data.memberEmail.size() >= 3 && data.memberEmail.size() <= 150 &&
+      data.role is string && data.role.size() <= 20 && data.role in ['owner', 'admin', 'editor', 'analyst'] &&
+      data.status is string && data.status.size() <= 20 && data.status in ['active', 'invited', 'revoked'] &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidContact(data) {
+      return data.keys().hasAll([
+        'workspaceId', 'ownerId', 'fullName', 'email', 'phone', 'stage',
+        'temperature', 'source', 'consentStatus', 'listName', 'tags',
+        'ltv', 'notes', 'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'workspaceId', 'ownerId', 'fullName', 'email', 'phone', 'stage',
+        'temperature', 'source', 'consentStatus', 'listName', 'tags',
+        'ltv', 'notes', 'company', 'dealTitle', 'commChannels', 'customFields',
+        'createdAt', 'updatedAt'
+      ]) &&
+      data.workspaceId is string && data.workspaceId.size() >= 1 && data.workspaceId.size() <= 128 && data.workspaceId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId == request.auth.uid &&
+      data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 100 &&
+      data.email is string && data.email.size() <= 150 &&
+      data.phone is string && data.phone.size() <= 32 &&
+      data.stage is string && data.stage.size() <= 32 && data.stage in ['lead', 'warm_lead', 'qualified', 'customer', 'churned'] &&
+      data.temperature is string && data.temperature.size() <= 20 && data.temperature in ['hot', 'warm', 'cold'] &&
+      data.source is string && data.source.size() >= 1 && data.source.size() <= 80 &&
+      data.consentStatus is string && data.consentStatus.size() <= 32 && data.consentStatus in ['opted_in', 'pending_double_opt_in', 'unsubscribed'] &&
+      data.listName is string && data.listName.size() >= 1 && data.listName.size() <= 80 &&
+      data.tags is list && data.tags.size() <= 10 &&
+      (data.tags.size() == 0 || (data.tags[0] is string && data.tags[0].size() <= 32)) &&
+      data.ltv is number && data.ltv >= 0 &&
+      data.notes is string && data.notes.size() <= 500 &&
+      (!('company' in data) || (data.company is string && data.company.size() <= 100)) &&
+      (!('dealTitle' in data) || (data.dealTitle is string && data.dealTitle.size() <= 120)) &&
+      (!('commChannels' in data) || (data.commChannels is list && data.commChannels.size() <= 5 && (data.commChannels.size() == 0 || (data.commChannels[0] is string && data.commChannels[0].size() <= 24)))) &&
+      (!('customFields' in data) || (data.customFields is list && data.customFields.size() <= 15 && (data.customFields.size() == 0 || (data.customFields[0] is string && data.customFields[0].size() <= 120)))) &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidAutomation(data) {
+      return data.keys().hasAll([
+        'workspaceId', 'ownerId', 'name', 'triggerType', 'triggerDetail',
+        'stepsSummary', 'channels', 'status', 'enrolledCount',
+        'completedCount', 'conversionRate', 'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'workspaceId', 'ownerId', 'name', 'triggerType', 'triggerDetail',
+        'targetList', 'stepsSummary', 'channels', 'status', 'enrolledCount',
+        'completedCount', 'conversionRate', 'version', 'flowGraphJson',
+        'createdAt', 'updatedAt'
+      ]) &&
+      data.workspaceId is string && data.workspaceId.size() >= 1 && data.workspaceId.size() <= 128 && data.workspaceId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId == request.auth.uid &&
+      data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+      data.triggerType is string && data.triggerType.size() <= 40 && data.triggerType in [
+        'form_submission', 'contact_added', 'tag_added', 'tag_removed',
+        'list_joined', 'list_removed', 'link_clicked', 'email_opened',
+        'specific_datetime', 'field_updated', 'webhook_received',
+        'manual_enrollment', 'purchase_completed', 'whatsapp_keyword'
+      ] &&
+      data.triggerDetail is string && data.triggerDetail.size() >= 1 && data.triggerDetail.size() <= 120 &&
+      (!('targetList' in data) || (data.targetList is string && data.targetList.size() <= 80)) &&
+      data.stepsSummary is list && data.stepsSummary.size() >= 1 && data.stepsSummary.size() <= 20 &&
+      data.stepsSummary[0] is string && data.stepsSummary[0].size() <= 200 &&
+      data.channels is list && data.channels.size() >= 1 && data.channels.size() <= 5 &&
+      data.channels[0] is string && data.channels[0].size() <= 32 &&
+      data.status is string && data.status.size() <= 20 && data.status in ['active', 'paused', 'draft', 'archived'] &&
+      data.enrolledCount is number && data.enrolledCount >= 0 &&
+      data.completedCount is number && data.completedCount >= 0 &&
+      data.conversionRate is number && data.conversionRate >= 0 && data.conversionRate <= 100 &&
+      (!('version' in data) || (data.version is number && data.version >= 1)) &&
+      (!('flowGraphJson' in data) || (data.flowGraphJson is string && data.flowGraphJson.size() <= 15000)) &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidCampaign(data) {
+      return data.keys().hasAll([
+        'workspaceId', 'ownerId', 'name', 'channel', 'targetList',
+        'subjectOrTemplate', 'messageBody', 'status', 'recipientCount',
+        'deliveredCount', 'openedCount', 'clickedCount', 'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'workspaceId', 'ownerId', 'name', 'channel', 'targetList',
+        'subjectOrTemplate', 'messageBody', 'status', 'recipientCount',
+        'deliveredCount', 'openedCount', 'clickedCount',
+        'bouncedCount', 'unsubscribedCount', 'preheader', 'templateId',
+        'segmentFilter', 'scheduledAt', 'blocksJson', 'overrideFromIdentity',
+        'createdAt', 'updatedAt'
+      ]) &&
+      data.workspaceId is string && data.workspaceId.size() >= 1 && data.workspaceId.size() <= 128 && data.workspaceId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId == request.auth.uid &&
+      data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+      data.channel is string && data.channel.size() <= 20 && data.channel in ['email', 'whatsapp', 'sms'] &&
+      data.targetList is string && data.targetList.size() >= 1 && data.targetList.size() <= 80 &&
+      data.subjectOrTemplate is string && data.subjectOrTemplate.size() >= 1 && data.subjectOrTemplate.size() <= 160 &&
+      data.messageBody is string && data.messageBody.size() >= 1 && data.messageBody.size() <= 5000 &&
+      data.status is string && data.status.size() <= 20 && data.status in ['draft', 'scheduled', 'sending', 'sent'] &&
+      data.recipientCount is number && data.recipientCount >= 0 &&
+      data.deliveredCount is number && data.deliveredCount >= 0 &&
+      data.openedCount is number && data.openedCount >= 0 &&
+      data.clickedCount is number && data.clickedCount >= 0 &&
+      (!('bouncedCount' in data) || (data.bouncedCount is number && data.bouncedCount >= 0)) &&
+      (!('unsubscribedCount' in data) || (data.unsubscribedCount is number && data.unsubscribedCount >= 0)) &&
+      (!('preheader' in data) || (data.preheader is string && data.preheader.size() <= 200)) &&
+      (!('templateId' in data) || (data.templateId is string && data.templateId.size() <= 80)) &&
+      (!('segmentFilter' in data) || (data.segmentFilter is string && data.segmentFilter.size() <= 200)) &&
+      (!('scheduledAt' in data) || (data.scheduledAt is string && data.scheduledAt.size() <= 120)) &&
+      (!('blocksJson' in data) || (data.blocksJson is string && data.blocksJson.size() <= 12000)) &&
+      (!('overrideFromIdentity' in data) || (data.overrideFromIdentity is string && data.overrideFromIdentity.size() <= 150)) &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidCaptureAsset(data) {
+      return data.keys().hasAll([
+        'workspaceId', 'ownerId', 'title', 'assetType', 'slug',
+        'headline', 'subheadline', 'ctaText', 'targetList',
+        'requireDoubleOptIn', 'status', 'viewsCount', 'submissionsCount',
+        'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'workspaceId', 'ownerId', 'title', 'assetType', 'slug',
+        'headline', 'subheadline', 'ctaText', 'redirectUrl', 'toolFormat',
+        'targetList', 'requireDoubleOptIn', 'status', 'viewsCount', 'submissionsCount',
+        'createdAt', 'updatedAt'
+      ]) &&
+      data.workspaceId is string && data.workspaceId.size() >= 1 && data.workspaceId.size() <= 128 && data.workspaceId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId == request.auth.uid &&
+      data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
+      data.assetType is string && data.assetType.size() <= 32 && data.assetType in ['landing_page', 'inline_form', 'popup_form', 'lead_magnet_funnel'] &&
+      data.slug is string && data.slug.size() >= 1 && data.slug.size() <= 80 &&
+      data.headline is string && data.headline.size() >= 1 && data.headline.size() <= 160 &&
+      data.subheadline is string && data.subheadline.size() <= 280 &&
+      data.ctaText is string && data.ctaText.size() >= 1 && data.ctaText.size() <= 60 &&
+      (!('redirectUrl' in data) || (data.redirectUrl is string && data.redirectUrl.size() <= 500)) &&
+      (!('toolFormat' in data) || (data.toolFormat is string && data.toolFormat.size() <= 32)) &&
+      data.targetList is string && data.targetList.size() >= 1 && data.targetList.size() <= 80 &&
+      data.requireDoubleOptIn is bool &&
+      data.status is string && data.status.size() <= 20 && data.status in ['published', 'draft', 'archived'] &&
+      data.viewsCount is number && data.viewsCount >= 0 &&
+      data.submissionsCount is number && data.submissionsCount >= 0 &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidChatbotFlow(data) {
+      return data.keys().hasAll([
+        'workspaceId', 'ownerId', 'name', 'triggerKeyword', 'matchType',
+        'welcomeMessage', 'menuOptions', 'handoffToHuman', 'status',
+        'sessionsCount', 'resolvedCount', 'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'workspaceId', 'ownerId', 'name', 'triggerKeyword', 'matchType',
+        'welcomeMessage', 'menuOptions', 'handoffToHuman', 'status',
+        'sessionsCount', 'resolvedCount', 'createdAt', 'updatedAt'
+      ]) &&
+      data.workspaceId is string && data.workspaceId.size() >= 1 && data.workspaceId.size() <= 128 && data.workspaceId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId == request.auth.uid &&
+      data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
+      data.triggerKeyword is string && data.triggerKeyword.size() >= 1 && data.triggerKeyword.size() <= 60 &&
+      data.matchType is string && data.matchType.size() <= 24 && data.matchType in ['exact', 'contains', 'first_message'] &&
+      data.welcomeMessage is string && data.welcomeMessage.size() >= 1 && data.welcomeMessage.size() <= 500 &&
+      data.menuOptions is list && data.menuOptions.size() >= 1 && data.menuOptions.size() <= 5 &&
+      data.menuOptions[0] is string && data.menuOptions[0].size() <= 80 &&
+      data.handoffToHuman is bool &&
+      data.status is string && data.status.size() <= 20 && data.status in ['active', 'paused', 'archived'] &&
+      data.sessionsCount is number && data.sessionsCount >= 0 &&
+      data.resolvedCount is number && data.resolvedCount >= 0 &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidTaskItem(data) {
+      return data.keys().hasAll([
+        'workspaceId', 'ownerId', 'title', 'category', 'priority',
+        'dueDate', 'relatedEntity', 'status', 'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'workspaceId', 'ownerId', 'title', 'category', 'priority',
+        'dueDate', 'relatedEntity', 'status', 'createdAt', 'updatedAt'
+      ]) &&
+      data.workspaceId is string && data.workspaceId.size() >= 1 && data.workspaceId.size() <= 128 && data.workspaceId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId == request.auth.uid &&
+      data.title is string && data.title.size() >= 1 && data.title.size() <= 160 &&
+      data.category is string && data.category.size() <= 32 && data.category in ['follow_up', 'campaign_review', 'compliance_check', 'onboarding'] &&
+      data.priority is string && data.priority.size() <= 20 && data.priority in ['high', 'medium', 'low'] &&
+      data.dueDate is string && data.dueDate.size() >= 1 && data.dueDate.size() <= 40 &&
+      data.relatedEntity is string && data.relatedEntity.size() <= 100 &&
+      data.status is string && data.status.size() <= 20 && data.status in ['pending', 'in_progress', 'completed'] &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidActivityLog(data) {
+      return data.keys().hasAll([
+        'workspaceId', 'ownerId', 'eventType', 'title', 'detail',
+        'channel', 'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'workspaceId', 'ownerId', 'eventType', 'title', 'detail',
+        'channel', 'createdAt', 'updatedAt'
+      ]) &&
+      data.workspaceId is string && data.workspaceId.size() >= 1 && data.workspaceId.size() <= 128 && data.workspaceId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId == request.auth.uid &&
+      data.eventType is string && data.eventType.size() <= 40 && data.eventType in [
+        'lead_captured', 'automation_triggered', 'campaign_sent',
+        'whatsapp_replied', 'stage_converted', 'asset_published'
+      ] &&
+      data.title is string && data.title.size() >= 1 && data.title.size() <= 160 &&
+      data.detail is string && data.detail.size() >= 1 && data.detail.size() <= 280 &&
+      data.channel is string && data.channel.size() <= 20 && data.channel in ['email', 'whatsapp', 'sms', 'web', 'crm'] &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidAudienceList(data) {
+      return data.keys().hasAll([
+        'workspaceId', 'ownerId', 'name', 'description', 'category',
+        'defaultConsent', 'defaultTags', 'colorAccent', 'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'workspaceId', 'ownerId', 'name', 'description', 'category',
+        'defaultConsent', 'defaultTags', 'colorAccent', 'killSwitchEnabled',
+        'killSwitchTags', 'createdAt', 'updatedAt'
+      ]) &&
+      data.workspaceId is string && data.workspaceId.size() >= 1 && data.workspaceId.size() <= 128 && data.workspaceId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId == request.auth.uid &&
+      data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
+      data.description is string && data.description.size() <= 300 &&
+      data.category is string && data.category.size() <= 32 && data.category in ['newsletter', 'vip_buyers', 'lead_magnet', 'webinar', 'custom'] &&
+      data.defaultConsent is string && data.defaultConsent.size() <= 32 && data.defaultConsent in ['opted_in', 'pending_double_opt_in', 'unsubscribed'] &&
+      data.defaultTags is list && data.defaultTags.size() <= 10 &&
+      (data.defaultTags.size() == 0 || (data.defaultTags[0] is string && data.defaultTags[0].size() <= 32)) &&
+      data.colorAccent is string && data.colorAccent.size() <= 20 && data.colorAccent in ['emerald', 'amber', 'indigo', 'rose'] &&
+      (!('killSwitchEnabled' in data) || data.killSwitchEnabled is bool) &&
+      (!('killSwitchTags' in data) || (
+        data.killSwitchTags is list &&
+        data.killSwitchTags.size() <= 10 &&
+        (data.killSwitchTags.size() == 0 || (data.killSwitchTags[0] is string && data.killSwitchTags[0].size() <= 32))
+      )) &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidAutoResponder(data) {
+      return data.keys().hasAll([
+        'workspaceId', 'ownerId', 'name', 'targetList', 'triggerMessage',
+        'responseMessage', 'channel', 'status', 'triggeredCount', 'sentCount',
+        'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'workspaceId', 'ownerId', 'name', 'targetList', 'triggerMessage',
+        'responseMessage', 'channel', 'matchType', 'subjectLine', 'status',
+        'triggeredCount', 'sentCount', 'createdAt', 'updatedAt'
+      ]) &&
+      data.workspaceId is string && data.workspaceId.size() >= 1 && data.workspaceId.size() <= 128 && data.workspaceId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId == request.auth.uid &&
+      data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+      data.targetList is string && data.targetList.size() >= 1 && data.targetList.size() <= 100 &&
+      data.triggerMessage is string && data.triggerMessage.size() >= 1 && data.triggerMessage.size() <= 500 &&
+      data.responseMessage is string && data.responseMessage.size() >= 1 && data.responseMessage.size() <= 2000 &&
+      data.channel is string && data.channel.size() <= 20 && data.channel in ['whatsapp', 'email', 'sms'] &&
+      (!('matchType' in data) || (data.matchType is string && data.matchType.size() <= 24 && data.matchType in ['contains', 'exact', 'any_inbound'])) &&
+      (!('subjectLine' in data) || (data.subjectLine is string && data.subjectLine.size() <= 160)) &&
+      data.status is string && data.status.size() <= 20 && data.status in ['live', 'paused', 'draft'] &&
+      data.triggeredCount is number && data.triggeredCount >= 0 &&
+      data.sentCount is number && data.sentCount >= 0 &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidInboxThread(data) {
+      return data.keys().hasAll([
+        'workspaceId', 'ownerId', 'leadName', 'leadEmail', 'leadPhone',
+        'listName', 'channel', 'subjectOrContext', 'lastLeadMessage',
+        'lastMessagePreview', 'lastSender', 'status', 'unreadCount',
+        'messagesJson', 'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'workspaceId', 'ownerId', 'leadName', 'leadEmail', 'leadPhone',
+        'listName', 'channel', 'subjectOrContext', 'lastLeadMessage',
+        'lastMessagePreview', 'lastSender', 'status', 'unreadCount',
+        'messagesJson', 'createdAt', 'updatedAt'
+      ]) &&
+      data.workspaceId is string && data.workspaceId.size() >= 1 && data.workspaceId.size() <= 128 && data.workspaceId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId == request.auth.uid &&
+      data.leadName is string && data.leadName.size() >= 1 && data.leadName.size() <= 120 &&
+      data.leadEmail is string && data.leadEmail.size() <= 150 &&
+      data.leadPhone is string && data.leadPhone.size() <= 40 &&
+      data.listName is string && data.listName.size() >= 1 && data.listName.size() <= 100 &&
+      data.channel is string && data.channel.size() <= 20 && data.channel in ['whatsapp', 'email', 'sms'] &&
+      data.subjectOrContext is string && data.subjectOrContext.size() >= 1 && data.subjectOrContext.size() <= 160 &&
+      data.lastLeadMessage is string && data.lastLeadMessage.size() >= 1 && data.lastLeadMessage.size() <= 2000 &&
+      data.lastMessagePreview is string && data.lastMessagePreview.size() >= 1 && data.lastMessagePreview.size() <= 500 &&
+      data.lastSender is string && data.lastSender.size() <= 24 && data.lastSender in ['lead', 'operator', 'autoresponder'] &&
+      data.status is string && data.status.size() <= 20 && data.status in ['unread', 'replied', 'archived'] &&
+      data.unreadCount is number && data.unreadCount >= 0 &&
+      data.messagesJson is string && data.messagesJson.size() >= 2 && data.messagesJson.size() <= 20000 &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    // =========================================================================
+    // 3. COLLECTION RULES
+    // =========================================================================
+
+    // Admins collection (Read-only lookup for system role checks)
+    match /admins/{adminId} {
+      allow get: if isVerified() && isValidId(adminId) && request.auth.uid == adminId;
+      allow list, create, update, delete: if false;
+    }
+
+    // Connection test endpoint (Deny all client reads/writes while allowing server reachability check)
+    match /test/{docId} {
+      allow read, write: if false;
+    }
+
+    // Workspaces (Root Tenant Document)
+    match /workspaces/{workspaceId} {
+      allow get: if isVerified() && isValidId(workspaceId) && (
+        request.auth.uid == workspaceId || isAdmin()
+      );
+      allow list: if isVerified() && existing().ownerId == request.auth.uid;
+      allow create: if isVerified() &&
+        isValidId(workspaceId) &&
+        workspaceId == request.auth.uid &&
+        isValidWorkspace(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isVerified() &&
+        isValidId(workspaceId) &&
+        isValidWorkspace(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() ||
+          (
+            existing().ownerId == request.auth.uid && (
+              // Action 1: Update workspace profile & regional preferences
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'name', 'category', 'timezone', 'currency', 'senderName',
+                'whatsappConnected', 'smsConnected', 'emailConnected',
+                'notifyNewLeads', 'notifyCampaigns', 'updatedAt'
+              ])
+            )
+          )
+        );
+      allow delete: if false;
+
+      // Subcollection: Team Members (Governed by Master Gate on parent workspace)
+      match /members/{memberId} {
+        allow get: if isVerified() &&
+          isValidId(workspaceId) &&
+          isValidId(memberId) &&
+          isWorkspaceOwner(workspaceId);
+        allow list: if isVerified() && existing().ownerId == request.auth.uid;
+        allow create: if isVerified() &&
+          isValidId(workspaceId) &&
+          isValidId(memberId) &&
+          isValidWorkspaceMember(incoming()) &&
+          incoming().workspaceId == workspaceId &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          isWorkspaceOwner(workspaceId);
+        allow update: if isVerified() &&
+          isValidId(workspaceId) &&
+          isValidId(memberId) &&
+          isValidWorkspaceMember(incoming()) &&
+          incoming().workspaceId == existing().workspaceId &&
+          incoming().ownerId == existing().ownerId &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          isWorkspaceOwner(workspaceId) && (
+            isAdmin() ||
+            (
+              existing().status != 'revoked' &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['memberName', 'role', 'status', 'updatedAt'])
+            )
+          );
+        allow delete: if isVerified() &&
+          isValidId(workspaceId) &&
+          isValidId(memberId) &&
+          isWorkspaceOwner(workspaceId);
+      }
+    }
+
+    // Split Collection for User PII & Provider Credentials
+    match /users/{userId}/private/{profileId} {
+      allow get: if isVerified() &&
+        isValidId(userId) &&
+        isValidId(profileId) &&
+        request.auth.uid == userId;
+      allow list: if false;
+      allow create: if isVerified() &&
+        isValidId(userId) &&
+        isValidId(profileId) &&
+        request.auth.uid == userId &&
+        isValidUserPrivateProfile(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isVerified() &&
+        isValidId(userId) &&
+        isValidId(profileId) &&
+        request.auth.uid == userId &&
+        isValidUserPrivateProfile(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'email', 'replyToEmail', 'phone', 'mailingAddress',
+          'whatsappPhoneId', 'smsSenderId', 'emailProviderDomain',
+          'whatsappBusinessNumber', 'customDomainEmail', 'useCustomDomainEmail',
+          'messagingIdentitiesJson', 'gatewayConfigJson',
+          'updatedAt'
+        ]);
+      allow delete: if false;
+    }
+
+    // Contacts (CRM Leads & Customers)
+    match /contacts/{contactId} {
+      allow get: if isVerified() &&
+        isValidId(contactId) &&
+        existing().ownerId == request.auth.uid &&
+        isWorkspaceOwner(existing().workspaceId);
+      allow list: if isVerified() && existing().ownerId == request.auth.uid;
+      allow create: if isVerified() &&
+        isValidId(contactId) &&
+        isValidContact(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isWorkspaceOwner(incoming().workspaceId);
+      allow update: if isVerified() &&
+        isValidId(contactId) &&
+        isValidContact(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().workspaceId == existing().workspaceId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        isWorkspaceOwner(existing().workspaceId) && (
+          isAdmin() ||
+          (
+            existing().ownerId == request.auth.uid && (
+              // Action 1: Update contact profile, funnel stage, or consent
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'fullName', 'email', 'phone', 'stage', 'temperature',
+                'source', 'consentStatus', 'listName', 'tags', 'ltv', 'notes',
+                'company', 'dealTitle', 'commChannels', 'customFields', 'updatedAt'
+              ])
+            )
+          )
+        );
+      allow delete: if isVerified() &&
+        isValidId(contactId) &&
+        existing().ownerId == request.auth.uid &&
+        isWorkspaceOwner(existing().workspaceId);
+    }
+
+    // Automations (Visual Workflows)
+    match /automations/{automationId} {
+      allow get: if isVerified() &&
+        isValidId(automationId) &&
+        existing().ownerId == request.auth.uid &&
+        isWorkspaceOwner(existing().workspaceId);
+      allow list: if isVerified() && existing().ownerId == request.auth.uid;
+      allow create: if isVerified() &&
+        isValidId(automationId) &&
+        isValidAutomation(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isWorkspaceOwner(incoming().workspaceId);
+      allow update: if isVerified() &&
+        isValidId(automationId) &&
+        isValidAutomation(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().workspaceId == existing().workspaceId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        isWorkspaceOwner(existing().workspaceId) && (
+          isAdmin() ||
+          (
+            existing().ownerId == request.auth.uid &&
+            existing().status != 'archived' && (
+              // Action 1: Toggle status or edit workflow configuration
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'name', 'triggerType', 'triggerDetail', 'targetList', 'stepsSummary',
+                'channels', 'status', 'enrolledCount', 'completedCount',
+                'conversionRate', 'version', 'flowGraphJson', 'updatedAt'
+              ])
+            )
+          )
+        );
+      allow delete: if isVerified() &&
+        isValidId(automationId) &&
+        existing().ownerId == request.auth.uid &&
+        isWorkspaceOwner(existing().workspaceId);
+    }
+
+    // Campaigns (Email, SMS, WhatsApp Broadcasts)
+    match /campaigns/{campaignId} {
+      allow get: if isVerified() &&
+        isValidId(campaignId) &&
+        existing().ownerId == request.auth.uid &&
+        isWorkspaceOwner(existing().workspaceId);
+      allow list: if isVerified() && existing().ownerId == request.auth.uid;
+      allow create: if isVerified() &&
+        isValidId(campaignId) &&
+        isValidCampaign(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isWorkspaceOwner(incoming().workspaceId);
+      allow update: if isVerified() &&
+        isValidId(campaignId) &&
+        isValidCampaign(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().workspaceId == existing().workspaceId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        isWorkspaceOwner(existing().workspaceId) && (
+          isAdmin() ||
+          (
+            existing().ownerId == request.auth.uid && (
+              // Action 1: Edit draft/scheduled campaign, dispatch broadcast, or record delivery/open/click/bounce/unsubscribe tracking
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'name', 'channel', 'targetList', 'subjectOrTemplate',
+                'messageBody', 'status', 'recipientCount', 'deliveredCount',
+                'openedCount', 'clickedCount', 'bouncedCount', 'unsubscribedCount',
+                'preheader', 'templateId', 'segmentFilter', 'scheduledAt',
+                'blocksJson', 'overrideFromIdentity', 'updatedAt'
+              ])
+            )
+          )
+        );
+      allow delete: if isVerified() &&
+        isValidId(campaignId) &&
+        existing().ownerId == request.auth.uid &&
+        isWorkspaceOwner(existing().workspaceId);
+    }
+
+    // Capture Assets (Landing Pages & Lead Forms)
+    match /assets/{assetId} {
+      allow get: if isVerified() &&
+        isValidId(assetId) &&
+        existing().ownerId == request.auth.uid &&
+        isWorkspaceOwner(existing().workspaceId);
+      allow list: if isVerified() && existing().ownerId == request.auth.uid;
+      allow create: if isVerified() &&
+        isValidId(assetId) &&
+        isValidCaptureAsset(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isWorkspaceOwner(incoming().workspaceId);
+      allow update: if isVerified() &&
+        isValidId(assetId) &&
+        isValidCaptureAsset(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().workspaceId == existing().workspaceId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        isWorkspaceOwner(existing().workspaceId) && (
+          isAdmin() ||
+          (
+            existing().ownerId == request.auth.uid &&
+            existing().status != 'archived' && (
+              // Action 1: Update landing page / form configuration or metrics
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'title', 'assetType', 'slug', 'headline', 'subheadline',
+                'ctaText', 'redirectUrl', 'toolFormat', 'targetList',
+                'requireDoubleOptIn', 'status', 'viewsCount', 'submissionsCount', 'updatedAt'
+              ])
+            )
+          )
+        );
+      allow delete: if isVerified() &&
+        isValidId(assetId) &&
+        existing().ownerId == request.auth.uid &&
+        isWorkspaceOwner(existing().workspaceId);
+    }
+
+    // Chatbot Flows (Official WhatsApp Cloud API Chatbots)
+    match /chatbots/{chatbotId} {
+      allow get: if isVerified() &&
+        isValidId(chatbotId) &&
+        existing().ownerId == request.auth.uid &&
+        isWorkspaceOwner(existing().workspaceId);
+      allow list: if isVerified() && existing().ownerId == request.auth.uid;
+      allow create: if isVerified() &&
+        isValidId(chatbotId) &&
+        isValidChatbotFlow(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isWorkspaceOwner(incoming().workspaceId);
+      allow update: if isVerified() &&
+        isValidId(chatbotId) &&
+        isValidChatbotFlow(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().workspaceId == existing().workspaceId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        isWorkspaceOwner(existing().workspaceId) && (
+          isAdmin() ||
+          (
+            existing().ownerId == request.auth.uid &&
+            existing().status != 'archived' && (
+              // Action 1: Update chatbot flow or session counters
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'name', 'triggerKeyword', 'matchType', 'welcomeMessage',
+                'menuOptions', 'handoffToHuman', 'status',
+                'sessionsCount', 'resolvedCount', 'updatedAt'
+              ])
+            )
+          )
+        );
+      allow delete: if isVerified() &&
+        isValidId(chatbotId) &&
+        existing().ownerId == request.auth.uid &&
+        isWorkspaceOwner(existing().workspaceId);
+    }
+
+    // Tasks (CRM Tasks & Compliance Checklist)
+    match /tasks/{taskId} {
+      allow get: if isVerified() &&
+        isValidId(taskId) &&
+        existing().ownerId == request.auth.uid &&
+        isWorkspaceOwner(existing().workspaceId);
+      allow list: if isVerified() && existing().ownerId == request.auth.uid;
+      allow create: if isVerified() &&
+        isValidId(taskId) &&
+        isValidTaskItem(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isWorkspaceOwner(incoming().workspaceId);
+      allow update: if isVerified() &&
+        isValidId(taskId) &&
+        isValidTaskItem(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().workspaceId == existing().workspaceId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        isWorkspaceOwner(existing().workspaceId) && (
+          isAdmin() ||
+          (
+            existing().ownerId == request.auth.uid && (
+              // Action 1: Update task details or mark completed
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'title', 'category', 'priority', 'dueDate', 'relatedEntity', 'status', 'updatedAt'
+              ])
+            )
+          )
+        );
+      allow delete: if isVerified() &&
+        isValidId(taskId) &&
+        existing().ownerId == request.auth.uid &&
+        isWorkspaceOwner(existing().workspaceId);
+    }
+
+    // Activities (Customer Journey & Event Log)
+    match /activities/{activityId} {
+      allow get: if isVerified() &&
+        isValidId(activityId) &&
+        existing().ownerId == request.auth.uid &&
+        isWorkspaceOwner(existing().workspaceId);
+      allow list: if isVerified() && existing().ownerId == request.auth.uid;
+      allow create: if isVerified() &&
+        isValidId(activityId) &&
+        isValidActivityLog(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isWorkspaceOwner(incoming().workspaceId);
+      allow update: if false;
+      allow delete: if isVerified() &&
+        isValidId(activityId) &&
+        existing().ownerId == request.auth.uid &&
+        isWorkspaceOwner(existing().workspaceId);
+    }
+
+    // Audience Lists (Dedicated Contact Lists & Storage Containers)
+    match /lists/{listId} {
+      allow get: if isVerified() &&
+        isValidId(listId) &&
+        existing().ownerId == request.auth.uid &&
+        isWorkspaceOwner(existing().workspaceId);
+      allow list: if isVerified() && existing().ownerId == request.auth.uid;
+      allow create: if isVerified() &&
+        isValidId(listId) &&
+        isValidAudienceList(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isWorkspaceOwner(incoming().workspaceId);
+      allow update: if isVerified() &&
+        isValidId(listId) &&
+        isValidAudienceList(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().workspaceId == existing().workspaceId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        isWorkspaceOwner(existing().workspaceId) && (
+          isAdmin() ||
+          (
+            existing().ownerId == request.auth.uid && (
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'name', 'description', 'category', 'defaultConsent',
+                'defaultTags', 'colorAccent', 'killSwitchEnabled',
+                'killSwitchTags', 'updatedAt'
+              ])
+            )
+          )
+        );
+      allow delete: if isVerified() &&
+        isValidId(listId) &&
+        existing().ownerId == request.auth.uid &&
+        isWorkspaceOwner(existing().workspaceId);
+    }
+
+    // Auto Responders (List-Targeted Auto-Pilot Trigger & Reply Rules)
+    match /autoresponders/{autoResponderId} {
+      allow get: if isVerified() &&
+        isValidId(autoResponderId) &&
+        existing().ownerId == request.auth.uid &&
+        isWorkspaceOwner(existing().workspaceId);
+      allow list: if isVerified() && existing().ownerId == request.auth.uid;
+      allow create: if isVerified() &&
+        isValidId(autoResponderId) &&
+        isValidAutoResponder(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isWorkspaceOwner(incoming().workspaceId);
+      allow update: if isVerified() &&
+        isValidId(autoResponderId) &&
+        isValidAutoResponder(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().workspaceId == existing().workspaceId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        isWorkspaceOwner(existing().workspaceId) && (
+          isAdmin() ||
+          (
+            existing().ownerId == request.auth.uid && (
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'name', 'targetList', 'triggerMessage', 'responseMessage',
+                'channel', 'matchType', 'subjectLine', 'status',
+                'triggeredCount', 'sentCount', 'updatedAt'
+              ])
+            )
+          )
+        );
+      allow delete: if isVerified() &&
+        isValidId(autoResponderId) &&
+        existing().ownerId == request.auth.uid &&
+        isWorkspaceOwner(existing().workspaceId);
+    }
+
+    // Inbox Threads (Lead Replies & Manual Operator Replies across WhatsApp, Email, and SMS)
+    match /inbox_threads/{threadId} {
+      allow get: if isVerified() &&
+        isValidId(threadId) &&
+        existing().ownerId == request.auth.uid &&
+        isWorkspaceOwner(existing().workspaceId);
+      allow list: if isVerified() && existing().ownerId == request.auth.uid;
+      allow create: if isVerified() &&
+        isValidId(threadId) &&
+        isValidInboxThread(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isWorkspaceOwner(incoming().workspaceId);
+      allow update: if isVerified() &&
+        isValidId(threadId) &&
+        isValidInboxThread(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().workspaceId == existing().workspaceId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        isWorkspaceOwner(existing().workspaceId) && (
+          isAdmin() ||
+          (
+            existing().ownerId == request.auth.uid && (
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'leadName', 'leadEmail', 'leadPhone', 'listName', 'channel',
+                'subjectOrContext', 'lastLeadMessage', 'lastMessagePreview',
+                'lastSender', 'status', 'unreadCount', 'messagesJson', 'updatedAt'
+              ])
+            )
+          )
+        );
+      allow delete: if isVerified() &&
+        isValidId(threadId) &&
+        existing().ownerId == request.auth.uid &&
+        isWorkspaceOwner(existing().workspaceId);
+    }
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "name": "FlowPilot",
+  "description": "Free all-in-one marketing automation platform, omnichannel CRM, landing page builder, and compliant Email, SMS, and WhatsApp workflow engine for digital creators, agencies, and growing businesses.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

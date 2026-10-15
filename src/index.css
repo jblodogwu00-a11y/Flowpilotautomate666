@@ -1,0 +1,228 @@
+@import "tailwindcss";
+
+@layer base {
+  /* ==========================================================================
+     1. TYPOGRAPHY & LIGHT MODE (DEFAULT: 60% ANTI-GLARE OFF-WHITE)
+     ========================================================================== */
+  :root {
+    /* Typography System */
+    --font-display: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --font-sans: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+    /* 60% Dominant Base — Anti-Glare Off-White & Crisp Surface Hierarchy */
+    --bg-canvas: #F8FAFC;
+    --bg-surface: #FFFFFF;
+    --bg-elevated: #F1F5F9;
+    --bg-glass: rgba(255, 255, 255, 0.88);
+
+    /* 30% Structural Neutrals — High-Contrast Ink & Soft Layout Grid Borders */
+    --text-primary: #0F172A;
+    --text-secondary: #334155;
+    --text-muted: #64748B;
+    --border-grid: #E2E8F0;
+    --border-strong: #CBD5E1;
+
+    /* 10% Action Accent — Vibrant Cobalt Blue & Electric Cyan */
+    --accent-primary: #2563EB;
+    --accent-primary-hover: #1D4ED8;
+    --accent-primary-soft: rgba(37, 99, 235, 0.10);
+    --accent-cyan: #06B6D4;
+    --accent-cyan-soft: rgba(6, 182, 212, 0.12);
+
+    /* 3. Semantic Status Mapping (Enterprise Workflow Telemetry) */
+    --status-success-fg: #047857;
+    --status-success-bg: #ECFDF5;
+    --status-success-border: #A7F3D0;
+    --status-success-dot: #10B981;
+
+    --status-warning-fg: #B45309;
+    --status-warning-bg: #FFFBEB;
+    --status-warning-border: #FDE68A;
+    --status-warning-dot: #F59E0B;
+
+    --status-failure-fg: #BE123C;
+    --status-failure-bg: #FFF1F2;
+    --status-failure-border: #FECDD3;
+    --status-failure-dot: #E11D48;
+  }
+
+  /* ==========================================================================
+     2. DARK MODE OVERRIDES (60% DEEP SLATE / NAVY ENTERPRISE ARCHETYPE)
+     ========================================================================== */
+  html.dark,
+  html[data-theme="dark"] {
+    color-scheme: dark;
+
+    /* 60% Dominant Base — Deeply Premium Slate/Navy Dark Tone */
+    --bg-canvas: #090D16;
+    --bg-surface: #0F172A;
+    --bg-elevated: #1E293B;
+    --bg-glass: rgba(15, 23, 42, 0.88);
+
+    /* 30% Structural Neutrals — High-Contrast Alabaster Ink & Soft Navy Borders */
+    --text-primary: #F8FAFC;
+    --text-secondary: #CBD5E1;
+    --text-muted: #94A3B8;
+    --border-grid: #1E293B;
+    --border-strong: #334155;
+
+    /* 10% Action Accent — Luminous Cobalt Blue & Electric Cyan for Active Nodes */
+    --accent-primary: #3B82F6;
+    --accent-primary-hover: #2563EB;
+    --accent-primary-soft: rgba(59, 130, 246, 0.16);
+    --accent-cyan: #22D3EE;
+    --accent-cyan-soft: rgba(34, 211, 238, 0.14);
+
+    /* Semantic Status Mapping (Dark Mode High-Visibility Tuning) */
+    --status-success-fg: #34D399;
+    --status-success-bg: rgba(16, 185, 129, 0.14);
+    --status-success-border: rgba(16, 185, 129, 0.35);
+    --status-success-dot: #10B981;
+
+    --status-warning-fg: #FBBF24;
+    --status-warning-bg: rgba(245, 158, 11, 0.14);
+    --status-warning-border: rgba(245, 158, 11, 0.35);
+    --status-warning-dot: #F59E0B;
+
+    --status-failure-fg: #FB7185;
+    --status-failure-bg: rgba(225, 29, 72, 0.16);
+    --status-failure-border: rgba(225, 29, 72, 0.40);
+    --status-failure-dot: #F43F5E;
+  }
+
+  html {
+    font-size: 14px;
+    scroll-behavior: smooth;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  @media (min-width: 640px) {
+    html {
+      font-size: 15px;
+    }
+  }
+
+  @media (min-width: 1024px) {
+    html {
+      font-size: 15.5px;
+    }
+  }
+
+  body {
+    font-family: var(--font-sans);
+    color: var(--text-primary);
+    background-color: var(--bg-canvas);
+    line-height: 1.55;
+    letter-spacing: -0.005em;
+    overflow-x: hidden;
+    transition: background-color 180ms ease, color 180ms ease;
+  }
+
+  /* Primary UI & Headings ('Inter') */
+  h1, h2, h3, h4, .font-display {
+    font-family: var(--font-display);
+    text-wrap: balance;
+    letter-spacing: -0.022em;
+    line-height: 1.22;
+  }
+
+  /* Body & UI Labels ('DM Sans') */
+  .font-sans, label, p, input, select, textarea, button {
+    font-family: var(--font-sans);
+  }
+
+  /* Code Blocks, JSON Trees, Logs & Variables ('JetBrains Mono') */
+  code, pre, kbd, samp, .font-mono, .tabular-nums {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    font-feature-settings: "zero" 1, "ss01" 1;
+  }
+}
+
+/* ==========================================================================
+   GLOBAL DARK MODE SURFACE & BORDER ADAPTATION FOR WORKSPACE VIEWS
+   ========================================================================== */
+html.dark body,
+html.dark .bg-\[\#F8FAFC\],
+html.dark .bg-\[\#FAF8F5\] {
+  background-color: var(--bg-canvas) !important;
+  color: var(--text-primary) !important;
+}
+
+html.dark .bg-white {
+  background-color: var(--bg-surface) !important;
+  color: var(--text-primary) !important;
+}
+
+html.dark .bg-slate-50,
+html.dark .bg-slate-100 {
+  background-color: var(--bg-elevated) !important;
+  color: var(--text-primary) !important;
+}
+
+html.dark .border-slate-100,
+html.dark .border-slate-200,
+html.dark .border-slate-300,
+html.dark .divide-slate-100 > :not([hidden]) ~ :not([hidden]),
+html.dark .divide-slate-200 > :not([hidden]) ~ :not([hidden]) {
+  border-color: var(--border-grid) !important;
+}
+
+html.dark .text-slate-950,
+html.dark .text-slate-900,
+html.dark .text-\[\#0F172A\] {
+  color: var(--text-primary) !important;
+}
+
+html.dark .text-slate-800,
+html.dark .text-slate-700 {
+  color: var(--text-secondary) !important;
+}
+
+html.dark .text-slate-600,
+html.dark .text-slate-500 {
+  color: var(--text-muted) !important;
+}
+
+html.dark input:not([type="checkbox"]):not([type="radio"]),
+html.dark select,
+html.dark textarea {
+  background-color: #090D16 !important;
+  color: #F8FAFC !important;
+  border-color: #334155 !important;
+}
+
+html.dark input:focus,
+html.dark select:focus,
+html.dark textarea:focus {
+  border-color: #3B82F6 !important;
+  outline: none;
+}
+
+/* Semantic Status Utility Classes */
+.status-pill-success {
+  color: var(--status-success-fg);
+  background-color: var(--status-success-bg);
+  border: 1px solid var(--status-success-border);
+}
+
+.status-pill-warning {
+  color: var(--status-warning-fg);
+  background-color: var(--status-warning-bg);
+  border: 1px solid var(--status-warning-border);
+}
+
+.status-pill-failure {
+  color: var(--status-failure-fg);
+  background-color: var(--status-failure-bg);
+  border: 1px solid var(--status-failure-border);
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}

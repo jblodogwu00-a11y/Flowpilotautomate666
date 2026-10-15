@@ -1,0 +1,27 @@
+[
+  {
+    "uid": "usr_e4f8cbf610c6b3e01f841cf7",
+    "email": "test.operator@flowpilot.app",
+    "displayName": "Test Operator",
+    "workspaceName": "Test Workspace",
+    "passwordHash": "3bee13fae0d9b5ad6c811c05f6fbca924896d1c364f278a350bc859d58b9d95a",
+    "provider": "password",
+    "emailVerified": true,
+    "verificationCode": "166509",
+    "verificationCodeExpiresAt": "2026-10-15T07:05:18.633Z",
+    "verificationLastSentAt": "2026-10-15T06:05:18.633Z",
+    "createdAt": "2026-10-15T06:05:18.633Z",
+    "updatedAt": "2026-10-15T06:05:24.064Z"
+  },
+  {
+    "uid": "usr_2323eb4e5b85e07538b894f4",
+    "email": "google.lead@gmail.com",
+    "displayName": "Google Lead Operator",
+    "workspaceName": "Google Studio",
+    "passwordHash": "",
+    "provider": "google.com",
+    "emailVerified": true,
+    "createdAt": "2026-10-15T06:05:27.754Z",
+    "updatedAt": "2026-10-15T06:05:27.754Z"
+  }
+]
