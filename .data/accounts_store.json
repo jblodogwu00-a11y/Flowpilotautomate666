@@ -23,5 +23,52 @@
     "emailVerified": true,
     "createdAt": "2026-10-15T06:05:27.754Z",
     "updatedAt": "2026-10-15T06:05:27.754Z"
+  },
+  {
+    "uid": "usr_c1843db767ca466bba17f431",
+    "email": "jonajukej777@gmail.com",
+    "displayName": "Jona Jukej",
+    "workspaceName": "Jonajukej777's Workspace",
+    "passwordHash": "311fabac6f03af573135be0ce152432e866835af67e185fa439614561bf3c7b4",
+    "provider": "google.com",
+    "emailVerified": true,
+    "createdAt": "2026-10-15T21:25:13.124Z",
+    "updatedAt": "2026-10-15T21:36:57.039Z"
+  },
+  {
+    "uid": "usr_73a68614fda1717a90e37312",
+    "email": "google.operator@flowpilot.app",
+    "displayName": "Google Operator",
+    "workspaceName": "Google Operator's Workspace",
+    "passwordHash": "",
+    "provider": "google.com",
+    "emailVerified": true,
+    "createdAt": "2026-10-15T21:25:13.878Z",
+    "updatedAt": "2026-10-15T21:25:13.878Z"
+  },
+  {
+    "uid": "usr_a1050475a8dc5a5bc71cd667",
+    "email": "testuser_flowpilot@example.com",
+    "displayName": "Test Operator",
+    "workspaceName": "Test Operator's Workspace",
+    "passwordHash": "fcb73e31ee2ec2ddc7d66680f4979c29868e2f6d49734528307fe3232428bcc8",
+    "provider": "password",
+    "emailVerified": true,
+    "verificationCode": "828266",
+    "verificationCodeExpiresAt": "2026-10-15T22:36:22.725Z",
+    "verificationLastSentAt": "2026-10-15T21:36:22.724Z",
+    "createdAt": "2026-10-15T21:36:22.724Z",
+    "updatedAt": "2026-10-15T21:36:22.724Z"
+  },
+  {
+    "uid": "usr_1d903244f458a13fcb4cb5b2",
+    "email": "fresh_signup_user@example.com",
+    "displayName": "Fresh User",
+    "workspaceName": "Fresh User's Workspace",
+    "passwordHash": "f0bf86b11f6137a72993a77a5625ba02c85bd7e1173de16d607ca441a7384867",
+    "provider": "password",
+    "emailVerified": true,
+    "createdAt": "2026-10-15T21:36:33.799Z",
+    "updatedAt": "2026-10-15T21:36:41.993Z"
   }
 ]

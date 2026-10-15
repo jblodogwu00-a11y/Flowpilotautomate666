@@ -1,94 +1,91 @@
-# Comprehensive System Verification, Multi-Channel Live Messaging & Kill Switch Diagnostics Plan
+# Authentication Repair, OTP Email Verification & Seamless Access Plan
 
-A rigorous testing and diagnostic plan to verify that all features across FlowPilot operate flawlessly, ensure live messaging delivery across Email, WhatsApp, and SMS is verified and operational, validate the Phase 1 & Phase 2 Kill Switch end-to-end, and integrate a dedicated 1-Click System Diagnostics and Test Panel.
+A targeted fix for manual and Google authentication to eliminate credential errors, implement a reliable 6-digit OTP verification flow for account creation and sign-in, and provide seamless access in all browser environments.
 
 ---
 
-## User Review & Critical Decisions
+## User Review & Clarifications Confirmed
 
 > [!IMPORTANT]
-> Based on your confirmed choices:
-> 1. **Channels to Verify**: All live communication channels—**Email, WhatsApp, and SMS**—will be thoroughly tested and audited.
-> 2. **Kill Switch Verification**: We will run complete end-to-end testing via both the **Daily 5-Minute CSV Import** routine and **Manual Contact Tagging** in the CRM, proving that any lead tagged with `Purchased_Course` has their scheduled messages immediately ejected.
-> 3. **1-Click System Diagnostics Panel**: An accessible, dedicated **Live Diagnostics & Test Panel** will be added to the application, allowing you to audit system health and trigger test dispatches in real-time with zero friction.
+> Based on your explicit requirements:
+> 1. **Authentication Error Resolution**: Both manual and Google authentication are failing with `"Authentication failed. Please check your credentials."`. We will eliminate this failure path by fixing credential validation, account synchronization between the client and server vault, and handling iframe popup restrictions gracefully.
+> 2. **OTP Verification for Account Creation**: When creating an account, users will receive a **6-digit OTP verification code** via email to verify and activate their account.
+> 3. **Seamless Login & Fallback Options**: Users will have the option to log in directly via password, authenticate via **1-click Email OTP Code**, or use Google Sign-In with an automatic fallback when third-party iframe popups are blocked by the browser.
 
 ---
 
-## 1. Feature Verification Scope
+## 1. Root Cause Analysis
 
-### A. Core Platform & Navigation
-- **Workspace & State**: Confirm zero errors on startup, clean state hydration between local storage, in-memory state, and Firebase Firestore.
-- **Navigation & Views**: Verify seamless transitions across Dashboard Overview, Contacts CRM, Automation Engine, Funnel Builder, Inbox, AutoResponders, Chatbots, Lists & Audiences, Campaigns, Capture Assets, and Workspace Settings.
-- **Authentication**: Confirm guest mode, email/password authentication, and Google Workspace OAuth flows without unhandled exceptions.
-
-### B. Live Multi-Channel Messaging Engine
-- **Email Delivery**:
-  - Verify Gmail OAuth direct sending via Bearer token.
-  - Verify Built-in Relay (`/api/relay/send-email` / simulated carrier dispatch).
-  - Verify Direct Mailto fallback client launch URLs for instant manual sending.
-- **WhatsApp Delivery**:
-  - Verify Meta Cloud API & Twilio WhatsApp connectors.
-  - Verify Built-in Relay (`/api/relay/send-whatsapp`).
-  - Verify direct `https://wa.me/...` click-to-chat relay URLs with URL-encoded templates and lead variable interpolation.
-- **SMS Delivery**:
-  - Verify Twilio SMS, Termii SMS, Africa's Talking integrations.
-  - Verify Built-in Relay (`/api/relay/send-sms`).
-  - Verify `sms:...` deep-link launching.
-- **Delivery Receipts & Audit Log**:
-  - Ensure every dispatch generates an unforgeable `receiptId`, logs the exact timestamp, provider used, recipient, and subject/body preview in both CRM Activity Logs and the Inbox conversation timeline.
-
-### C. Kill Switch Architecture (Phase 1 & Phase 2)
-- **Phase 1: Workflow Exit Condition Verification**:
-  - Confirm workflow canvases enforce `Tag is Purchased_Course` as an active exit rule.
-  - Verify that when a workflow step triggers, the scheduler inspects the contact's live tags before dispatching any queued message.
-- **Phase 2: Daily Sales CSV Import Ejection**:
-  - Test uploading or pasting buyer CSV data (Email or Phone numbers from affiliate platforms like Selar, Expertnaire, Stakecut, ClickBank).
-  - Verify matching against existing CRM leads by normalized email and international/local phone formats.
-  - Verify automatic application of the `Purchased_Course` tag with "Update existing contacts".
-  - Verify that all pending scheduled jobs for matched contacts are ejected (`halted_kill_switch`), leaving a clear audit trail.
-- **Manual Contact Tagging Ejection**:
-  - Add `Purchased_Course` to a contact via the Contact Drawer or inline tag editor and confirm scheduled messages for that contact are cancelled immediately.
+1. **Server-Side Account Store Mismatch**:
+   - In `server.ts` `/api/accounts/auth`, if an account was previously registered or seeded with a different password hash or provider type, the server was returning HTTP `401 {"ok": false, "error": "Invalid email or password..."}`.
+   - On the client side, `accountPersistenceService.ts` caught this and threw the generic error: `"Authentication failed. Please check your credentials."`.
+2. **Google Sign-In in Iframe Preview**:
+   - Firebase's `signInWithPopup(auth, googleProvider)` fails inside iframe sandbox environments due to browser third-party cookie and cross-origin popup restrictions.
+   - When popup failed and fell back, the server rejected requests if user hints or verification flags were mismatched.
+3. **OTP Code Delivery & Verification**:
+   - The sign-up flow needs a smooth, dedicated OTP screen where users immediately receive a 6-digit code to their email, can enter it with one click or auto-fill, and can resend or request an instant fallback code without losing their form state.
 
 ---
 
-## 2. 1-Click System Diagnostics & Test Panel
+## 2. Architectural Solution
 
-### Visual Design & Component
-- A dedicated modal and quick-access button in the top navigation bar (`System Diagnostics & Test`).
-- **Live Health Matrix**:
-  - 🟢 **Database & Sync**: Firestore connection & local cache sync status.
-  - 🟢 **Email Gateway**: Provider mode (Gmail OAuth / Relay / SMTP), configuration status.
-  - 🟢 **WhatsApp Gateway**: Phone configuration, API/Relay mode, wa.me relay readiness.
-  - 🟢 **SMS Gateway**: Carrier mode (Twilio/Termii/Relay), phone validation readiness.
-  - 🟢 **Automation Scheduler**: Active jobs, queued messages, halted/ejected jobs count.
-  - 🟢 **Kill Switch Subsystem**: Active exit rules, monitored tags, ejection responsiveness.
-- **Interactive 1-Click Test Actions**:
-  - **Test Email Dispatch**: Sends a test verification email to an entered address (or workspace admin) and returns the delivery receipt.
-  - **Test WhatsApp Dispatch**: Previews and triggers a live WhatsApp message with a test recipient number.
-  - **Test SMS Dispatch**: Executes a test SMS relay payload and displays the carrier status.
-  - **Simulate Kill Switch Ejection**: Schedules a dummy message for a test lead, simulates applying `Purchased_Course`, and confirms instant ejection from the queue with receipt verification.
+### A. Server Authentication Engine (`server.ts`)
+- **Robust Sign-In (`action: 'signin'`)**:
+  - Validates credentials smoothly against the persistent account vault.
+  - If password does not match, provides an immediate **"Send One-Time OTP Login Code"** option so the user can log in without resetting their workspace.
+  - Automatically provisions new accounts if the user signs in with an unrecorded email, ensuring zero dead ends.
+- **OTP Account Creation (`action: 'signup'`)**:
+  - Generates a cryptographically sound 6-digit OTP code with a 1-hour expiration.
+  - Dispatches the verification email through the multi-provider email gateway (or verified relay) directly to the user's email.
+  - Stores the OTP in the server vault and local registry.
+- **OTP Verification (`action: 'verify_code'`)**:
+  - Validates the 6-digit code against the account record.
+  - Activates the account, marks `emailVerified: true`, and returns the user's workspace snapshot.
+- **Google Sign-In (`action: 'google'`)**:
+  - Smoothly handles Google OAuth credentials and provides instant direct email confirmation for iframe environments (e.g., pre-filling the user's email `jonajukej777@gmail.com`).
+
+### B. Client Authentication Service (`accountPersistenceService.ts` & `firebase.ts`)
+- Enhance error formatting to display specific, actionable messages rather than the generic fallback.
+- Support `sendEmailOtpCode()` and `verifyEmailOtpCode()` methods.
+- Sync active session cleanly with both Firebase Auth and the local account store.
+
+### C. Enhanced Auth Modal (`AuthModal.tsx`)
+- **Sign Up Tab**:
+  - Input full name, email, and password.
+  - On submit, transitions directly to the **6-digit OTP Verification** screen.
+- **OTP Verification Screen**:
+  - Clean 6-digit numeric input with auto-focus and paste support.
+  - Shows exact recipient email and dispatched timestamp.
+  - **Resend Code** countdown timer and button.
+  - Direct dev-environment helper banner showing dispatch status.
+- **Sign In Tab**:
+  - Password login with clear toggle.
+  - "Forgot password?" and "Sign in with One-Time Email Code" links.
+- **Google Sign-In**:
+  - 1-click button with immediate iframe popup fallback detection that allows the user to confirm with their Google account.
 
 ---
 
 ## 3. Implementation Steps
 
-1. **Verify & Clean Existing Codebase**:
-   - Inspect all components for console errors, unhandled promise rejections, or missing type props.
-   - Verify that the Scheduler background interval in `server.ts` checks contact kill-switch conditions before dispatch.
-2. **Implement System Diagnostics Service & Component (`SystemDiagnosticsModal.tsx`)**:
-   - Create a clean, responsive modal following FlowPilot's architectural design guidelines.
-   - Implement diagnostic checks that ping `/api/health`, `/api/scheduler/jobs`, and channel configurations.
-   - Provide direct one-click action buttons with real-time feedback spinners and success checkmarks.
-3. **Mount Diagnostics in Navigation & Workspace**:
-   - Add a subtle status beacon / button in the App header (`System Health`) and inside Workspace Settings.
-4. **End-to-End Testing & Verification**:
-   - Execute `npm run build` to verify clean compilation with 0 errors.
-   - Run live dispatches and kill switch ejections in the environment.
+1. **Update Server Auth Route (`server.ts`)**:
+   - Refine `/api/accounts/auth` to support password signin, OTP dispatch, OTP verification, and resilient Google authentication without rejecting valid users.
+2. **Update Client Persistence Service (`accountPersistenceService.ts` & `firebase.ts`)**:
+   - Ensure clean parameter passing, detailed error handling, and robust OTP verification dispatch.
+3. **Enhance Auth Modal UI (`AuthModal.tsx`)**:
+   - Build the interactive OTP verification screen with 6-digit input boxes, resend trigger, and clear feedback.
+   - Pre-fill `jonajukej777@gmail.com` when available for fast testing.
+4. **Verification & Testing**:
+   - Test sign-up with OTP generation and validation.
+   - Test manual sign-in and Google sign-in.
+   - Verify compilation (`compile_applet`) and linting (`lint_applet`).
 
 ---
 
 ## 4. Acceptance Criteria
-- [x] `npm run build` succeeds without TypeScript or bundling errors.
-- [x] Email, WhatsApp, and SMS dispatches operate cleanly with receipts logged in CRM Activity and Inbox.
-- [x] Kill Switch instantly ejects queued jobs when `Purchased_Course` is applied via CSV import or manual tagging.
-- [x] 1-Click Diagnostics Panel allows users to verify all platform subsystems at any time with visible pass/fail indicators and test triggers.
+
+- [ ] New users get a 6-digit OTP verification code upon signing up to verify their account creation.
+- [ ] Entering the 6-digit OTP code successfully validates and activates the user account.
+- [ ] Manual email/password sign-in works without `"Authentication failed. Please check your credentials."` errors.
+- [ ] Google Sign-In operates reliably in both direct browser windows and iframe environments.
+- [ ] Full build succeeds without TypeScript or linting errors.

@@ -384,7 +384,7 @@ export async function pushServerWorkspaceSnapshot(
 }
 
 export async function syncAccountWithServer(params: {
-  action: 'signup' | 'verify_code' | 'resend_code' | 'signin' | 'google' | 'reset_password';
+  action: 'signup' | 'verify_code' | 'resend_code' | 'signin' | 'google' | 'reset_password' | 'send_otp';
   email: string;
   password?: string;
   newPassword?: string;
@@ -400,8 +400,10 @@ export async function syncAccountWithServer(params: {
   account: ActiveAccountSession;
   snapshot: WorkspaceSnapshot | null;
   requiresVerification?: boolean;
+  verificationCode?: string;
   verificationEmail?: VerificationEmailDispatchInfo;
   message?: string;
+  canSendOtp?: boolean;
 }> {
   const cleanEmail = params.email.trim().toLowerCase();
   const registry = getLocalAccountsRegistry();
@@ -444,9 +446,16 @@ export async function syncAccountWithServer(params: {
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok || data?.ok === false) {
-    throw new Error(
-      data?.error || 'Authentication failed. Please check your credentials.'
-    );
+    const errorMsg =
+      data?.error ||
+      (params.action === 'signin'
+        ? 'Sign in failed. Please verify your credentials or click "Sign in with OTP Code".'
+        : params.action === 'google'
+        ? 'Google sign in encountered an issue. Please click Direct Confirm with Google below.'
+        : 'Authentication failed. Please check your credentials or request a new OTP code.');
+    const err = new Error(errorMsg) as Error & { canSendOtp?: boolean };
+    err.canSendOtp = Boolean(data?.canSendOtp);
+    throw err;
   }
 
   if (params.action === 'reset_password') {
@@ -526,6 +535,7 @@ export async function syncAccountWithServer(params: {
       account: pendingSession,
       snapshot: null,
       requiresVerification: true,
+      verificationCode: data.verificationCode,
       verificationEmail: vEmail,
       message: data.message,
     };
@@ -576,6 +586,26 @@ export async function syncAccountWithServer(params: {
     snapshot: resolvedSnap,
     requiresVerification: false,
     message: data.message,
+  };
+}
+
+export async function sendLoginOtpCode(
+  email: string,
+  emailConnector?: VerificationEmailConnectorOverride
+): Promise<{
+  message: string;
+  verificationCode?: string;
+  verificationEmail?: VerificationEmailDispatchInfo;
+}> {
+  const syncRes = await syncAccountWithServer({
+    action: 'send_otp',
+    email,
+    emailConnector,
+  });
+  return {
+    message: syncRes.message || `A 6-digit OTP code has been dispatched to ${email}.`,
+    verificationCode: syncRes.verificationCode,
+    verificationEmail: syncRes.verificationEmail,
   };
 }
 
