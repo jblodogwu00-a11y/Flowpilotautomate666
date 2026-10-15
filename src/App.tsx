@@ -122,6 +122,7 @@ import { ChatbotsView } from './components/ChatbotsView';
 import { WorkspaceSettingsView } from './components/WorkspaceSettingsView';
 import { FlowPilotLogo } from './components/FlowPilotLogo';
 import { AuthModal, AuthModalMode } from './components/AuthModal';
+import { SystemDiagnosticsModal } from './components/SystemDiagnosticsModal';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import {
   ThemeMode,
@@ -181,6 +182,7 @@ export default function App() {
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authModalMode, setAuthModalMode] = useState<AuthModalMode>('signin');
   const [authBanner, setAuthBanner] = useState<string | null>(null);
+  const [diagnosticsModalOpen, setDiagnosticsModalOpen] = useState(false);
 
   // Quick-action modal triggers across tabs
   const [openContactModal, setOpenContactModal] = useState(false);
@@ -1462,7 +1464,7 @@ export default function App() {
         });
 
         if (cumulativeWaitSeconds > 0) {
-          void enqueueScheduledAutomationJobs([
+          await enqueueScheduledAutomationJobs([
             {
               automationId: auto.id,
               automationName: auto.name,
@@ -1482,11 +1484,19 @@ export default function App() {
               fromIdentity: node.config.overrideFromIdentity || undefined,
               subject: personalizedSubject,
               body: personalizedBody,
-              delaySeconds: Math.min(cumulativeWaitSeconds, 600),
+              delaySeconds: Math.min(cumulativeWaitSeconds, 86400 * 30),
               workspace,
               privateProfile,
             },
           ]);
+          dispatchedCount += 1;
+          await logActivityEvent(
+            'automation_triggered',
+            `Scheduled Follow-Up Enqueued (${stepChannel.toUpperCase()} in ${cumulativeWaitSeconds}s): ${node.title}`,
+            `Enqueued in Background Scheduler · Protected by Kill Switch exit tag (#${listKillSwitchTags.join(', #')}) for ${leadName}`,
+            'crm'
+          );
+          continue;
         }
 
         await deliverChannelMessage({
@@ -3341,6 +3351,17 @@ export default function App() {
                 <span className="xs:hidden sm:hidden">Broadcast</span>
               </button>
 
+              <button
+                type="button"
+                onClick={() => setDiagnosticsModalOpen(true)}
+                title="System Diagnostics, Multi-Channel Live Testing & Kill Switch Verification"
+                className="px-2.5 sm:px-3 py-1.5 text-xs font-bold text-emerald-950 bg-emerald-100 hover:bg-emerald-200 border border-emerald-300 rounded-lg transition-colors inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer shadow-2xs"
+              >
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-700" />
+                <span className="hidden sm:inline">Diagnostics &amp; Kill Switch</span>
+                <span className="sm:hidden">Diagnostics</span>
+              </button>
+
               {isSignedInAny && currentUser ? (
                 <div className="flex items-center gap-1.5 sm:gap-2 pl-2 border-l border-slate-200">
                   <button
@@ -3523,6 +3544,7 @@ export default function App() {
               activities={activities}
               onNavigate={setActiveTab}
               onQuickAction={handleQuickAction}
+              onOpenDiagnostics={() => setDiagnosticsModalOpen(true)}
               onCompleteTask={handleCompleteTask}
             />
           )}
@@ -3565,6 +3587,7 @@ export default function App() {
               onDeleteTask={handleDeleteTask}
               onLogActivity={logActivityEvent}
               onSimulateAutomationRun={handleSimulateAutomationRun}
+              onOpenDiagnostics={() => setDiagnosticsModalOpen(true)}
             />
           )}
 
@@ -3900,6 +3923,19 @@ export default function App() {
           }
           setViewMode('workspace');
         }}
+      />
+
+      <SystemDiagnosticsModal
+        isOpen={diagnosticsModalOpen}
+        onClose={() => setDiagnosticsModalOpen(false)}
+        currentUser={currentUser}
+        workspace={workspace}
+        privateProfile={privateProfile}
+        lists={lists}
+        contacts={contacts}
+        automations={automations}
+        onBulkImportContacts={handleBulkImportContacts}
+        onLogActivity={logActivityEvent}
       />
     </div>
   );

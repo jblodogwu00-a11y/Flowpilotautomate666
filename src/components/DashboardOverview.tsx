@@ -43,6 +43,7 @@ interface DashboardOverviewProps {
       | 'create_campaign'
       | 'send_broadcast'
   ) => void;
+  onOpenDiagnostics?: () => void;
   onCompleteTask: (task: TaskItem) => Promise<void>;
 }
 
@@ -57,6 +58,7 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
   activities,
   onNavigate,
   onQuickAction,
+  onOpenDiagnostics,
   onCompleteTask,
 }) => {
   // 1. Lead & Customer KPI Calculations
@@ -239,6 +241,17 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
               <Send className="w-3.5 h-3.5 text-slate-950" />
               <span>Send Broadcast</span>
             </button>
+
+            {onOpenDiagnostics && (
+              <button
+                type="button"
+                onClick={onOpenDiagnostics}
+                className="px-3 py-2 text-xs font-bold text-emerald-950 bg-emerald-400 hover:bg-emerald-300 rounded-xl transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer shadow-xs"
+              >
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-950" />
+                <span>Diagnostics &amp; Kill Switch</span>
+              </button>
+            )}
           </div>
         </div>
       </section>

@@ -29,6 +29,7 @@ import {
   Sparkles,
   CheckSquare,
   AlertCircle,
+  ShieldCheck,
 } from 'lucide-react';
 import {
   Contact,
@@ -80,6 +81,7 @@ interface ContactsCrmViewProps {
     channel: ActivityLog['channel']
   ) => Promise<void>;
   onSimulateAutomationRun: (auto: Automation) => Promise<void>;
+  onOpenDiagnostics?: () => void;
 }
 
 type CrmSubView = 'directory' | 'pipeline' | 'segments' | 'duplicates';
@@ -106,6 +108,7 @@ export const ContactsCrmView: React.FC<ContactsCrmViewProps> = ({
   onDeleteTask,
   onLogActivity,
   onSimulateAutomationRun,
+  onOpenDiagnostics,
 }) => {
   const [subView, setSubView] = useState<CrmSubView>('directory');
 
@@ -907,6 +910,16 @@ export const ContactsCrmView: React.FC<ContactsCrmViewProps> = ({
               <Upload className="w-3.5 h-3.5 text-emerald-400" />
               Import Contacts / Upload CSV (Kill Switch)
             </button>
+            {onOpenDiagnostics && (
+              <button
+                type="button"
+                onClick={onOpenDiagnostics}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-emerald-950 bg-emerald-100 hover:bg-emerald-200 border border-emerald-300 rounded-xl transition-colors cursor-pointer shadow-2xs"
+              >
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-700" />
+                <span>Diagnostics &amp; Kill Switch</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => handleExportCsv()}
