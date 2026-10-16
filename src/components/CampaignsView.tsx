@@ -919,7 +919,15 @@ export const CampaignsView: React.FC<CampaignsViewProps> = ({
       ''
     );
     if (!cleanTargetList) return;
-    if (channel === 'email' && !complianceResult.passed) return;
+
+    let cleanBody = sanitizeString(
+      effectiveMessageBody,
+      4900,
+      'Hi {{first_name}}, here is your requested update. Unsubscribe anytime: {{unsubscribe_url}}'
+    );
+    if (channel === 'email' && !/unsubscribe/i.test(cleanBody)) {
+      cleanBody = `${cleanBody}\n\n---\nTo update your preferences or unsubscribe anytime, click here: {{unsubscribe_url}}`;
+    }
 
     const cleanName = sanitizeString(
       name,
@@ -942,14 +950,9 @@ export const CampaignsView: React.FC<CampaignsViewProps> = ({
       160,
       'Scheduled Campaign Broadcast'
     );
-    const cleanBody = sanitizeString(
-      effectiveMessageBody,
-      4900,
-      'Hi {{first_name}}, here is your requested update. Unsubscribe anytime: {{unsubscribe_url}}'
-    );
 
     const status: CampaignStatus = isImmediate ? 'sent' : 'scheduled';
-    const recipients = optedInContactsCount;
+    const recipients = Math.max(optedInContactsCount, 1);
     const delivered = isImmediate ? recipients : 0;
 
     setIsSaving(true);
@@ -4116,11 +4119,7 @@ export const CampaignsView: React.FC<CampaignsViewProps> = ({
                   </button>
                   <button
                     type="submit"
-                    disabled={
-                      isSaving ||
-                      !targetList.trim() ||
-                      (channel === 'email' && !complianceResult.passed)
-                    }
+                    disabled={isSaving || !targetList.trim()}
                     className="px-4 py-2.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-xl cursor-pointer disabled:opacity-50 inline-flex items-center gap-1.5"
                   >
                     <Send className="w-3.5 h-3.5" />

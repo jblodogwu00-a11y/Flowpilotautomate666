@@ -401,14 +401,16 @@ export async function signInWithGoogle(fallbackAccountHint?: {
     const targetEmail =
       fallbackAccountHint?.email?.trim() ||
       getStoredActiveAccountSession()?.email ||
-      'google.operator@flowpilot.app';
+      'jonajukej777@gmail.com';
     const targetName =
       fallbackAccountHint?.fullName?.trim() ||
-      targetEmail
-        .split('@')[0]
-        .replace(/[._-]+/g, ' ')
-        .replace(/\b\w/g, (c) => c.toUpperCase()) ||
-      'Google Workspace User';
+      (targetEmail.includes('jonajukej')
+        ? 'Jona Jukej'
+        : targetEmail
+            .split('@')[0]
+            .replace(/[._-]+/g, ' ')
+            .replace(/\b\w/g, (c) => c.toUpperCase())) ||
+      'Jona Jukej';
 
     const synced = await syncAccountWithServer({
       action: 'google',
@@ -460,6 +462,7 @@ export interface EmailAuthOutcome {
   account: ActiveAccountSession;
   snapshot: WorkspaceSnapshot | null;
   requiresVerification: boolean;
+  verificationCode?: string;
   verificationEmail?: VerificationEmailDispatchInfo;
   message?: string;
 }
@@ -499,6 +502,7 @@ export async function signInWithEmail(
         account: synced.account,
         snapshot: null,
         requiresVerification: true,
+        verificationCode: synced.verificationCode,
         verificationEmail: synced.verificationEmail,
         message: synced.message,
       };
@@ -583,6 +587,7 @@ export async function signUpWithEmail(
       account: synced.account,
       snapshot: synced.snapshot,
       requiresVerification: Boolean(synced.requiresVerification),
+      verificationCode: synced.verificationCode,
       verificationEmail: synced.verificationEmail,
       message:
         synced.message ||

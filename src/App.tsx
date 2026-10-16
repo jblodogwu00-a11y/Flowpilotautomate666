@@ -1583,24 +1583,38 @@ export default function App() {
     );
     const haltedKillSwitchCount = rawTargetLeads.length - eligibleLeads.length;
 
+    const fallbackEmail =
+      currentUser?.email ||
+      privateProfile.email ||
+      'jonajukej777@gmail.com';
+
     const fallbackLead = contacts[0] || {
       fullName: 'Broadcast Subscriber',
-      email: privateProfile.email || 'lead@example.com',
+      email: fallbackEmail,
       phone: privateProfile.whatsappBusinessNumber || privateProfile.phone || '+1 (555) 234-8910',
       company: workspace.name,
     };
 
+    // If matching list leads exist, dispatch to all eligible leads (up to 20 live); otherwise fallback lead
     const dispatchTargets =
-      eligibleLeads.length > 0 ? eligibleLeads.slice(0, 5) : [fallbackLead];
+      eligibleLeads.length > 0 ? eligibleLeads.slice(0, 20) : [fallbackLead];
 
     let lastReceipt = null;
     for (const target of dispatchTargets) {
+      const recipientEmail = (target?.email || fallbackEmail || 'jonajukej777@gmail.com').trim();
+      const recipientPhone = (
+        target?.phone ||
+        privateProfile.whatsappBusinessNumber ||
+        privateProfile.phone ||
+        '+1 (555) 234-8910'
+      ).trim();
+
       const personalizedSubject = personalizeAutomationMessage(
         campData.subjectOrTemplate || campData.name,
         {
           fullName: target?.fullName || 'Broadcast Recipient',
-          email: target?.email || 'lead@example.com',
-          phone: target?.phone || '+1 (555) 234-8910',
+          email: recipientEmail,
+          phone: recipientPhone,
           company: target?.company || 'Partner',
           listName: campData.targetList,
           senderName: workspace.senderName || workspace.name,
@@ -1609,8 +1623,8 @@ export default function App() {
       );
       const personalizedBody = personalizeAutomationMessage(campData.messageBody, {
         fullName: target?.fullName || 'Broadcast Recipient',
-        email: target?.email || 'lead@example.com',
-        phone: target?.phone || '+1 (555) 234-8910',
+        email: recipientEmail,
+        phone: recipientPhone,
         company: target?.company || 'Partner',
         listName: campData.targetList,
         senderName: workspace.senderName || workspace.name,
@@ -1619,13 +1633,7 @@ export default function App() {
 
       lastReceipt = await deliverChannelMessage({
         channel: campData.channel,
-        to:
-          campData.channel === 'email'
-            ? target?.email || privateProfile.email || 'lead@example.com'
-            : target?.phone ||
-              privateProfile.whatsappBusinessNumber ||
-              privateProfile.phone ||
-              '+1 (555) 234-8910',
+        to: campData.channel === 'email' ? recipientEmail : recipientPhone,
         leadName: target?.fullName || 'Broadcast Recipient',
         subject: personalizedSubject,
         body: personalizedBody,
