@@ -369,22 +369,29 @@ export async function signInWithGoogle(fallbackAccountHint?: {
     // Only attempt popup if not explicitly in direct fallback mode
     if (!fallbackAccountHint?.directFallback) {
       try {
-        result = await signInWithPopup(auth, googleProvider);
+        const popupPromise = signInWithPopup(auth, googleProvider);
+        const timeoutPromise = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('popup_blocked_or_timed_out')), 10000)
+        );
+        result = await Promise.race([popupPromise, timeoutPromise]);
         const credential = GoogleAuthProvider.credentialFromResult(result);
         if (credential?.accessToken) {
           cachedAccessToken = credential.accessToken;
           connectedGmailEmail = result.user.email || null;
           notifyGmailTokenListeners();
         }
-      } catch {
-        // Fall back gracefully to Google account verification
+      } catch (popupErr) {
+        // If popup was blocked or closed and no email was pre-selected, throw so UI can render device account chooser
+        if (!fallbackAccountHint?.email) {
+          throw popupErr;
+        }
       }
     }
 
     if (result?.user) {
       const synced = await syncAccountWithServer({
         action: 'google',
-        email: result.user.email || 'google.user@flowpilot.app',
+        email: result.user.email || fallbackAccountHint?.email || 'google.user@flowpilot.app',
         fullName: result.user.displayName || fallbackAccountHint?.fullName || 'Workspace Owner',
         workspaceName: fallbackAccountHint?.workspaceName,
         uid: result.user.uid,
@@ -397,7 +404,7 @@ export async function signInWithGoogle(fallbackAccountHint?: {
       return result.user;
     }
 
-    // Google account confirmed via user hint or authenticated profile
+    // Google account confirmed via device selection or hint
     const targetEmail =
       fallbackAccountHint?.email?.trim() ||
       getStoredActiveAccountSession()?.email ||

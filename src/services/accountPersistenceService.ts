@@ -121,6 +121,21 @@ export function saveStoredActiveAccountSession(
       localStorage.removeItem(ACTIVE_SESSION_KEY);
     } else {
       localStorage.setItem(ACTIVE_SESSION_KEY, JSON.stringify(session));
+      const clean = (session.email || '').trim().toLowerCase();
+      if (clean) {
+        const registry = getLocalAccountsRegistry();
+        registry[clean] = {
+          uid: session.uid,
+          email: clean,
+          displayName: session.displayName,
+          workspaceName: session.workspaceName,
+          password: '',
+          provider: session.provider,
+          emailVerified: true,
+          createdAt: registry[clean]?.createdAt || new Date().toISOString(),
+        };
+        saveLocalAccountsRegistry(registry);
+      }
     }
   } catch {
     // Ignore storage errors

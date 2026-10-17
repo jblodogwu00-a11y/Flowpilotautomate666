@@ -3164,14 +3164,27 @@ export default function App() {
           initialMode={authModalMode}
           onClose={() => setAuthModalOpen(false)}
           onAuthSuccess={(opts) => {
+            setAuthModalOpen(false);
+            setViewMode('workspace');
+            setActiveTab('dashboard');
+            if (opts?.uid && opts?.email) {
+              const resolvedUser =
+                auth.currentUser ||
+                createSyntheticFirebaseUser({
+                  uid: opts.uid,
+                  email: opts.email,
+                  displayName: opts.fullName || opts.email.split('@')[0],
+                  workspaceName: opts.workspaceName || `${opts.fullName || 'User'}'s Workspace`,
+                  provider: opts.email.includes('google') ? 'google.com' : 'password',
+                  emailVerified: true,
+                });
+              setCurrentUser(resolvedUser);
+            }
             if (opts?.email) {
               setAuthBanner(
-                `Verified & Saved: Signed in as ${opts.email}${
-                  opts.workspaceName ? ` (${opts.workspaceName})` : ''
-                }. All workspace data is automatically synced and persisted.`
+                `Signed in as ${opts.email}. Welcome to your workspace dashboard.`
               );
             }
-            setViewMode('workspace');
           }}
         />
       </>
@@ -3922,14 +3935,27 @@ export default function App() {
         initialMode={authModalMode}
         onClose={() => setAuthModalOpen(false)}
         onAuthSuccess={(opts) => {
+          setAuthModalOpen(false);
+          setViewMode('workspace');
+          setActiveTab('dashboard');
+          if (opts?.uid && opts?.email) {
+            const resolvedUser =
+              auth.currentUser ||
+              createSyntheticFirebaseUser({
+                uid: opts.uid,
+                email: opts.email,
+                displayName: opts.fullName || opts.email.split('@')[0],
+                workspaceName: opts.workspaceName || `${opts.fullName || 'User'}'s Workspace`,
+                provider: opts.email.includes('google') ? 'google.com' : 'password',
+                emailVerified: true,
+              });
+            setCurrentUser(resolvedUser);
+          }
           if (opts?.email) {
             setAuthBanner(
-              `Verified & Saved: Signed in as ${opts.email}${
-                opts.workspaceName ? ` (${opts.workspaceName})` : ''
-              }. All workspace data is automatically synced and persisted.`
+              `Signed in as ${opts.email}. Welcome to your workspace dashboard.`
             );
           }
-          setViewMode('workspace');
         }}
       />
 

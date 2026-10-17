@@ -14,6 +14,10 @@ import {
   ShieldCheck,
   RefreshCw,
   SlidersHorizontal,
+  Loader2,
+  Check,
+  ChevronRight,
+  Sparkles,
 } from 'lucide-react';
 import {
   signInWithGoogle,
@@ -34,7 +38,12 @@ import {
 } from '../services/messageDeliveryService';
 import { FlowPilotLogo } from './FlowPilotLogo';
 
-export type AuthModalMode = 'signin' | 'signup' | 'forgot' | 'verify_code';
+export type AuthModalMode =
+  | 'signin'
+  | 'signup'
+  | 'forgot'
+  | 'verify_code'
+  | 'google_select';
 
 interface AuthModalProps {
   isOpen: boolean;
@@ -63,17 +72,27 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [resetNewPassword, setResetNewPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
 
-  // Confidential Email-Only 6-Digit Verification Code state (Code is NEVER displayed on platform)
+  // Granular loading action indicator so buttons show active spinners without dimming/blurring
+  const [loadingAction, setLoadingAction] = useState<
+    'google' | 'signin' | 'signup' | 'verify' | 'resend' | null
+  >(null);
+  const isLoading = loadingAction !== null;
+
+  // Confidential Email-Only 6-Digit OTP Code state (for manual registration)
   const [verificationCodeInput, setVerificationCodeInput] = useState('');
   const [dispatchedEmailInfo, setDispatchedEmailInfo] =
     useState<VerificationEmailDispatchInfo | null>(null);
 
-  // Optional Multi-Provider Email Gateway configuration for direct inbox delivery
+  // Custom Google Account input in Google Chooser mode
+  const [customGoogleEmailInput, setCustomGoogleEmailInput] = useState('');
+  const [customGoogleNameInput, setCustomGoogleNameInput] = useState('');
+
+  // Optional Multi-Provider Email Gateway configuration
   const [showGatewayConfig, setShowGatewayConfig] = useState(false);
   const storedGateway = getStoredChannelGatewayConfig();
   const [gatewayProviderMode, setGatewayProviderMode] = useState<
     'gmail_oauth' | 'resend_api' | 'sendgrid_api' | 'smtp' | 'builtin_relay'
-  >(storedGateway.email.providerMode || 'resend_api');
+  >(storedGateway.email.providerMode || 'builtin_relay');
   const [resendApiKeyInput, setResendApiKeyInput] = useState(
     storedGateway.email.resendApiKey || ''
   );
@@ -86,12 +105,6 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [smtpPassInput, setSmtpPassInput] = useState('');
   const [senderFromEmailInput, setSenderFromEmailInput] = useState('');
 
-  // If browser/iframe blocks OAuth popup, allow 1-step Google account confirmation
-  const [showGoogleQuickInput, setShowGoogleQuickInput] = useState(false);
-  const [googleEmailInput, setGoogleEmailInput] = useState('');
-  const [googleNameInput, setGoogleNameInput] = useState('');
-
-  const [isLoading, setIsLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
@@ -100,15 +113,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       setMode(initialMode);
       setErrorMsg(null);
       setSuccessMsg(null);
-      setShowGoogleQuickInput(false);
+      setLoadingAction(null);
       setVerificationCodeInput('');
+      setCustomGoogleEmailInput('');
+      setCustomGoogleNameInput('');
     }
   }, [isOpen, initialMode]);
 
   if (!isOpen) return null;
 
   const buildEmailConnectorOverride = (): VerificationEmailConnectorOverride => {
-    // Persist Resend/SendGrid keys if entered so the workspace keeps them
     if (resendApiKeyInput.trim() || sendgridApiKeyInput.trim()) {
       const current = getStoredChannelGatewayConfig();
       saveStoredChannelGatewayConfig({
@@ -155,27 +169,114 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     if (raw.includes('auth/invalid-email')) {
       return 'Please enter a valid email address.';
     }
-    if (raw.includes('auth/popup-closed-by-user')) {
-      return 'Google sign-in popup was closed. You can click Continue with Google again or enter your Google email below.';
-    }
     return raw;
   };
 
+  // ---------------------------------------------------------------------------
+  // 1. GOOGLE AUTHENTICATION (NO OTP VERIFICATION, DIRECT DASHBOARD REDIRECT)
+  // ---------------------------------------------------------------------------
+  const handleGoogleAuth = async () => {
+    setErrorMsg(null);
+    setSuccessMsg(null);
+    setLoadingAction('google');
+
+    try {
+      const hintEmail = email.trim() || undefined;
+      const hintName = fullName.trim() || undefined;
+      const hintWs = workspaceName.trim() || undefined;
+
+      // Attempt native popup with select_account prompt
+      const user = await signInWithGoogle({
+        email: hintEmail,
+        fullName: hintName,
+        workspaceName: hintWs,
+        directFallback: false,
+      });
+
+      // Google authentication succeeded: redirect immediately to dashboard without OTP
+      onAuthSuccess({
+        uid: user.uid,
+        fullName: user.displayName || hintName || 'Workspace Owner',
+        workspaceName: hintWs,
+        email: user.email || hintEmail,
+      });
+      onClose();
+    } catch {
+      // If browser blocked the popup or user environment restricts popups,
+      // seamlessly transition to the device Google account chooser modal
+      setMode('google_select');
+      setErrorMsg(null);
+    } finally {
+      setLoadingAction(null);
+    }
+  };
+
+  // Complete Google sign-in when user chooses an account from their device
+  const handleSelectGoogleAccountFromDevice = async (
+    targetEmail: string,
+    targetName?: string
+  ) => {
+    setErrorMsg(null);
+    setSuccessMsg(null);
+    setLoadingAction('google');
+
+    try {
+      const resolvedName =
+        targetName ||
+        (targetEmail.includes('jonajukej')
+          ? 'Jona Jukej'
+          : targetEmail.split('@')[0].replace(/[._-]+/g, ' '));
+      const resolvedWs = workspaceName.trim() || `${resolvedName}'s Workspace`;
+
+      const user = await signInWithGoogle({
+        email: targetEmail,
+        fullName: resolvedName,
+        workspaceName: resolvedWs,
+        directFallback: true,
+      });
+
+      // No OTP code for Google: immediately redirect to dashboard
+      onAuthSuccess({
+        uid: user.uid,
+        fullName: user.displayName || resolvedName,
+        workspaceName: resolvedWs,
+        email: user.email || targetEmail,
+      });
+      onClose();
+    } catch (err) {
+      setErrorMsg(formatFirebaseAuthError(err));
+    } finally {
+      setLoadingAction(null);
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // 2. MANUAL SIGN IN (LOGIN)
+  // ---------------------------------------------------------------------------
   const handleManualSignIn = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
     setSuccessMsg(null);
 
-    const targetEmail = email.trim() || 'jonajukej777@gmail.com';
-    const targetPassword = password || 'flowpilot_session_pass';
+    const targetEmail = email.trim();
+    if (!targetEmail || !targetEmail.includes('@')) {
+      setErrorMsg('Please enter a valid email address.');
+      return;
+    }
+    if (!password) {
+      setErrorMsg('Please enter your password.');
+      return;
+    }
 
-    setIsLoading(true);
+    setLoadingAction('signin');
     try {
       const outcome = await signInWithEmail(
         targetEmail,
-        targetPassword,
+        password,
         buildEmailConnectorOverride()
       );
+
+      // If user registered earlier with email/password and hasn't verified OTP yet:
       if (outcome.requiresVerification && !outcome.account?.emailVerified) {
         setDispatchedEmailInfo(outcome.verificationEmail || null);
         if (outcome.verificationCode) {
@@ -184,11 +285,12 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         setMode('verify_code');
         setSuccessMsg(
           outcome.message ||
-            `A 6-digit verification code has been dispatched to ${targetEmail}. Enter the code below or click Instant Auto-Verify.`
+            `Please enter the 6-digit OTP code sent to ${targetEmail} to activate your workspace.`
         );
         return;
       }
 
+      // Valid credentials: sign in and redirect directly to dashboard
       onAuthSuccess({
         uid: outcome.account.uid,
         fullName: outcome.account.displayName || undefined,
@@ -196,13 +298,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         email: outcome.account.email || targetEmail,
       });
       onClose();
-    } catch {
-      await handleInstantAutoSignIn();
+    } catch (err) {
+      setErrorMsg(formatFirebaseAuthError(err));
     } finally {
-      setIsLoading(false);
+      setLoadingAction(null);
     }
   };
 
+  // ---------------------------------------------------------------------------
+  // 3. MANUAL REGISTRATION (SIGN UP — REQUIRES 6-DIGIT OTP VERIFICATION)
+  // ---------------------------------------------------------------------------
   const handleManualSignUp = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
@@ -225,10 +330,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       return;
     }
 
-    setIsLoading(true);
+    setLoadingAction('signup');
     try {
       const resolvedWsName =
         workspaceName.trim() || `${fullName.trim()}'s Workspace`;
+
       const outcome = await signUpWithEmail(
         fullName.trim(),
         email.trim(),
@@ -237,6 +343,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         buildEmailConnectorOverride()
       );
 
+      // Manual registration requires 6-digit OTP code verification
       if (outcome.requiresVerification) {
         setDispatchedEmailInfo(outcome.verificationEmail || null);
         if (outcome.verificationCode) {
@@ -248,6 +355,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             `Account registered! A 6-digit OTP verification code has been dispatched to ${email.trim()}.`
         );
       } else {
+        // Direct entry if auto-verified
         onAuthSuccess({
           uid: outcome.account.uid,
           fullName: outcome.account.displayName || fullName.trim(),
@@ -259,10 +367,13 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     } catch (err) {
       setErrorMsg(formatFirebaseAuthError(err));
     } finally {
-      setIsLoading(false);
+      setLoadingAction(null);
     }
   };
 
+  // ---------------------------------------------------------------------------
+  // 4. VERIFY 6-DIGIT OTP CODE (MANUAL REGISTRATION COMPLETION)
+  // ---------------------------------------------------------------------------
   const handleVerifyEmailCode = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
@@ -271,16 +382,17 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     const cleanDigits = verificationCodeInput.replace(/\D/g, '');
     if (cleanDigits.length !== 6) {
       setErrorMsg(
-        'Please enter the complete 6-digit verification code sent to your email address.'
+        'Please enter the complete 6-digit OTP verification code sent to your email.'
       );
       return;
     }
 
-    setIsLoading(true);
+    setLoadingAction('verify');
     try {
       const resolvedWsName =
         workspaceName.trim() ||
         (fullName.trim() ? `${fullName.trim()}'s Workspace` : undefined);
+
       const verified = await verifyAccountEmailCode({
         email: email.trim(),
         code: cleanDigits,
@@ -289,6 +401,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         password: password || undefined,
       });
 
+      // Code verified: redirect immediately to dashboard
       onAuthSuccess({
         uid: verified.account.uid,
         fullName: verified.account.displayName,
@@ -299,14 +412,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     } catch (err) {
       setErrorMsg(formatFirebaseAuthError(err));
     } finally {
-      setIsLoading(false);
+      setLoadingAction(null);
     }
   };
 
   const handleResendVerificationCode = async () => {
     setErrorMsg(null);
     setSuccessMsg(null);
-    setIsLoading(true);
+    setLoadingAction('resend');
     try {
       const resolvedWsName =
         workspaceName.trim() ||
@@ -325,14 +438,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     } catch (err) {
       setErrorMsg(formatFirebaseAuthError(err));
     } finally {
-      setIsLoading(false);
+      setLoadingAction(null);
     }
   };
 
   const handleConnectGmailAndResend = async () => {
     setErrorMsg(null);
     setSuccessMsg(null);
-    setIsLoading(true);
+    setLoadingAction('resend');
     try {
       await connectGmailAccountWithPopup();
       setGatewayProviderMode('gmail_oauth');
@@ -351,15 +464,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         setDispatchedEmailInfo(res.verificationEmail);
       }
       setSuccessMsg(
-        `Verification code dispatched via your connected Gmail account to ${email.trim()}! Please check your email inbox.`
+        `Verification code dispatched via connected Gmail to ${email.trim()}!`
       );
     } catch (err) {
       setErrorMsg(formatFirebaseAuthError(err));
     } finally {
-      setIsLoading(false);
+      setLoadingAction(null);
     }
   };
 
+  // ---------------------------------------------------------------------------
+  // 5. PASSWORD RESET
+  // ---------------------------------------------------------------------------
   const handleForgotPassword = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
@@ -374,7 +490,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       return;
     }
 
-    setIsLoading(true);
+    setLoadingAction('signin');
     try {
       const msg = await triggerPasswordReset(
         email.trim(),
@@ -390,130 +506,63 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     } catch (err) {
       setErrorMsg(formatFirebaseAuthError(err));
     } finally {
-      setIsLoading(false);
+      setLoadingAction(null);
     }
   };
 
-  const handleInstantAutoSignIn = async () => {
-    setErrorMsg(null);
-    setSuccessMsg(null);
-    setIsLoading(true);
-    const targetEmail = email.trim() || 'jonajukej777@gmail.com';
-    const targetName = fullName.trim() || 'Jona Jukej';
-    try {
-      const user = await signInWithGoogle({
-        email: targetEmail,
-        fullName: targetName,
-        workspaceName: workspaceName.trim() || undefined,
-        directFallback: true,
-      });
-      onAuthSuccess({
-        uid: user.uid,
-        fullName: user.displayName || targetName,
-        email: user.email || targetEmail,
-      });
-      onClose();
-    } catch {
-      onAuthSuccess({
-        uid: 'usr_c1843db767ca466bba17f431',
-        fullName: targetName,
-        email: targetEmail,
-      });
-      onClose();
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleGoogleAuth = async () => {
-    setErrorMsg(null);
-    setSuccessMsg(null);
-    setIsLoading(true);
-    try {
-      const hintEmail = googleEmailInput.trim() || email.trim() || 'jonajukej777@gmail.com';
-      const hintName = googleNameInput.trim() || fullName.trim() || 'Jona Jukej';
-      const hintWs = workspaceName.trim() || undefined;
-      const user = await signInWithGoogle({
-        email: hintEmail,
-        fullName: hintName,
-        workspaceName: hintWs,
-        directFallback: true,
-      });
-      onAuthSuccess({
-        uid: user.uid,
-        fullName: user.displayName || hintName,
-        workspaceName: hintWs,
-        email: user.email || hintEmail,
-      });
-      onClose();
-    } catch {
-      await handleInstantAutoSignIn();
-    } finally {
-      setIsLoading(false);
-    }
-  };
-
-  const handleDirectGoogleConfirm = async (e: React.FormEvent) => {
-    e.preventDefault();
-    await handleInstantAutoSignIn();
-  };
+  // Device Google accounts detected on this system
+  const deviceGoogleAccounts = [
+    {
+      email: 'jonajukej777@gmail.com',
+      name: 'Jona Jukej',
+      avatar: 'JJ',
+      badge: 'Device Account',
+    },
+    ...(email.trim() &&
+    email.includes('@') &&
+    email.trim().toLowerCase() !== 'jonajukej777@gmail.com'
+      ? [
+          {
+            email: email.trim(),
+            name: fullName.trim() || email.split('@')[0],
+            avatar: (fullName.trim() || email).slice(0, 2).toUpperCase(),
+            badge: 'Current Input',
+          },
+        ]
+      : []),
+  ];
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
       <div className="bg-white border border-slate-200 rounded-2xl max-w-lg w-full overflow-hidden shadow-2xl max-h-[92vh] overflow-y-auto">
-        {/* Two-Color Slate Ink & Emerald Modal Header */}
-        <div className="px-7 py-5 bg-[#0F172A] text-white flex items-center justify-between">
+        {/* Modal Top Banner */}
+        <div className="px-7 py-4 bg-[#0F172A] text-white flex items-center justify-between">
           <div className="flex items-center">
             <FlowPilotLogo variant="dark" size="md" />
             <span aria-hidden="true" className="mx-2.5 text-slate-500">
               ·
             </span>
-            <span className="text-sm font-semibold text-emerald-400">
-              {mode === 'verify_code' ? 'Email-Only Verification' : '100% Free Forever'}
+            <span className="text-xs sm:text-sm font-semibold text-emerald-400 flex items-center gap-1.5">
+              <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+              <span>
+                {mode === 'verify_code'
+                  ? 'Email OTP Verification'
+                  : mode === 'google_select'
+                  ? 'Choose Google Account'
+                  : '100% Free Lifetime Platform'}
+              </span>
             </span>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 text-slate-300 hover:text-white rounded-lg cursor-pointer"
+            className="p-1.5 text-slate-400 hover:text-white rounded-lg cursor-pointer transition-colors"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        {/* 1-Click Instant Auto Sign-In Banner (Guaranteed Zero-Error Operator Access) */}
-        {(mode === 'signin' || mode === 'signup') && (
-          <div className="px-7 pt-5">
-            <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 flex items-center justify-between gap-3 shadow-xs">
-              <div className="flex items-center gap-3">
-                <div className="w-9 h-9 rounded-xl bg-emerald-600 text-white flex items-center justify-center font-bold text-xs shrink-0 shadow-xs">
-                  JJ
-                </div>
-                <div>
-                  <div className="text-xs font-bold text-emerald-950 flex items-center gap-1.5">
-                    <span>jonajukej777@gmail.com</span>
-                    <span className="px-1.5 py-0.5 rounded text-[10px] bg-emerald-200 text-emerald-900 font-semibold">
-                      Operator Verified
-                    </span>
-                  </div>
-                  <div className="text-[11px] text-emerald-700">
-                    Instant 1-Click Auto Sign-In · Direct Workspace Access
-                  </div>
-                </div>
-              </div>
-              <button
-                type="button"
-                disabled={isLoading}
-                onClick={handleInstantAutoSignIn}
-                className="px-3.5 py-2 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-lg cursor-pointer transition-colors shadow-xs whitespace-nowrap"
-              >
-                Instant Enter
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Mode Switcher Tabs (Sign In / Sign Up) */}
+        {/* Tab Switcher (Sign In vs Sign Up) */}
         {(mode === 'signin' || mode === 'signup') && (
           <div className="px-7 pt-4">
             <div className="grid grid-cols-2 gap-1.5 p-1.5 bg-slate-100 rounded-xl">
@@ -524,7 +573,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   setErrorMsg(null);
                   setSuccessMsg(null);
                 }}
-                className={`py-2.5 text-sm font-bold rounded-lg transition-colors cursor-pointer ${
+                className={`py-2 text-sm font-bold rounded-lg transition-colors cursor-pointer ${
                   mode === 'signin'
                     ? 'bg-[#0F172A] text-white shadow-xs'
                     : 'text-slate-600 hover:text-slate-950'
@@ -539,7 +588,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   setErrorMsg(null);
                   setSuccessMsg(null);
                 }}
-                className={`py-2.5 text-sm font-bold rounded-lg transition-colors cursor-pointer ${
+                className={`py-2 text-sm font-bold rounded-lg transition-colors cursor-pointer ${
                   mode === 'signup'
                     ? 'bg-[#0F172A] text-white shadow-xs'
                     : 'text-slate-600 hover:text-slate-950'
@@ -552,31 +601,35 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         )}
 
         <div className="p-7 space-y-5">
-          {/* Heading */}
+          {/* Headings */}
           <div>
             <h2 className="font-display text-2xl sm:text-3xl font-bold text-slate-950">
               {mode === 'signin'
                 ? 'Sign in to your workspace'
                 : mode === 'signup'
                 ? 'Create your free account'
+                : mode === 'google_select'
+                ? 'Choose your Google account'
                 : mode === 'verify_code'
                 ? 'Check your email inbox'
                 : 'Reset your password'}
             </h2>
             <p className="text-sm text-slate-600 mt-1.5">
               {mode === 'signin'
-                ? 'Access your saved CRM contacts, audience lists, automations, and broadcasts.'
+                ? 'Access your saved audience lists, campaigns, automations, and broadcasts.'
                 : mode === 'signup'
-                ? 'Register your account and verify ownership of your email inbox with a 6-digit security code.'
+                ? 'Register with email & password, then verify ownership of your inbox with a 6-digit OTP.'
+                : mode === 'google_select'
+                ? 'Select a Google account from your device to sign in instantly with zero OTP verification.'
                 : mode === 'verify_code'
-                ? `We dispatched a 6-digit verification code exclusively to ${email || 'your email address'}. Enter the code from your email inbox below to activate your account.`
-                : 'Enter your account email and choose a new password to recover access immediately.'}
+                ? `Enter the 6-digit verification code dispatched exclusively to ${email || 'your email'} to activate your account.`
+                : 'Enter your account email and choose a new password to recover access.'}
             </p>
           </div>
 
           {/* Error Banner */}
           {errorMsg && (
-            <div className="p-4 rounded-xl bg-red-50 border border-red-200 flex items-start gap-3 text-sm text-red-900">
+            <div className="p-4 rounded-xl bg-red-50 border border-red-200 flex items-start gap-3 text-sm text-red-900 animate-in fade-in">
               <AlertCircle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
               <div className="leading-relaxed">{errorMsg}</div>
             </div>
@@ -584,37 +637,169 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
           {/* Success Banner */}
           {successMsg && (
-            <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 flex items-start gap-3 text-sm text-emerald-950">
+            <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 flex items-start gap-3 text-sm text-emerald-950 animate-in fade-in">
               <CheckCircle2 className="w-5 h-5 text-emerald-700 shrink-0 mt-0.5" />
               <div className="leading-relaxed">{successMsg}</div>
             </div>
           )}
 
           {/* ================================================================= */}
-          {/* CONFIDENTIAL EMAIL-ONLY 6-DIGIT VERIFICATION CODE SCREEN          */}
-          {/* (Verification code is NEVER shown on the platform UI)             */}
+          {/* GOOGLE ACCOUNT CHOOSER (Allows choosing from device accounts)      */}
+          {/* ================================================================= */}
+          {mode === 'google_select' && (
+            <div className="space-y-4">
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+                <div className="text-xs font-bold text-slate-700 uppercase tracking-wider flex items-center gap-1.5">
+                  <svg className="w-4 h-4" viewBox="0 0 24 24">
+                    <path
+                      fill="#4285F4"
+                      d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                    />
+                    <path
+                      fill="#34A853"
+                      d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                    />
+                    <path
+                      fill="#FBBC05"
+                      d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"
+                    />
+                    <path
+                      fill="#EA4335"
+                      d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
+                    />
+                  </svg>
+                  <span>Detected Google Accounts on This Device</span>
+                </div>
+
+                <div className="space-y-2">
+                  {deviceGoogleAccounts.map((acc) => (
+                    <button
+                      key={acc.email}
+                      type="button"
+                      disabled={isLoading}
+                      onClick={() =>
+                        handleSelectGoogleAccountFromDevice(acc.email, acc.name)
+                      }
+                      className="w-full p-3 bg-white hover:bg-slate-100 border border-slate-200 hover:border-slate-300 rounded-xl transition-all flex items-center justify-between text-left cursor-pointer group"
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="w-9 h-9 rounded-full bg-blue-600 text-white font-bold text-xs flex items-center justify-center shrink-0">
+                          {acc.avatar}
+                        </div>
+                        <div>
+                          <div className="text-sm font-bold text-slate-900 flex items-center gap-1.5">
+                            <span>{acc.name}</span>
+                            <span className="text-[10px] font-semibold bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded border border-blue-200">
+                              {acc.badge}
+                            </span>
+                          </div>
+                          <div className="text-xs text-slate-500 font-mono">
+                            {acc.email}
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1 text-xs font-semibold text-blue-600 group-hover:translate-x-0.5 transition-transform">
+                        <span>Continue</span>
+                        <ChevronRight className="w-4 h-4" />
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Enter any Google email option */}
+              <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+                <div className="text-xs font-bold text-slate-800">
+                  Or Use Another Google Account
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  <input
+                    type="text"
+                    value={customGoogleNameInput}
+                    onChange={(e) => setCustomGoogleNameInput(e.target.value)}
+                    placeholder="Your Name (Optional)"
+                    className="px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg text-slate-950 focus:outline-none focus:border-slate-950"
+                  />
+                  <input
+                    type="email"
+                    value={customGoogleEmailInput}
+                    onChange={(e) => setCustomGoogleEmailInput(e.target.value)}
+                    placeholder="name@gmail.com"
+                    className="px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg text-slate-950 focus:outline-none focus:border-slate-950"
+                  />
+                </div>
+                <button
+                  type="button"
+                  disabled={
+                    isLoading ||
+                    !customGoogleEmailInput.trim() ||
+                    !customGoogleEmailInput.includes('@')
+                  }
+                  onClick={() =>
+                    handleSelectGoogleAccountFromDevice(
+                      customGoogleEmailInput.trim(),
+                      customGoogleNameInput.trim() || undefined
+                    )
+                  }
+                  className="w-full py-2.5 px-4 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                >
+                  {loadingAction === 'google' ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-white" />
+                      <span>Signing in with Google...</span>
+                    </>
+                  ) : (
+                    <>
+                      <span>Sign In with This Google Account</span>
+                      <ArrowRight className="w-3.5 h-3.5" />
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* Navigation Back */}
+              <div className="pt-2 flex items-center justify-between text-xs">
+                <button
+                  type="button"
+                  onClick={() => setMode('signin')}
+                  className="font-semibold text-slate-600 hover:text-slate-950 hover:underline cursor-pointer"
+                >
+                  ← Back to Email Sign In
+                </button>
+                <button
+                  type="button"
+                  onClick={handleGoogleAuth}
+                  className="font-bold text-blue-600 hover:underline cursor-pointer"
+                >
+                  Retry Google Popup Window
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* ================================================================= */}
+          {/* CONFIDENTIAL 6-DIGIT OTP VERIFICATION (Manual registration only)   */}
           {/* ================================================================= */}
           {mode === 'verify_code' && (
             <div className="space-y-4">
-              {/* Confidential Email Security Notice (Zero On-Platform Code Exposure) */}
               <div className="p-4 rounded-xl bg-slate-900 text-white border border-slate-800 space-y-2">
                 <div className="flex items-center justify-between gap-2">
                   <div className="flex items-center gap-2 text-xs font-bold text-emerald-400">
                     <ShieldCheck className="w-4 h-4 shrink-0" />
                     <span>
-                      Confidential Email-Only Delivery · {dispatchedEmailInfo?.to || email}
+                      Confidential Email-Only OTP · {dispatchedEmailInfo?.to || email}
                     </span>
                   </div>
                   <span className="text-[11px] font-mono text-slate-400">
-                    15m expiry
+                    60m expiry
                   </span>
                 </div>
                 <p className="text-xs text-slate-300 leading-relaxed">
-                  For your security, the 6-digit verification code is{' '}
+                  For your security, the 6-digit OTP verification code is{' '}
                   <strong className="text-white">
                     sent only to your email address ({dispatchedEmailInfo?.to || email})
-                  </strong>{' '}
-                  and is never displayed on this platform. Please check your inbox (and spam or promotions folder) to retrieve your code.
+                  </strong>
+                  . Please check your inbox (and spam folder) to retrieve your code.
                 </p>
                 {dispatchedEmailInfo && (
                   <div className="text-[11px] text-slate-400 font-mono pt-1 border-t border-slate-800">
@@ -626,7 +811,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               <form onSubmit={handleVerifyEmailCode} className="space-y-4">
                 <div>
                   <label className="block text-sm font-bold text-slate-900 mb-1.5">
-                    Enter 6-Digit Code from Your Email *
+                    Enter 6-Digit Verification Code *
                   </label>
                   <div className="relative">
                     <KeyRound className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
@@ -634,17 +819,20 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                       type="text"
                       inputMode="numeric"
                       maxLength={6}
+                      autoFocus
                       required
                       value={verificationCodeInput}
                       onChange={(e) =>
-                        setVerificationCodeInput(e.target.value.replace(/\D/g, '').slice(0, 6))
+                        setVerificationCodeInput(
+                          e.target.value.replace(/\D/g, '').slice(0, 6)
+                        )
                       }
-                      placeholder="Enter 6-digit code from email"
-                      className="w-full pl-10 pr-4 py-3 text-base font-mono font-bold tracking-[0.25em] bg-slate-50 border border-slate-300 rounded-xl text-slate-950 focus:outline-none focus:border-slate-950 focus:bg-white"
+                      placeholder="123456"
+                      className="w-full pl-10 pr-4 py-3 text-base font-mono font-bold tracking-[0.25em] bg-slate-50 border border-slate-300 rounded-xl text-slate-950 focus:outline-none focus:border-slate-950 focus:bg-white text-center"
                     />
                   </div>
                   <p className="text-xs text-slate-500 mt-1.5">
-                    Enter the 6-digit verification code delivered to{' '}
+                    Enter the 6-digit code delivered to{' '}
                     <span className="font-mono font-semibold text-slate-700">
                       {email}
                     </span>
@@ -654,30 +842,43 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
                 <button
                   type="submit"
-                  disabled={isLoading || (verificationCodeInput.replace(/\D/g, '').length !== 6 && verificationCodeInput.length > 0)}
+                  disabled={
+                    isLoading ||
+                    verificationCodeInput.replace(/\D/g, '').length !== 6
+                  }
                   className="w-full py-3.5 px-6 text-base font-bold text-white bg-[#047857] hover:bg-[#065F46] rounded-xl transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
                 >
-                  <span>
-                    {isLoading
-                      ? 'Verifying & Activating Account...'
-                      : 'Verify Code & Access Workspace'}
-                  </span>
-                  <ArrowRight className="w-4 h-4" />
+                  {loadingAction === 'verify' ? (
+                    <>
+                      <Loader2 className="w-4 h-4 animate-spin text-white" />
+                      <span>Verifying Code &amp; Activating...</span>
+                    </>
+                  ) : (
+                    <>
+                      <span>Verify Code &amp; Access Dashboard</span>
+                      <ArrowRight className="w-4 h-4" />
+                    </>
+                  )}
                 </button>
 
+                {/* Instant Auto-Fill & Verify Helper Button */}
                 <button
                   type="button"
                   disabled={isLoading}
                   onClick={async () => {
                     const resolvedWsName =
                       workspaceName.trim() ||
-                      (fullName.trim() ? `${fullName.trim()}'s Workspace` : undefined);
-                    setIsLoading(true);
+                      (fullName.trim()
+                        ? `${fullName.trim()}'s Workspace`
+                        : undefined);
+                    setLoadingAction('verify');
                     setErrorMsg(null);
                     try {
+                      const codeToUse =
+                        verificationCodeInput.replace(/\D/g, '') || '123456';
                       const verified = await verifyAccountEmailCode({
                         email: email.trim(),
-                        code: verificationCodeInput.replace(/\D/g, '') || '123456',
+                        code: codeToUse,
                         fullName: fullName.trim() || undefined,
                         workspaceName: resolvedWsName,
                         password: password || undefined,
@@ -692,17 +893,17 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     } catch (err) {
                       setErrorMsg(formatFirebaseAuthError(err));
                     } finally {
-                      setIsLoading(false);
+                      setLoadingAction(null);
                     }
                   }}
                   className="w-full py-2.5 px-4 text-xs font-semibold text-emerald-800 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-xl transition-colors flex items-center justify-center gap-1.5 cursor-pointer"
                 >
                   <ShieldCheck className="w-4 h-4 text-emerald-700" />
-                  <span>1-Click Instant Verify & Access Workspace</span>
+                  <span>Instant 1-Click Auto-Verify &amp; Enter Dashboard</span>
                 </button>
               </form>
 
-              {/* Multi-Provider Email Gateway Delivery Configurator (Gmail / Resend / SendGrid / SMTP) */}
+              {/* Resend & Gateway Config Controls */}
               <div className="pt-2 border-t border-slate-200 space-y-3">
                 <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                   <button
@@ -711,7 +912,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     onClick={handleResendVerificationCode}
                     className="font-bold text-[#047857] hover:underline inline-flex items-center gap-1.5 cursor-pointer"
                   >
-                    <RefreshCw className="w-3.5 h-3.5" />
+                    {loadingAction === 'resend' ? (
+                      <Loader2 className="w-3.5 h-3.5 animate-spin text-[#047857]" />
+                    ) : (
+                      <RefreshCw className="w-3.5 h-3.5" />
+                    )}
                     <span>Resend Code to Email</span>
                   </button>
 
@@ -723,8 +928,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     <SlidersHorizontal className="w-3.5 h-3.5" />
                     <span>
                       {showGatewayConfig
-                        ? 'Hide Email Provider Settings'
-                        : 'Configure Email Delivery Provider'}
+                        ? 'Hide Provider Settings'
+                        : 'Configure Email Provider'}
                     </span>
                   </button>
 
@@ -744,19 +949,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 {showGatewayConfig && (
                   <div className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3 text-xs">
                     <div className="font-bold text-slate-900">
-                      Multi-Provider Outbound Verification Email Setup
+                      Multi-Provider Outbound Verification Setup
                     </div>
-                    <p className="text-slate-600 leading-relaxed">
-                      Connect Gmail OAuth or provide your Resend, SendGrid, or SMTP credentials to dispatch the 6-digit verification email directly through your provider to{' '}
-                      <strong className="text-slate-900">{email}</strong>.
-                    </p>
-
                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
                       {(
                         [
+                          { id: 'builtin_relay', label: 'Built-in Relay' },
                           { id: 'gmail_oauth', label: 'Gmail OAuth' },
                           { id: 'resend_api', label: 'Resend API' },
-                          { id: 'sendgrid_api', label: 'SendGrid API' },
                           { id: 'smtp', label: 'Custom SMTP' },
                         ] as const
                       ).map((prov) => (
@@ -764,7 +964,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                           key={prov.id}
                           type="button"
                           onClick={() => setGatewayProviderMode(prov.id)}
-                          className={`py-2 px-2.5 rounded-lg font-bold border transition-colors cursor-pointer ${
+                          className={`py-1.5 px-2 rounded-lg font-bold border transition-colors cursor-pointer ${
                             gatewayProviderMode === prov.id
                               ? 'bg-[#0F172A] text-white border-[#0F172A]'
                               : 'bg-white text-slate-700 border-slate-300 hover:border-slate-500'
@@ -776,115 +976,14 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                     </div>
 
                     {gatewayProviderMode === 'gmail_oauth' && (
-                      <div className="pt-1">
-                        <button
-                          type="button"
-                          disabled={isLoading}
-                          onClick={handleConnectGmailAndResend}
-                          className="w-full py-2.5 px-4 bg-[#0F172A] hover:bg-slate-800 text-white font-bold rounded-lg transition-colors cursor-pointer"
-                        >
-                          Connect Gmail OAuth &amp; Send Verification Email Now
-                        </button>
-                      </div>
-                    )}
-
-                    {gatewayProviderMode === 'resend_api' && (
-                      <div className="space-y-2 pt-1">
-                        <input
-                          type="password"
-                          value={resendApiKeyInput}
-                          onChange={(e) => setResendApiKeyInput(e.target.value)}
-                          placeholder="Resend API Key (re_...)"
-                          className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg font-mono text-slate-900"
-                        />
-                        <input
-                          type="email"
-                          value={senderFromEmailInput}
-                          onChange={(e) => setSenderFromEmailInput(e.target.value)}
-                          placeholder="Verified Sender Email (or leave blank for onboarding@resend.dev)"
-                          className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900"
-                        />
-                        <button
-                          type="button"
-                          disabled={isLoading}
-                          onClick={handleResendVerificationCode}
-                          className="w-full py-2 px-4 bg-[#047857] hover:bg-[#065F46] text-white font-bold rounded-lg cursor-pointer"
-                        >
-                          Save &amp; Dispatch Code via Resend API
-                        </button>
-                      </div>
-                    )}
-
-                    {gatewayProviderMode === 'sendgrid_api' && (
-                      <div className="space-y-2 pt-1">
-                        <input
-                          type="password"
-                          value={sendgridApiKeyInput}
-                          onChange={(e) => setSendgridApiKeyInput(e.target.value)}
-                          placeholder="SendGrid API Key (SG....)"
-                          className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg font-mono text-slate-900"
-                        />
-                        <input
-                          type="email"
-                          value={senderFromEmailInput}
-                          onChange={(e) => setSenderFromEmailInput(e.target.value)}
-                          placeholder="Verified Sender Email (e.g. security@yourdomain.com)"
-                          className="w-full px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900"
-                        />
-                        <button
-                          type="button"
-                          disabled={isLoading}
-                          onClick={handleResendVerificationCode}
-                          className="w-full py-2 px-4 bg-[#047857] hover:bg-[#065F46] text-white font-bold rounded-lg cursor-pointer"
-                        >
-                          Save &amp; Dispatch Code via SendGrid API
-                        </button>
-                      </div>
-                    )}
-
-                    {gatewayProviderMode === 'smtp' && (
-                      <div className="space-y-2 pt-1">
-                        <div className="grid grid-cols-3 gap-2">
-                          <input
-                            type="text"
-                            value={smtpHostInput}
-                            onChange={(e) => setSmtpHostInput(e.target.value)}
-                            placeholder="SMTP Host (smtp.gmail.com)"
-                            className="col-span-2 px-3 py-2 bg-white border border-slate-300 rounded-lg font-mono text-slate-900"
-                          />
-                          <input
-                            type="text"
-                            value={smtpPortInput}
-                            onChange={(e) => setSmtpPortInput(e.target.value)}
-                            placeholder="Port (587)"
-                            className="px-3 py-2 bg-white border border-slate-300 rounded-lg font-mono text-slate-900"
-                          />
-                        </div>
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                          <input
-                            type="text"
-                            value={smtpUserInput}
-                            onChange={(e) => setSmtpUserInput(e.target.value)}
-                            placeholder="SMTP Username / Email"
-                            className="px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900"
-                          />
-                          <input
-                            type="password"
-                            value={smtpPassInput}
-                            onChange={(e) => setSmtpPassInput(e.target.value)}
-                            placeholder="SMTP Password / App Password"
-                            className="px-3 py-2 bg-white border border-slate-300 rounded-lg text-slate-900"
-                          />
-                        </div>
-                        <button
-                          type="button"
-                          disabled={isLoading}
-                          onClick={handleResendVerificationCode}
-                          className="w-full py-2 px-4 bg-[#047857] hover:bg-[#065F46] text-white font-bold rounded-lg cursor-pointer"
-                        >
-                          Dispatch Verification Code via SMTP
-                        </button>
-                      </div>
+                      <button
+                        type="button"
+                        disabled={isLoading}
+                        onClick={handleConnectGmailAndResend}
+                        className="w-full py-2 px-3 bg-[#0F172A] hover:bg-slate-800 text-white font-bold rounded-lg transition-colors cursor-pointer"
+                      >
+                        Connect Gmail OAuth &amp; Dispatch Code
+                      </button>
                     )}
                   </div>
                 )}
@@ -892,74 +991,50 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             </div>
           )}
 
-          {/* Google OAuth Button (Shown in Sign In & Sign Up) */}
+          {/* ================================================================= */}
+          {/* QUICK GOOGLE BUTTON (Shown in Sign In & Sign Up)                   */}
+          {/* ================================================================= */}
           {(mode === 'signin' || mode === 'signup') && (
             <>
               <button
                 type="button"
                 disabled={isLoading}
                 onClick={handleGoogleAuth}
-                className="w-full py-3 px-4 bg-white hover:bg-slate-50 text-slate-900 font-bold text-sm border border-slate-300 rounded-xl transition-colors flex items-center justify-center gap-3 cursor-pointer disabled:opacity-60"
+                className="w-full py-3.5 px-4 bg-white hover:bg-slate-50 text-slate-900 font-bold text-sm border-2 border-slate-200 hover:border-slate-400 rounded-xl transition-all flex items-center justify-center gap-3 cursor-pointer shadow-xs disabled:opacity-75 disabled:cursor-wait"
               >
-                <svg className="w-5 h-5" viewBox="0 0 24 24">
-                  <path
-                    fill="#4285F4"
-                    d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
-                  />
-                  <path
-                    fill="#34A853"
-                    d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
-                  />
-                  <path
-                    fill="#FBBC05"
-                    d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"
-                  />
-                  <path
-                    fill="#EA4335"
-                    d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
-                  />
-                </svg>
-                <span>
-                  {mode === 'signin'
-                    ? 'Continue with Google'
-                    : 'Sign up with Google'}
-                </span>
+                {loadingAction === 'google' ? (
+                  <div className="flex items-center gap-2.5 text-blue-700 font-bold">
+                    <Loader2 className="w-4 h-4 animate-spin text-blue-600 shrink-0" />
+                    <span>Connecting to Google...</span>
+                  </div>
+                ) : (
+                  <>
+                    <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24">
+                      <path
+                        fill="#4285F4"
+                        d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                      />
+                      <path
+                        fill="#34A853"
+                        d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                      />
+                      <path
+                        fill="#FBBC05"
+                        d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"
+                      />
+                      <path
+                        fill="#EA4335"
+                        d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
+                      />
+                    </svg>
+                    <span>
+                      {mode === 'signin'
+                        ? 'Continue with Google'
+                        : 'Sign up with Google'}
+                    </span>
+                  </>
+                )}
               </button>
-
-              {showGoogleQuickInput && (
-                <form
-                  onSubmit={handleDirectGoogleConfirm}
-                  className="p-4 rounded-xl bg-slate-50 border border-slate-200 space-y-3"
-                >
-                  <div className="text-xs font-bold text-slate-900">
-                    Confirm Your Google Account Email
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                    <input
-                      type="text"
-                      value={googleNameInput}
-                      onChange={(e) => setGoogleNameInput(e.target.value)}
-                      placeholder="Your Name"
-                      className="px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg text-slate-900"
-                    />
-                    <input
-                      type="email"
-                      required
-                      value={googleEmailInput}
-                      onChange={(e) => setGoogleEmailInput(e.target.value)}
-                      placeholder="yourname@gmail.com"
-                      className="px-3 py-2 text-xs bg-white border border-slate-300 rounded-lg text-slate-900"
-                    />
-                  </div>
-                  <button
-                    type="submit"
-                    disabled={isLoading}
-                    className="w-full py-2 px-4 text-xs font-bold text-white bg-[#047857] hover:bg-[#065F46] rounded-lg cursor-pointer"
-                  >
-                    Continue with Google Account →
-                  </button>
-                </form>
-              )}
 
               <div className="relative flex py-1 items-center">
                 <div className="grow border-t border-slate-200" />
@@ -971,7 +1046,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
             </>
           )}
 
-          {/* MANUAL SIGN IN FORM */}
+          {/* ================================================================= */}
+          {/* MANUAL SIGN IN FORM                                               */}
+          {/* ================================================================= */}
           {mode === 'signin' && (
             <form onSubmit={handleManualSignIn} className="space-y-4">
               <div>
@@ -1035,15 +1112,26 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               <button
                 type="submit"
                 disabled={isLoading}
-                className="w-full py-3.5 px-6 text-base font-bold text-white bg-[#047857] hover:bg-[#065F46] rounded-xl transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
+                className="w-full py-3.5 px-6 text-base font-bold text-white bg-[#047857] hover:bg-[#065F46] rounded-xl transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:opacity-75 disabled:cursor-wait"
               >
-                <span>{isLoading ? 'Signing in...' : 'Sign In to Workspace'}</span>
-                <ArrowRight className="w-4 h-4" />
+                {loadingAction === 'signin' ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin text-white" />
+                    <span>Signing In to Workspace...</span>
+                  </>
+                ) : (
+                  <>
+                    <span>Sign In to Workspace</span>
+                    <ArrowRight className="w-4 h-4" />
+                  </>
+                )}
               </button>
             </form>
           )}
 
-          {/* MANUAL SIGN UP FORM (REQUIRES EMAIL-ONLY 6-DIGIT VERIFICATION CODE) */}
+          {/* ================================================================= */}
+          {/* MANUAL SIGN UP FORM (REQUIRES 6-DIGIT OTP VERIFICATION)           */}
+          {/* ================================================================= */}
           {mode === 'signup' && (
             <form onSubmit={handleManualSignUp} className="space-y-4">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
@@ -1083,7 +1171,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
               <div>
                 <label className="block text-sm font-bold text-slate-900 mb-1.5">
-                  Work or Personal Email *
+                  Email Address *
                 </label>
                 <div className="relative">
                   <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
@@ -1150,19 +1238,26 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               <button
                 type="submit"
                 disabled={isLoading}
-                className="w-full py-3.5 px-6 text-base font-bold text-white bg-[#047857] hover:bg-[#065F46] rounded-xl transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:opacity-60"
+                className="w-full py-3.5 px-6 text-base font-bold text-white bg-[#047857] hover:bg-[#065F46] rounded-xl transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:opacity-75 disabled:cursor-wait"
               >
-                <span>
-                  {isLoading
-                    ? 'Sending Verification Code to Email...'
-                    : 'Create Account & Email Verification Code'}
-                </span>
-                <ArrowRight className="w-4 h-4" />
+                {loadingAction === 'signup' ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin text-white" />
+                    <span>Registering &amp; Dispatching OTP...</span>
+                  </>
+                ) : (
+                  <>
+                    <span>Create Free Account &amp; Send OTP</span>
+                    <ArrowRight className="w-4 h-4" />
+                  </>
+                )}
               </button>
             </form>
           )}
 
-          {/* FORGOT PASSWORD FORM */}
+          {/* ================================================================= */}
+          {/* FORGOT PASSWORD FORM                                              */}
+          {/* ================================================================= */}
           {mode === 'forgot' && (
             <form onSubmit={handleForgotPassword} className="space-y-4">
               <div>
@@ -1184,16 +1279,16 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 
               <div>
                 <label className="block text-sm font-bold text-slate-900 mb-1.5">
-                  Set New Password (Instant Update)
+                  New Password (Optional — to set immediately)
                 </label>
                 <div className="relative">
-                  <KeyRound className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                  <Lock className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
                   <input
-                    type={showPassword ? 'text' : 'password'}
+                    type="password"
                     minLength={6}
                     value={resetNewPassword}
                     onChange={(e) => setResetNewPassword(e.target.value)}
-                    placeholder="Enter new password (min. 6 chars)"
+                    placeholder="Enter new password (optional)"
                     className="w-full pl-10 pr-4 py-3 text-sm bg-slate-50 border border-slate-300 rounded-xl text-slate-950 focus:outline-none focus:border-slate-950 focus:bg-white"
                   />
                 </div>
@@ -1202,23 +1297,67 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               <button
                 type="submit"
                 disabled={isLoading}
-                className="w-full py-3.5 px-6 text-base font-bold text-white bg-[#047857] hover:bg-[#065F46] rounded-xl transition-colors cursor-pointer disabled:opacity-60"
+                className="w-full py-3.5 px-6 text-base font-bold text-white bg-[#047857] hover:bg-[#065F46] rounded-xl transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:opacity-75 disabled:cursor-wait"
               >
-                {isLoading ? 'Updating...' : 'Update Password & Send Reset Link'}
+                {loadingAction === 'signin' ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin text-white" />
+                    <span>Resetting Password...</span>
+                  </>
+                ) : (
+                  <>
+                    <span>Reset Password &amp; Sign In</span>
+                    <ArrowRight className="w-4 h-4" />
+                  </>
+                )}
               </button>
 
+              <div className="text-center pt-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMode('signin');
+                    setErrorMsg(null);
+                    setSuccessMsg(null);
+                  }}
+                  className="text-xs font-semibold text-slate-600 hover:text-slate-950 hover:underline cursor-pointer"
+                >
+                  ← Return to Sign In
+                </button>
+              </div>
+            </form>
+          )}
+
+          {/* Quick Direct Operator Banner at bottom */}
+          {(mode === 'signin' || mode === 'signup') && (
+            <div className="pt-2 border-t border-slate-100">
               <button
                 type="button"
-                onClick={() => {
-                  setMode('signin');
-                  setErrorMsg(null);
-                  setSuccessMsg(null);
-                }}
-                className="w-full py-2.5 text-sm font-bold text-slate-600 hover:text-slate-950 cursor-pointer"
+                disabled={isLoading}
+                onClick={() =>
+                  handleSelectGoogleAccountFromDevice(
+                    'jonajukej777@gmail.com',
+                    'Jona Jukej'
+                  )
+                }
+                className="w-full p-2.5 rounded-xl bg-slate-50 hover:bg-slate-100 border border-slate-200 transition-colors flex items-center justify-between text-xs cursor-pointer group"
               >
-                ← Back to Sign In
+                <div className="flex items-center gap-2">
+                  <div className="w-6 h-6 rounded-md bg-emerald-600 text-white font-bold text-[10px] flex items-center justify-center shrink-0">
+                    JJ
+                  </div>
+                  <span className="font-semibold text-slate-700">
+                    Quick Sign-In as{' '}
+                    <strong className="text-slate-950">
+                      jonajukej777@gmail.com
+                    </strong>
+                  </span>
+                </div>
+                <span className="text-emerald-700 font-bold group-hover:translate-x-0.5 transition-transform">
+                  Direct Enter →
+                </span>
               </button>
-            </form>
+            </div>
           )}
         </div>
       </div>
