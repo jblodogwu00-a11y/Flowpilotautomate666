@@ -516,6 +516,11 @@ service cloud.firestore {
       }
     }
 
+    // Users Profile Collection
+    match /users/{userId} {
+      allow read, write: if request.auth != null && request.auth.uid == userId;
+    }
+
     // Split Collection for User PII & Provider Credentials
     match /users/{userId}/private/{profileId} {
       allow get: if isVerified() &&

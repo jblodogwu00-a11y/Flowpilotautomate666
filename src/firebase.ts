@@ -1,4 +1,4 @@
-import { initializeApp } from 'firebase/app';
+import { initializeApp, getApps, getApp } from 'firebase/app';
 import {
   getAuth,
   GoogleAuthProvider,
@@ -10,6 +10,8 @@ import {
   sendPasswordResetEmail,
   sendEmailVerification,
   onAuthStateChanged,
+  setPersistence,
+  browserLocalPersistence,
   User,
 } from 'firebase/auth';
 import {
@@ -17,6 +19,9 @@ import {
   initializeFirestore,
   setLogLevel,
   doc,
+  getDoc,
+  setDoc,
+  serverTimestamp,
   getDocFromServer,
 } from 'firebase/firestore';
 import firebaseConfig from '../firebase-applet-config.json';
@@ -31,7 +36,7 @@ import {
   syncAccountWithServer,
 } from './services/accountPersistenceService';
 
-const app = initializeApp(firebaseConfig);
+export const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 const targetDatabaseId =
   firebaseConfig.firestoreDatabaseId || 'ai-studio-53b8d6de-81d3-4f2a-9ea0-7359072dfac0';
 
@@ -50,7 +55,13 @@ export const db = (() => {
     return getFirestore(app, targetDatabaseId);
   }
 })();
+
 export const auth = getAuth(app);
+
+// Enable browserLocalPersistence immediately so auth session survives refreshes
+if (typeof window !== 'undefined') {
+  setPersistence(auth, browserLocalPersistence).catch(() => {});
+}
 
 // Gmail send scope is requested ONLY when explicitly connecting Gmail in Workspace Settings
 export const GMAIL_SCOPES = [
@@ -356,6 +367,121 @@ async function testConnection() {
 
 testConnection();
 
+export function mapFirebaseAuthError(err: unknown): string {
+  if (!err) return 'An unexpected error occurred. Please try again.';
+  const code = (err as { code?: string })?.code || '';
+  const rawMsg = err instanceof Error ? err.message : String(err);
+
+  switch (code) {
+    case 'auth/email-already-in-use':
+      return 'Email already exists. Please sign in or use another email.';
+    case 'auth/wrong-password':
+    case 'auth/invalid-credential':
+      return 'Wrong password or invalid credentials.';
+    case 'auth/weak-password':
+      return 'Password must be 6+ chars.';
+    case 'auth/user-not-found':
+      return 'No account found with this email.';
+    case 'auth/invalid-email':
+      return 'Please enter a valid email address.';
+    case 'auth/popup-blocked':
+      return 'Please enable popups and try again. Your browser blocked the Google sign-in window.';
+    case 'auth/popup-closed-by-user':
+    case 'auth/cancelled-popup-request':
+      return 'Google sign-in was cancelled.';
+    case 'auth/unauthorized-domain':
+      return 'Domain not authorized. Please add this domain to Firebase Console > Authentication > Settings > Authorized domains.';
+    case 'auth/operation-not-allowed':
+      return 'Provider not enabled in Firebase Console > Authentication > Sign-in method.';
+    case 'auth/too-many-requests':
+      return 'Too many failed attempts. Please try again later.';
+    default:
+      if (rawMsg.includes('popup')) {
+        return 'Please enable popups and try again.';
+      }
+      return rawMsg || 'Authentication failed. Please try again.';
+  }
+}
+
+export async function ensureUserDocumentInFirestore(
+  user: User,
+  additionalData?: { displayName?: string }
+): Promise<void> {
+  try {
+    const userDocRef = doc(db, 'users', user.uid);
+    const snap = await getDoc(userDocRef);
+    if (!snap.exists()) {
+      await setDoc(userDocRef, {
+        uid: user.uid,
+        email: user.email || '',
+        displayName:
+          user.displayName ||
+          additionalData?.displayName ||
+          user.email?.split('@')[0] ||
+          'User',
+        photoURL: user.photoURL || null,
+        createdAt: serverTimestamp(),
+      });
+    }
+  } catch (err) {
+    console.warn('Firestore users doc sync notice:', err);
+  }
+}
+
+export async function signInWithGooglePopup(): Promise<User> {
+  try {
+    await setPersistence(auth, browserLocalPersistence);
+  } catch {
+    // Non-fatal
+  }
+  const result = await signInWithPopup(auth, googleProvider);
+  if (!result.user) throw new Error('Failed to retrieve user from Google popup');
+  await ensureUserDocumentInFirestore(result.user);
+  return result.user;
+}
+
+export async function signUpWithEmailPassword(
+  email: string,
+  password: string,
+  displayName?: string
+): Promise<User> {
+  try {
+    await setPersistence(auth, browserLocalPersistence);
+  } catch {
+    // Non-fatal
+  }
+  const res = await createUserWithEmailAndPassword(auth, email.trim(), password);
+  if (displayName?.trim()) {
+    await updateProfile(res.user, { displayName: displayName.trim() });
+  }
+  await ensureUserDocumentInFirestore(res.user, { displayName });
+  return res.user;
+}
+
+export async function signInWithEmailPassword(
+  email: string,
+  password: string
+): Promise<User> {
+  try {
+    await setPersistence(auth, browserLocalPersistence);
+  } catch {
+    // Non-fatal
+  }
+  const res = await signInWithEmailAndPassword(auth, email.trim(), password);
+  await ensureUserDocumentInFirestore(res.user);
+  return res.user;
+}
+
+export async function signOutUser(): Promise<void> {
+  await signOut(auth);
+  saveStoredActiveAccountSession(null);
+  notifyAuthSessionChanged(null, null);
+}
+
+export async function sendPasswordReset(email: string): Promise<void> {
+  await sendPasswordResetEmail(auth, email.trim());
+}
+
 export async function signInWithGoogle(fallbackAccountHint?: {
   email?: string;
   fullName?: string;
@@ -389,6 +515,10 @@ export async function signInWithGoogle(fallbackAccountHint?: {
     }
 
     if (result?.user) {
+      await ensureUserDocumentInFirestore(result.user, {
+        displayName: fallbackAccountHint?.fullName,
+      });
+
       const synced = await syncAccountWithServer({
         action: 'google',
         email: result.user.email || fallbackAccountHint?.email || 'google.user@flowpilot.app',

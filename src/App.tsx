@@ -35,6 +35,7 @@ import {
   Inbox,
   Sun,
   Moon,
+  Loader2,
 } from 'lucide-react';
 import {
   auth,
@@ -46,6 +47,7 @@ import {
   handleFirestoreError,
   OperationType,
   subscribeUnifiedAuthState,
+  createSyntheticFirebaseUser,
 } from './firebase';
 import {
   WorkspaceSnapshot,
@@ -607,7 +609,77 @@ export default function App() {
   const handleOpenAuthModal = (mode: AuthModalMode = 'signin') => {
     setAuthModalMode(mode);
     setAuthModalOpen(true);
+    if (typeof window !== 'undefined') {
+      window.history.replaceState({}, '', mode === 'signup' ? '/signup' : '/login');
+    }
   };
+
+  const handleCloseAuthModal = () => {
+    setAuthModalOpen(false);
+    if (
+      typeof window !== 'undefined' &&
+      (window.location.pathname === '/login' || window.location.pathname === '/signup')
+    ) {
+      window.history.replaceState({}, '', '/');
+    }
+  };
+
+  const handleLogoutUser = async () => {
+    await logOutUser();
+    setCurrentUser(null);
+    setViewMode('landing');
+    setAuthModalMode('signin');
+    setAuthModalOpen(true);
+    if (typeof window !== 'undefined') {
+      window.history.replaceState({}, '', '/login');
+    }
+  };
+
+  // Route Synchronization & Protected Route Redirection
+  useEffect(() => {
+    if (!isAuthReady) return;
+
+    const handleRouteSync = () => {
+      if (typeof window === 'undefined') return;
+      const path = window.location.pathname;
+
+      if (path === '/login') {
+        if (currentUser) {
+          setViewMode('workspace');
+          setActiveTab('dashboard');
+          window.history.replaceState({}, '', '/dashboard');
+        } else {
+          setViewMode('landing');
+          setAuthModalMode('signin');
+          setAuthModalOpen(true);
+        }
+      } else if (path === '/signup') {
+        if (currentUser) {
+          setViewMode('workspace');
+          setActiveTab('dashboard');
+          window.history.replaceState({}, '', '/dashboard');
+        } else {
+          setViewMode('landing');
+          setAuthModalMode('signup');
+          setAuthModalOpen(true);
+        }
+      } else if (path === '/dashboard' || path === '/app') {
+        if (!currentUser) {
+          setViewMode('landing');
+          setAuthModalMode('signin');
+          setAuthModalOpen(true);
+          window.history.replaceState({}, '', '/login');
+        } else {
+          setViewMode('workspace');
+          setActiveTab('dashboard');
+        }
+      }
+    };
+
+    handleRouteSync();
+    window.addEventListener('popstate', handleRouteSync);
+    return () => window.removeEventListener('popstate', handleRouteSync);
+  }, [isAuthReady, currentUser]);
 
   const handleRefreshEmailVerification = async () => {
     const refreshed = await reloadUserSession();
@@ -3133,13 +3205,36 @@ export default function App() {
     );
   }
 
+  // Initial Auth Loading Screen (eliminates auth flicker)
+  if (!isAuthReady) {
+    return (
+      <div className="min-h-screen bg-[#090D16] flex flex-col items-center justify-center text-white p-4">
+        <FlowPilotLogo variant="dark" size="lg" />
+        <div className="flex items-center gap-2.5 mt-6 text-sm text-slate-400">
+          <Loader2 className="w-5 h-5 animate-spin text-blue-500" />
+          <span>Initializing secure session...</span>
+        </div>
+      </div>
+    );
+  }
+
   // Public Landing Page View
   if (viewMode === 'landing') {
     return (
       <>
         <LandingPage
           onOpenAuth={handleOpenAuthModal}
-          onEnterWorkspace={() => setViewMode('workspace')}
+          onEnterWorkspace={() => {
+            if (isSignedInAny) {
+              setViewMode('workspace');
+              setActiveTab('dashboard');
+              if (typeof window !== 'undefined') {
+                window.history.pushState({}, '', '/dashboard');
+              }
+            } else {
+              handleOpenAuthModal('signin');
+            }
+          }}
           isAuthenticated={isSignedInAny}
           themeMode={themeMode}
           onToggleThemeMode={() => handleToggleThemeMode()}
@@ -3162,11 +3257,14 @@ export default function App() {
         <AuthModal
           isOpen={authModalOpen}
           initialMode={authModalMode}
-          onClose={() => setAuthModalOpen(false)}
+          onClose={handleCloseAuthModal}
           onAuthSuccess={(opts) => {
             setAuthModalOpen(false);
             setViewMode('workspace');
             setActiveTab('dashboard');
+            if (typeof window !== 'undefined') {
+              window.history.replaceState({}, '', '/dashboard');
+            }
             if (opts?.uid && opts?.email) {
               const resolvedUser =
                 auth.currentUser ||
@@ -3177,6 +3275,7 @@ export default function App() {
                   workspaceName: opts.workspaceName || `${opts.fullName || 'User'}'s Workspace`,
                   provider: opts.email.includes('google') ? 'google.com' : 'password',
                   emailVerified: true,
+                  isFirebaseUser: true,
                 });
               setCurrentUser(resolvedUser);
             }
@@ -3394,7 +3493,7 @@ export default function App() {
                   </button>
                   <button
                     type="button"
-                    onClick={logOutUser}
+                    onClick={handleLogoutUser}
                     title="Sign out"
                     className="p-1.5 text-slate-500 hover:text-red-600 cursor-pointer"
                   >
@@ -3899,7 +3998,7 @@ export default function App() {
               onSendEmailVerification={async () => {
                 if (currentUser) await triggerEmailVerification(currentUser);
               }}
-              onSignOut={logOutUser}
+              onSignOut={handleLogoutUser}
               onOpenAuth={handleOpenAuthModal}
               onReseedWorkspace={async () => {
                 if (currentUser && currentUser.emailVerified) {
@@ -3933,11 +4032,14 @@ export default function App() {
       <AuthModal
         isOpen={authModalOpen}
         initialMode={authModalMode}
-        onClose={() => setAuthModalOpen(false)}
+        onClose={handleCloseAuthModal}
         onAuthSuccess={(opts) => {
           setAuthModalOpen(false);
           setViewMode('workspace');
           setActiveTab('dashboard');
+          if (typeof window !== 'undefined') {
+            window.history.replaceState({}, '', '/dashboard');
+          }
           if (opts?.uid && opts?.email) {
             const resolvedUser =
               auth.currentUser ||
@@ -3948,6 +4050,7 @@ export default function App() {
                 workspaceName: opts.workspaceName || `${opts.fullName || 'User'}'s Workspace`,
                 provider: opts.email.includes('google') ? 'google.com' : 'password',
                 emailVerified: true,
+                isFirebaseUser: true,
               });
             setCurrentUser(resolvedUser);
           }
