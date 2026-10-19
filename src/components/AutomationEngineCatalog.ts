@@ -924,19 +924,39 @@ export function parseOrBuildFlowGraph(automation: Automation | null): Serialized
 }
 
 export function serializeFlowGraphToString(graph: SerializedFlowGraph): string {
-  // Trim history to max 6 snapshots so we stay strictly under Firestore 24,000 char limit
+  // Store clean, compact history snapshots to avoid giant duplicate node payloads
   const compactHistory = (graph.versionHistory || []).slice(0, 5).map((snap) => ({
-    ...snap,
-    nodes: snap.nodes.slice(0, 20),
+    version: snap.version,
+    savedAt: snap.savedAt,
+    author: snap.author,
+    changeNote: snap.changeNote,
+    nodeCount: snap.nodeCount,
+    nodes: (snap.nodes || []).slice(0, 15).map((n) => ({
+      id: n.id,
+      category: n.category,
+      subType: n.subType,
+      title: n.title,
+      subtitle: n.subtitle,
+      branchPath: n.branchPath,
+      config: {
+        channel: n.config?.channel,
+        subjectOrTemplate: n.config?.subjectOrTemplate ? n.config.subjectOrTemplate.slice(0, 100) : undefined,
+        messagePreview: n.config?.messagePreview ? n.config.messagePreview.slice(0, 120) : undefined,
+        delayAmount: n.config?.delayAmount,
+        delayUnit: n.config?.delayUnit,
+        targetTag: n.config?.targetTag,
+        targetList: n.config?.targetList,
+      },
+    })),
   }));
+
   const payload: SerializedFlowGraph = {
-    nodes: graph.nodes.slice(0, 25),
+    nodes: graph.nodes.slice(0, 50),
     version: graph.version,
     versionHistory: compactHistory,
     engineConfig: graph.engineConfig,
   };
-  const raw = JSON.stringify(payload);
-  return raw.slice(0, 23500);
+  return JSON.stringify(payload);
 }
 
 export function deriveStepsSummaryFromNodes(nodes: WorkflowNode[]): string[] {
@@ -944,7 +964,7 @@ export function deriveStepsSummaryFromNodes(nodes: WorkflowNode[]): string[] {
   if (nonTrigger.length === 0) {
     return ['01. Initialize workflow execution'];
   }
-  const lines = nonTrigger.slice(0, 10).map((node, idx) => {
+  const lines = nonTrigger.slice(0, 30).map((node, idx) => {
     const num = String(idx + 1).padStart(2, '0');
     const branchPrefix =
       node.branchPath === 'yes'
@@ -959,12 +979,12 @@ export function deriveStepsSummaryFromNodes(nodes: WorkflowNode[]): string[] {
         ? '[PATH C] '
         : '';
     const scheduleSuffix =
-      node.config.messageScheduleMode === 'delay'
-        ? ` [Wait ${node.config.delayAmount || 1} ${node.config.delayUnit || 'hours'}]`
-        : node.config.messageScheduleMode === 'specific_datetime' && node.config.specificDateTime
+      node.config?.messageScheduleMode === 'delay'
+        ? ` [Wait ${node.config?.delayAmount || 1} ${node.config?.delayUnit || 'hours'}]`
+        : node.config?.messageScheduleMode === 'specific_datetime' && node.config?.specificDateTime
         ? ` [Scheduled ${node.config.specificDateTime.replace('T', ' ')}]`
-        : node.config.messageScheduleMode === 'time_window'
-        ? ` [Send @ ${node.config.scheduledSendTime || '09:00'}]`
+        : node.config?.messageScheduleMode === 'time_window'
+        ? ` [Send @ ${node.config?.scheduledSendTime || '09:00'}]`
         : '';
     return sanitizeString(
       `${num}. ${branchPrefix}${node.title}${scheduleSuffix}`,
@@ -972,19 +992,19 @@ export function deriveStepsSummaryFromNodes(nodes: WorkflowNode[]): string[] {
       `${num}. Workflow Step`
     );
   });
-  return sanitizeStringArray(lines, 10, 160);
+  return sanitizeStringArray(lines, 30, 160);
 }
 
 export function deriveChannelsFromNodes(nodes: WorkflowNode[]): string[] {
   const set = new Set<string>();
   nodes.forEach((n) => {
-    if (n.subType === 'send_email' || n.config.channel === 'email') set.add('email');
-    if (n.subType === 'send_whatsapp' || n.config.channel === 'whatsapp') set.add('whatsapp');
-    if (n.subType === 'send_sms' || n.config.channel === 'sms') set.add('sms');
-    if (n.subType === 'send_webhook' || n.config.channel === 'webhook') set.add('webhook');
+    if (n.subType === 'send_email' || n.config?.channel === 'email') set.add('email');
+    if (n.subType === 'send_whatsapp' || n.config?.channel === 'whatsapp') set.add('whatsapp');
+    if (n.subType === 'send_sms' || n.config?.channel === 'sms') set.add('sms');
+    if (n.subType === 'send_webhook' || n.config?.channel === 'webhook') set.add('webhook');
   });
   if (set.size === 0) set.add('crm');
-  return sanitizeStringArray(Array.from(set), 5, 32);
+  return sanitizeStringArray(Array.from(set), 10, 32);
 }
 
 export function evaluateConditionForContact(

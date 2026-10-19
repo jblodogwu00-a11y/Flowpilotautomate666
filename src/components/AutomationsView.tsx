@@ -472,6 +472,13 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
     automations[0] ||
     null;
 
+  // Keep selectedId synchronized when automations load or change
+  useEffect(() => {
+    if ((!selectedId || !automations.some((a) => a.id === selectedId)) && automations.length > 0) {
+      setSelectedId(automations[0].id);
+    }
+  }, [automations, selectedId]);
+
   // Synchronize canvas nodes when activeWorkflow changes
   useEffect(() => {
     if (activeWorkflow) {
@@ -486,7 +493,11 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
           n.subType === 'send_whatsapp' ||
           n.subType === 'send_sms'
       );
-      setSelectedNodeId(firstMessageNode?.id || parsed.nodes[0]?.id || null);
+      setSelectedNodeId((current) =>
+        current && parsed.nodes.some((n) => n.id === current)
+          ? current
+          : firstMessageNode?.id || parsed.nodes[0]?.id || null
+      );
       setHasUnsavedChanges(false);
     } else {
       const defaults = createDefaultNodesForAutomation();
@@ -499,7 +510,11 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
           n.subType === 'send_whatsapp' ||
           n.subType === 'send_sms'
       );
-      setSelectedNodeId(firstMessageNode?.id || defaults[0]?.id || null);
+      setSelectedNodeId((current) =>
+        current && defaults.some((n) => n.id === current)
+          ? current
+          : firstMessageNode?.id || defaults[0]?.id || null
+      );
       setHasUnsavedChanges(false);
     }
   }, [activeWorkflow?.id, activeWorkflow?.flowGraphJson]);
@@ -747,20 +762,68 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
     }
   };
 
-  // Save & Publish New Version to Firestore
+  // Save & Publish New Version to Durable Storage
   const handleSaveAndPublishVersion = async () => {
-    if (!activeWorkflow) return;
     setIsSavingGraph(true);
     try {
-      const nextVersion = (version || 1) + 1;
       const triggerNode = nodes.find((n) => n.category === 'trigger') || nodes[0];
-      const nextTriggerType = (triggerNode?.subType as TriggerType) || activeWorkflow.triggerType;
+      const nextTriggerType = (triggerNode?.subType as TriggerType) || (activeWorkflow ? activeWorkflow.triggerType : 'form_submission');
       const nextTriggerDetail = sanitizeString(
-        triggerNode?.subtitle || activeWorkflow.triggerDetail,
+        triggerNode?.subtitle || (activeWorkflow ? activeWorkflow.triggerDetail : 'Inbound Lead or Form Capture'),
         120,
         'Event Trigger'
       );
+      const nextTargetList = sanitizeString(
+        triggerNode?.config?.targetList || (activeWorkflow ? resolveAutomationTargetList(activeWorkflow) : (allAvailableLists[0]?.name || 'General Contacts')),
+        80,
+        allAvailableLists[0]?.name || 'General Contacts'
+      );
 
+      if (!activeWorkflow) {
+        // Auto-create and publish workflow from current canvas
+        const initialSnapshot: WorkflowVersionSnapshot = {
+          version: 1,
+          savedAt: new Date().toISOString(),
+          author: 'Workspace Operator',
+          changeNote: sanitizeString(
+            changeNoteInput,
+            100,
+            `Published v1 (${nodes.length} nodes)`
+          ),
+          nodeCount: nodes.length,
+          nodes: [...nodes],
+        };
+        const serializedGraph = serializeFlowGraphToString({
+          nodes,
+          version: 1,
+          versionHistory: [initialSnapshot],
+          engineConfig,
+        });
+
+        await onCreateAutomation({
+          name: newName.trim() || 'Lead Conversion Sequence',
+          triggerType: nextTriggerType,
+          triggerDetail: nextTriggerDetail,
+          targetList: nextTargetList,
+          stepsSummary: deriveStepsSummaryFromNodes(nodes),
+          channels: deriveChannelsFromNodes(nodes),
+          status: 'active',
+          enrolledCount: 0,
+          completedCount: 0,
+          conversionRate: 0,
+          version: 1,
+          flowGraphJson: serializedGraph,
+        });
+
+        setVersion(1);
+        setVersionHistory([initialSnapshot]);
+        setChangeNoteInput('');
+        setHasUnsavedChanges(false);
+        showNotice(`Published Workflow v1 to durable storage`);
+        return;
+      }
+
+      const nextVersion = (version || 1) + 1;
       const newSnapshot: WorkflowVersionSnapshot = {
         version: nextVersion,
         savedAt: new Date().toISOString(),
@@ -782,17 +845,11 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
         engineConfig,
       });
 
-      const nextTargetList = sanitizeString(
-        triggerNode?.config?.targetList || resolveAutomationTargetList(activeWorkflow),
-        80,
-        ''
-      );
-
       await onUpdateAutomation(activeWorkflow.id, {
         name: activeWorkflow.name,
         triggerType: nextTriggerType,
         triggerDetail: nextTriggerDetail,
-        ...(nextTargetList ? { targetList: nextTargetList } : {}),
+        ...(nextTargetList ? { targetList: nextTargetList, targetListName: nextTargetList } : {}),
         stepsSummary: deriveStepsSummaryFromNodes(nodes),
         channels: deriveChannelsFromNodes(nodes),
         status: activeWorkflow.status,
@@ -2168,20 +2225,20 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
                         <Zap className="w-3.5 h-3.5 text-emerald-700" />
                         <span>{isExecutingJob ? 'Executing...' : 'Quick Execute All Steps'}</span>
                       </button>
-
-                      <button
-                        type="button"
-                        onClick={handleSaveAndPublishVersion}
-                        disabled={isSavingGraph}
-                        className="px-4 py-2 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 rounded-xl inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                      >
-                        <Save className="w-3.5 h-3.5" />
-                        <span>
-                          {isSavingGraph ? 'Publishing...' : `Publish v${version + 1}`}
-                        </span>
-                      </button>
                     </>
                   )}
+
+                  <button
+                    type="button"
+                    onClick={handleSaveAndPublishVersion}
+                    disabled={isSavingGraph}
+                    className="px-4 py-2 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 rounded-xl inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50 shadow-sm"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    <span>
+                      {isSavingGraph ? 'Publishing...' : `Publish v${activeWorkflow ? version + 1 : 1}`}
+                    </span>
+                  </button>
                 </div>
               </div>
 
@@ -3909,7 +3966,108 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
                                 onChange={(e) =>
                                   handleUpdateSelectedNode({}, { webhookUrl: e.target.value })
                                 }
+                                placeholder="https://api.yourdomain.com/v1/webhook"
                                 className="w-full px-3.5 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-xl text-[#0F172A]"
+                              />
+                            </div>
+                          )}
+
+                          {selectedNode.subType === 'update_contact_field' && (
+                            <div className="space-y-3">
+                              <div>
+                                <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1">
+                                  CRM Contact Field Name
+                                </label>
+                                <input
+                                  type="text"
+                                  value={selectedNode.config.fieldName || 'temperature'}
+                                  onChange={(e) =>
+                                    handleUpdateSelectedNode({}, { fieldName: e.target.value })
+                                  }
+                                  placeholder="e.g. temperature, company, source"
+                                  className="w-full px-3.5 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl text-[#0F172A] font-mono"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1">
+                                  New Field Value to Assign
+                                </label>
+                                <input
+                                  type="text"
+                                  value={selectedNode.config.fieldValue || 'hot'}
+                                  onChange={(e) =>
+                                    handleUpdateSelectedNode({}, { fieldValue: e.target.value })
+                                  }
+                                  placeholder="e.g. hot, vip_qualified, active"
+                                  className="w-full px-3.5 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl text-[#0F172A]"
+                                />
+                              </div>
+                            </div>
+                          )}
+
+                          {selectedNode.subType === 'create_task' && (
+                            <div>
+                              <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1">
+                                Task Title & Follow-up Instructions
+                              </label>
+                              <input
+                                type="text"
+                                value={selectedNode.config.taskTitle || ''}
+                                onChange={(e) =>
+                                  handleUpdateSelectedNode({}, { taskTitle: e.target.value })
+                                }
+                                placeholder="e.g. Personal discovery call follow-up with lead"
+                                className="w-full px-3.5 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl text-[#0F172A]"
+                              />
+                            </div>
+                          )}
+
+                          {selectedNode.subType === 'notify_team' && (
+                            <div className="space-y-3">
+                              <div>
+                                <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1">
+                                  Team Member / Desk Recipient
+                                </label>
+                                <input
+                                  type="text"
+                                  value={selectedNode.config.teamRecipient || ''}
+                                  onChange={(e) =>
+                                    handleUpdateSelectedNode({}, { teamRecipient: e.target.value })
+                                  }
+                                  placeholder="e.g. Workspace Owner (Sales Desk)"
+                                  className="w-full px-3.5 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl text-[#0F172A]"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1">
+                                  Internal Notification Alert Body
+                                </label>
+                                <textarea
+                                  rows={2}
+                                  value={selectedNode.config.messagePreview || ''}
+                                  onChange={(e) =>
+                                    handleUpdateSelectedNode({}, { messagePreview: e.target.value })
+                                  }
+                                  placeholder="e.g. High-value lead crossed engagement threshold."
+                                  className="w-full px-3.5 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl text-[#0F172A]"
+                                />
+                              </div>
+                            </div>
+                          )}
+
+                          {selectedNode.subType === 'add_internal_note' && (
+                            <div>
+                              <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1">
+                                Audit Note Text to Append to Contact Timeline
+                              </label>
+                              <textarea
+                                rows={3}
+                                value={selectedNode.config.internalNoteText || ''}
+                                onChange={(e) =>
+                                  handleUpdateSelectedNode({}, { internalNoteText: e.target.value })
+                                }
+                                placeholder="e.g. Automated sequence completed touchpoint verification."
+                                className="w-full px-3.5 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl text-[#0F172A]"
                               />
                             </div>
                           )}
@@ -4130,29 +4288,27 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
                       )}
 
                       {/* Commit Version Box */}
-                      {activeWorkflow && (
-                        <div className="pt-4 border-t border-slate-200 space-y-2.5">
-                          <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                            Version Commit Note (Optional)
-                          </label>
-                          <input
-                            type="text"
-                            value={changeNoteInput}
-                            onChange={(e) => setChangeNoteInput(e.target.value)}
-                            placeholder={`e.g. Added WhatsApp branch & 2-day delay`}
-                            className="w-full px-3.5 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl text-[#0F172A]"
-                          />
-                          <button
-                            type="button"
-                            onClick={handleSaveAndPublishVersion}
-                            disabled={isSavingGraph}
-                            className="w-full py-2.5 px-4 text-xs font-bold text-white bg-[#0F172A] hover:bg-slate-800 rounded-xl transition-colors flex items-center justify-center gap-2 cursor-pointer"
-                          >
-                            <Save className="w-3.5 h-3.5 text-emerald-400" />
-                            <span>Save & Publish Workflow v{version + 1}</span>
-                          </button>
-                        </div>
-                      )}
+                      <div className="pt-4 border-t border-slate-200 space-y-2.5">
+                        <label className="block text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                          Version Commit Note (Optional)
+                        </label>
+                        <input
+                          type="text"
+                          value={changeNoteInput}
+                          onChange={(e) => setChangeNoteInput(e.target.value)}
+                          placeholder={`e.g. Added WhatsApp branch & 2-day delay`}
+                          className="w-full px-3.5 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl text-[#0F172A]"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleSaveAndPublishVersion}
+                          disabled={isSavingGraph}
+                          className="w-full py-2.5 px-4 text-xs font-bold text-white bg-[#0F172A] hover:bg-slate-800 rounded-xl transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-sm disabled:opacity-50"
+                        >
+                          <Save className="w-3.5 h-3.5 text-emerald-400" />
+                          <span>Save & Publish Workflow v{activeWorkflow ? version + 1 : 1}</span>
+                        </button>
+                      </div>
                     </div>
                   ) : (
                     <div className="py-16 text-center text-sm text-slate-500">

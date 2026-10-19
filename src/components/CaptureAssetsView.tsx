@@ -885,7 +885,7 @@ export const CaptureAssetsView: React.FC<CaptureAssetsViewProps> = ({
   // Submit Lead from Interactive Preview Modal (Includes Custom Fields, Survey Answers, Submission Tags & Redirect)
   const handleTestLeadSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!previewAsset || !testName.trim() || !testEmail.trim()) return;
+    if (!previewAsset || !testName.trim() || !testEmail.trim() || !testPhone.trim()) return;
 
     const meta = getExtendedForAsset(previewAsset);
     const formattedCustomFields = Object.entries(testCustomValues)
@@ -3684,10 +3684,11 @@ export const CaptureAssetsView: React.FC<CaptureAssetsViewProps> = ({
                         </div>
                         <div>
                           <label className="block font-bold text-slate-700 mb-1">
-                            WhatsApp / Mobile Phone
+                            Phone Number *
                           </label>
                           <input
                             type="tel"
+                            required
                             value={testPhone}
                             onChange={(e) => setTestPhone(e.target.value)}
                             placeholder="+1 (555) 019-2831"

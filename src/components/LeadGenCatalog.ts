@@ -651,11 +651,11 @@ export const READY_MADE_PAGE_TEMPLATES: ReadyMadePageTemplate[] = [
       },
       {
         id: 'fld_phone',
-        label: 'WhatsApp Number (For Instant VIP Alerts)',
+        label: 'Phone Number',
         fieldKey: 'phone',
         inputType: 'tel',
         placeholder: '+1 (555) 019-2831',
-        required: false,
+        required: true,
         isCustomField: false,
       },
       {
@@ -760,11 +760,11 @@ export const READY_MADE_PAGE_TEMPLATES: ReadyMadePageTemplate[] = [
       },
       {
         id: 'fld_phone',
-        label: 'WhatsApp Number (Optional — Get Instant Link via WhatsApp)',
+        label: 'Phone Number',
         fieldKey: 'phone',
         inputType: 'tel',
         placeholder: '+1 (555) 019-2831',
-        required: false,
+        required: true,
         isCustomField: false,
       },
     ],
@@ -877,7 +877,7 @@ export const READY_MADE_PAGE_TEMPLATES: ReadyMadePageTemplate[] = [
       },
       {
         id: 'fld_phone',
-        label: 'WhatsApp / Mobile Number (For 15-Min Live SMS Alert)',
+        label: 'Phone Number',
         fieldKey: 'phone',
         inputType: 'tel',
         placeholder: '+1 (555) 019-2831',
@@ -967,7 +967,7 @@ export const READY_MADE_PAGE_TEMPLATES: ReadyMadePageTemplate[] = [
       },
       {
         id: 'fld_phone',
-        label: 'Direct WhatsApp / Mobile Number',
+        label: 'Phone Number',
         fieldKey: 'phone',
         inputType: 'tel',
         placeholder: '+1 (555) 019-2831',
@@ -1040,11 +1040,11 @@ export const READY_MADE_PAGE_TEMPLATES: ReadyMadePageTemplate[] = [
       },
       {
         id: 'fld_phone',
-        label: 'WhatsApp / SMS Number',
+        label: 'Phone Number',
         fieldKey: 'phone',
         inputType: 'tel',
         placeholder: '+1 (555) 019-2831',
-        required: false,
+        required: true,
         isCustomField: false,
       },
     ],
@@ -1146,11 +1146,11 @@ export function buildDefaultFormFieldsForFormat(format: LeadGenToolFormat): Lead
       ...baseFields,
       {
         id: 'fld_phone',
-        label: 'WhatsApp / Mobile Number (Optional)',
+        label: 'Phone Number',
         fieldKey: 'phone',
         inputType: 'tel',
         placeholder: '+1 (555) 019-2831',
-        required: false,
+        required: true,
         isCustomField: false,
       },
     ];
@@ -1161,11 +1161,11 @@ export function buildDefaultFormFieldsForFormat(format: LeadGenToolFormat): Lead
       ...baseFields,
       {
         id: 'fld_phone',
-        label: 'Phone / WhatsApp Number',
+        label: 'Phone Number',
         fieldKey: 'phone',
         inputType: 'tel',
         placeholder: '+1 (555) 019-2831',
-        required: false,
+        required: true,
         isCustomField: false,
       },
       {

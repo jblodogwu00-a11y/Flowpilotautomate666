@@ -61,8 +61,8 @@ export const LandingPage: React.FC<LandingPageProps> = ({
   const handleLeadSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setLeadError('');
-    if (!leadName.trim() || !leadEmail.trim() || !leadEmail.includes('@')) {
-      setLeadError('Please provide a valid full name and email address.');
+    if (!leadName.trim() || !leadEmail.trim() || !leadEmail.includes('@') || !leadPhone.trim()) {
+      setLeadError('Please provide a valid full name, email address, and phone number.');
       return;
     }
     if (!leadConsent) {
@@ -759,10 +759,11 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                     <div>
                       <label className="block text-xs font-medium text-slate-200 mb-1">
-                        WhatsApp / SMS Number
+                        Phone Number *
                       </label>
                       <input
                         type="tel"
+                        required
                         maxLength={32}
                         placeholder="+1 555 234 5678"
                         value={leadPhone}
