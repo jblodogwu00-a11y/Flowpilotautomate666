@@ -48,10 +48,10 @@ export const defaultPublicFormSchema: LeadGenFormField[] = [
   },
   {
     id: 'fld_phone',
-    label: 'Phone Number',
+    label: 'Phone / WhatsApp Number',
     fieldKey: 'phone',
     inputType: 'tel',
-    placeholder: '+1 (555) 019-2831',
+    placeholder: '+1 (555) 019-2831 (Phone or WhatsApp)',
     required: true,
     isCustomField: false,
   },
@@ -88,13 +88,17 @@ export const FormPublicView: React.FC<FormPublicViewProps> = ({
     : defaultPublicFormSchema
   ).map((field) => {
     if (field.fieldKey === 'phone' || field.inputType === 'tel') {
-      // FIX 3: Required is true, remove "(optional)" from label
+      // Form validation requires Phone / WhatsApp Number
       const cleanedLabel = field.label
         .replace(/\s*\(\s*optional\s*\)/gi, '')
         .trim();
+      const finalLabel =
+        !cleanedLabel || /^phone\s*(number)?$/i.test(cleanedLabel)
+          ? 'Phone / WhatsApp Number'
+          : cleanedLabel;
       return {
         ...field,
-        label: cleanedLabel || 'Phone Number',
+        label: finalLabel,
         required: true,
       };
     }
@@ -114,9 +118,9 @@ export const FormPublicView: React.FC<FormPublicViewProps> = ({
       setErrorMessage('A valid Email Address is required.');
       return;
     }
-    // FIX 3: Form validation requires phone number
+    // Form validation requires phone/whatsapp number
     if (!phone.trim()) {
-      setErrorMessage('Phone Number is required.');
+      setErrorMessage('Phone / WhatsApp Number is required.');
       return;
     }
 
@@ -279,16 +283,18 @@ export const FormPublicView: React.FC<FormPublicViewProps> = ({
                 if (fld.fieldKey === 'phone' || fld.inputType === 'tel') {
                   return (
                     <div key={fld.id}>
-                      {/* FIX 3: Clean label without "(optional)", required indicator */}
                       <label className="block font-semibold text-slate-800 mb-1">
-                        Phone Number *
+                        {fld.label && !/^phone(\s*number)?$/i.test(fld.label.trim())
+                          ? fld.label
+                          : 'Phone / WhatsApp Number'}{' '}
+                        *
                       </label>
                       <input
                         type="tel"
                         required
                         value={phone}
                         onChange={(e) => setPhone(e.target.value)}
-                        placeholder={fld.placeholder || '+1 (555) 019-2831'}
+                        placeholder={fld.placeholder || '+1 (555) 019-2831 (Phone / WhatsApp)'}
                         className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-emerald-600 focus:bg-white"
                       />
                     </div>

@@ -97,7 +97,7 @@ interface AutomationsViewProps {
   onClearModalMount?: () => void;
   onCreateAutomation: (
     data: Omit<Automation, 'id' | 'workspaceId' | 'ownerId' | 'createdAt' | 'updatedAt'>
-  ) => Promise<void>;
+  ) => Promise<Automation | void>;
   onUpdateAutomation: (
     id: string,
     data: Omit<Automation, 'id' | 'workspaceId' | 'ownerId' | 'createdAt' | 'updatedAt'>
@@ -217,6 +217,8 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [isSavingGraph, setIsSavingGraph] = useState(false);
   const [changeNoteInput, setChangeNoteInput] = useState('');
+  const lastActiveWorkflowIdRef = React.useRef<string | null>(null);
+  const lastPublishedFlowGraphJsonRef = React.useRef<string | null>(null);
 
   // Drag & Drop State
   const [draggedPaletteItem, setDraggedPaletteItem] = useState<PaletteItemDefinition | null>(null);
@@ -482,6 +484,24 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
   // Synchronize canvas nodes when activeWorkflow changes
   useEffect(() => {
     if (activeWorkflow) {
+      // If we are on the same workflow and have unsaved changes on canvas, protect user's edits!
+      if (lastActiveWorkflowIdRef.current === activeWorkflow.id && hasUnsavedChanges) {
+        return;
+      }
+
+      // If this update was triggered by our own publish, keep current nodes and selection intact
+      if (
+        lastActiveWorkflowIdRef.current === activeWorkflow.id &&
+        activeWorkflow.flowGraphJson &&
+        activeWorkflow.flowGraphJson === lastPublishedFlowGraphJsonRef.current
+      ) {
+        setVersion(activeWorkflow.version || 1);
+        return;
+      }
+
+      lastActiveWorkflowIdRef.current = activeWorkflow.id;
+      lastPublishedFlowGraphJsonRef.current = activeWorkflow.flowGraphJson || null;
+
       const parsed = parseOrBuildFlowGraph(activeWorkflow);
       setNodes(parsed.nodes);
       setVersion(parsed.version);
@@ -500,6 +520,8 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
       );
       setHasUnsavedChanges(false);
     } else {
+      lastActiveWorkflowIdRef.current = null;
+      lastPublishedFlowGraphJsonRef.current = null;
       const defaults = createDefaultNodesForAutomation();
       setNodes(defaults);
       setVersion(1);
@@ -800,12 +822,15 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
           engineConfig,
         });
 
-        await onCreateAutomation({
+        lastPublishedFlowGraphJsonRef.current = serializedGraph;
+        const stepsArr = deriveStepsSummaryFromNodes(nodes);
+        const created = await onCreateAutomation({
           name: newName.trim() || 'Lead Conversion Sequence',
           triggerType: nextTriggerType,
           triggerDetail: nextTriggerDetail,
           targetList: nextTargetList,
-          stepsSummary: deriveStepsSummaryFromNodes(nodes),
+          stepsSummary: stepsArr,
+          steps: stepsArr,
           channels: deriveChannelsFromNodes(nodes),
           status: 'active',
           enrolledCount: 0,
@@ -815,11 +840,16 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
           flowGraphJson: serializedGraph,
         });
 
+        if (created && typeof created === 'object' && 'id' in created && (created as Automation).id) {
+          lastActiveWorkflowIdRef.current = (created as Automation).id;
+          setSelectedId((created as Automation).id);
+        }
+
         setVersion(1);
         setVersionHistory([initialSnapshot]);
         setChangeNoteInput('');
         setHasUnsavedChanges(false);
-        showNotice(`Published Workflow v1 to durable storage`);
+        showNotice(`Published Workflow v1 with ${nodes.length} steps to durable storage`);
         return;
       }
 
@@ -845,12 +875,17 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
         engineConfig,
       });
 
+      lastPublishedFlowGraphJsonRef.current = serializedGraph;
+      lastActiveWorkflowIdRef.current = activeWorkflow.id;
+      const stepsArr = deriveStepsSummaryFromNodes(nodes);
+
       await onUpdateAutomation(activeWorkflow.id, {
         name: activeWorkflow.name,
         triggerType: nextTriggerType,
         triggerDetail: nextTriggerDetail,
         ...(nextTargetList ? { targetList: nextTargetList, targetListName: nextTargetList } : {}),
-        stepsSummary: deriveStepsSummaryFromNodes(nodes),
+        stepsSummary: stepsArr,
+        steps: stepsArr,
         channels: deriveChannelsFromNodes(nodes),
         status: activeWorkflow.status,
         enrolledCount: activeWorkflow.enrolledCount,
@@ -864,7 +899,9 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
       setVersionHistory(nextHistory);
       setChangeNoteInput('');
       setHasUnsavedChanges(false);
-      showNotice(`Published Workflow v${nextVersion} to durable storage`);
+      showNotice(
+        `Published "${selectedNode?.title || activeWorkflow.name}" to Workflow v${nextVersion} (${nodes.length} steps saved to durable storage)`
+      );
     } finally {
       setIsSavingGraph(false);
     }
@@ -1040,12 +1077,14 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
 
     setIsCreating(true);
     try {
-      await onCreateAutomation({
+      const stepsArr = deriveStepsSummaryFromNodes(initialNodes);
+      const created = await onCreateAutomation({
         name: cleanName,
         triggerType: newTriggerType,
         triggerDetail: cleanDetail,
         targetList: selectedList,
-        stepsSummary: deriveStepsSummaryFromNodes(initialNodes),
+        stepsSummary: stepsArr,
+        steps: stepsArr,
         channels: deriveChannelsFromNodes(initialNodes),
         status: 'active',
         enrolledCount: 0,
@@ -1054,6 +1093,13 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
         version: 1,
         flowGraphJson: initialGraph,
       });
+
+      if (created && typeof created === 'object' && 'id' in created && (created as Automation).id) {
+        lastActiveWorkflowIdRef.current = (created as Automation).id;
+        lastPublishedFlowGraphJsonRef.current = initialGraph;
+        setSelectedId((created as Automation).id);
+      }
+
       setIsModalOpen(false);
       setWorkspaceTab('canvas');
       setNewName('');
@@ -3315,16 +3361,35 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
                 <div className="xl:col-span-5 p-6 bg-white">
                   {selectedNode ? (
                     <div className="space-y-5">
-                      <div className="border-b border-slate-200 pb-4">
-                        <span className="text-[11px] font-mono font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-200">
-                          Inspector • {selectedNode.category.toUpperCase()}
-                        </span>
-                        <h4 className="font-display text-lg font-bold text-[#0F172A] mt-2">
-                          {selectedNode.title}
-                        </h4>
-                        <p className="text-xs text-slate-500 mt-0.5">
-                          Configure execution parameters, branching rules, and provider templates
-                        </p>
+                      <div className="border-b border-slate-200 pb-4 flex items-start justify-between gap-3">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="text-[11px] font-mono font-bold uppercase tracking-wider px-2.5 py-0.5 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-200">
+                              Inspector • {selectedNode.category.toUpperCase()}
+                            </span>
+                            {hasUnsavedChanges && (
+                              <span className="text-[10px] font-mono font-bold uppercase tracking-wider px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 border border-amber-300">
+                                Unsaved on Canvas
+                              </span>
+                            )}
+                          </div>
+                          <h4 className="font-display text-lg font-bold text-[#0F172A] mt-2">
+                            {selectedNode.title}
+                          </h4>
+                          <p className="text-xs text-slate-500 mt-0.5">
+                            Configure execution parameters, branching rules, and provider templates
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={handleSaveAndPublishVersion}
+                          disabled={isSavingGraph}
+                          className="px-3.5 py-2 text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 rounded-xl inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50 shrink-0 shadow-xs"
+                          title="Save changes and publish workflow to durable storage"
+                        >
+                          <Save className="w-3.5 h-3.5" />
+                          <span>{isSavingGraph ? 'Saving...' : 'Save & Publish'}</span>
+                        </button>
                       </div>
 
                       {/* Common Node Title & Subtitle */}
@@ -4070,6 +4135,53 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
                                 className="w-full px-3.5 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl text-[#0F172A]"
                               />
                             </div>
+                          {selectedNode.subType === 'enroll_workflow' && (
+                            <div>
+                              <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1">
+                                Target Destination Automation Workflow
+                              </label>
+                              {automations.length > 0 ? (
+                                <select
+                                  value={
+                                    selectedNode.config.targetWorkflowName ||
+                                    automations.find((a) => a.id !== activeWorkflow?.id)?.name ||
+                                    automations[0]?.name ||
+                                    ''
+                                  }
+                                  onChange={(e) =>
+                                    handleUpdateSelectedNode({}, { targetWorkflowName: e.target.value })
+                                  }
+                                  className="w-full px-3.5 py-2 text-xs font-bold bg-slate-50 border border-slate-200 rounded-xl text-[#0F172A]"
+                                >
+                                  {automations.map((a) => (
+                                    <option key={a.id} value={a.name}>
+                                      {a.name} (v{a.version || 1})
+                                    </option>
+                                  ))}
+                                </select>
+                              ) : (
+                                <input
+                                  type="text"
+                                  value={selectedNode.config.targetWorkflowName || ''}
+                                  onChange={(e) =>
+                                    handleUpdateSelectedNode({}, { targetWorkflowName: e.target.value })
+                                  }
+                                  placeholder="e.g. VIP Customer Onboarding Sequence"
+                                  className="w-full px-3.5 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl text-[#0F172A]"
+                                />
+                              )}
+                            </div>
+                          )}
+
+                          {selectedNode.subType === 'stop_workflow' && (
+                            <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 text-xs text-slate-600 space-y-1">
+                              <span className="font-bold text-[#0F172A] block">
+                                Workflow Termination Step
+                              </span>
+                              <p>
+                                Contacts reaching this action step will exit the workflow cleanly and no further downstream nodes will execute.
+                              </p>
+                            </div>
                           )}
                         </div>
                       )}
@@ -4303,10 +4415,14 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
                           type="button"
                           onClick={handleSaveAndPublishVersion}
                           disabled={isSavingGraph}
-                          className="w-full py-2.5 px-4 text-xs font-bold text-white bg-[#0F172A] hover:bg-slate-800 rounded-xl transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-sm disabled:opacity-50"
+                          className="w-full py-2.5 px-4 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-600 rounded-xl transition-colors flex items-center justify-center gap-2 cursor-pointer shadow-sm disabled:opacity-50"
                         >
-                          <Save className="w-3.5 h-3.5 text-emerald-400" />
-                          <span>Save & Publish Workflow v{activeWorkflow ? version + 1 : 1}</span>
+                          <Save className="w-3.5 h-3.5 text-white" />
+                          <span>
+                            {isSavingGraph
+                              ? 'Publishing Workflow to Durable Storage...'
+                              : `Save & Publish Workflow v${activeWorkflow ? version + 1 : 1}`}
+                          </span>
                         </button>
                       </div>
                     </div>

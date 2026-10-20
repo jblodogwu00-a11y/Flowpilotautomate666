@@ -651,7 +651,7 @@ export const READY_MADE_PAGE_TEMPLATES: ReadyMadePageTemplate[] = [
       },
       {
         id: 'fld_phone',
-        label: 'Phone Number',
+        label: 'Phone / WhatsApp Number',
         fieldKey: 'phone',
         inputType: 'tel',
         placeholder: '+1 (555) 019-2831',
@@ -760,7 +760,7 @@ export const READY_MADE_PAGE_TEMPLATES: ReadyMadePageTemplate[] = [
       },
       {
         id: 'fld_phone',
-        label: 'Phone Number',
+        label: 'Phone / WhatsApp Number',
         fieldKey: 'phone',
         inputType: 'tel',
         placeholder: '+1 (555) 019-2831',
@@ -877,7 +877,7 @@ export const READY_MADE_PAGE_TEMPLATES: ReadyMadePageTemplate[] = [
       },
       {
         id: 'fld_phone',
-        label: 'Phone Number',
+        label: 'Phone / WhatsApp Number',
         fieldKey: 'phone',
         inputType: 'tel',
         placeholder: '+1 (555) 019-2831',
@@ -967,7 +967,7 @@ export const READY_MADE_PAGE_TEMPLATES: ReadyMadePageTemplate[] = [
       },
       {
         id: 'fld_phone',
-        label: 'Phone Number',
+        label: 'Phone / WhatsApp Number',
         fieldKey: 'phone',
         inputType: 'tel',
         placeholder: '+1 (555) 019-2831',
@@ -1040,7 +1040,7 @@ export const READY_MADE_PAGE_TEMPLATES: ReadyMadePageTemplate[] = [
       },
       {
         id: 'fld_phone',
-        label: 'Phone Number',
+        label: 'Phone / WhatsApp Number',
         fieldKey: 'phone',
         inputType: 'tel',
         placeholder: '+1 (555) 019-2831',
@@ -1146,7 +1146,7 @@ export function buildDefaultFormFieldsForFormat(format: LeadGenToolFormat): Lead
       ...baseFields,
       {
         id: 'fld_phone',
-        label: 'Phone Number',
+        label: 'Phone / WhatsApp Number',
         fieldKey: 'phone',
         inputType: 'tel',
         placeholder: '+1 (555) 019-2831',
@@ -1161,7 +1161,7 @@ export function buildDefaultFormFieldsForFormat(format: LeadGenToolFormat): Lead
       ...baseFields,
       {
         id: 'fld_phone',
-        label: 'Phone Number',
+        label: 'Phone / WhatsApp Number',
         fieldKey: 'phone',
         inputType: 'tel',
         placeholder: '+1 (555) 019-2831',

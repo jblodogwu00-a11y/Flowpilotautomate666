@@ -1856,6 +1856,49 @@ async function startServer() {
     });
   });
 
+  // WhatsApp Cloud API Webhook Verification (GET) & Events (POST)
+  app.get('/api/webhook/whatsapp', (req, res) => {
+    const mode = req.query['hub.mode'];
+    const token = req.query['hub.verify_token'];
+    const challenge = req.query['hub.challenge'];
+    const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN || 'affiliate_pulse_verify';
+    if (mode === 'subscribe' && token === verifyToken) {
+      res.status(200).send(challenge);
+      return;
+    }
+    res.status(403).send('Forbidden');
+  });
+
+  app.post('/api/webhook/whatsapp', (req, res) => {
+    const body = req.body;
+    console.log('Webhook received:', JSON.stringify(body, null, 2));
+    try {
+      const entry = body?.entry?.[0];
+      const change = entry?.changes?.[0];
+      const messageObj = change?.value?.messages?.[0];
+      const contactObj = change?.value?.contacts?.[0];
+      if (messageObj) {
+        const fromPhone = messageObj.from || '';
+        const leadName = contactObj?.profile?.name || fromPhone || 'WhatsApp Lead';
+        const textBody = messageObj.text?.body || messageObj.button?.text || 'Interactive response';
+        inboundWebhookQueue.unshift({
+          id: `inb_wa_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          channel: 'whatsapp',
+          leadName,
+          leadEmail: '',
+          leadPhone: fromPhone,
+          message: textBody,
+          subject: 'WhatsApp Inbound Message',
+          listName: 'General Contacts',
+          receivedAt: new Date().toISOString(),
+        });
+      }
+    } catch {
+      // Non-fatal
+    }
+    res.status(200).send('EVENT_RECEIVED');
+  });
+
   // ==========================================================================
   // 6. PUBLIC LEAD CAPTURE ENDPOINT (External HTML Forms & Public Shareable Pages)
   // ==========================================================================

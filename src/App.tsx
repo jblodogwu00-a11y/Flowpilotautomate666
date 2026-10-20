@@ -432,7 +432,7 @@ export default function App() {
   const handleCreateAutomation = useCallback(
     async (
       data: Omit<Automation, 'id' | 'workspaceId' | 'ownerId' | 'createdAt' | 'updatedAt'>
-    ) => {
+    ): Promise<Automation> => {
       const newAuto: Automation = {
         ...data,
         id: generateSafeId('aut'),
@@ -451,6 +451,7 @@ export default function App() {
         `Trigger: ${newAuto.triggerType} | Status: ${newAuto.status}`,
         'system'
       );
+      return newAuto;
     },
     [activeUid, handleLogActivity, snapshot.workspace.id, updateSnapshot]
   );

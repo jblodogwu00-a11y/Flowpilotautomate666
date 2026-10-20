@@ -811,13 +811,21 @@ export function parseOrBuildFlowGraph(automation: Automation | null): Serialized
 
   if (automation.flowGraphJson) {
     try {
-      const parsed = JSON.parse(automation.flowGraphJson) as SerializedFlowGraph;
+      const parsed = JSON.parse(automation.flowGraphJson);
       if (parsed && Array.isArray(parsed.nodes) && parsed.nodes.length > 0) {
         return {
           nodes: parsed.nodes,
           version: parsed.version || automation.version || 1,
           versionHistory: Array.isArray(parsed.versionHistory) ? parsed.versionHistory : [],
           engineConfig: { ...DEFAULT_ENGINE_CONFIG, ...(parsed.engineConfig || {}) },
+        };
+      }
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return {
+          nodes: parsed,
+          version: automation.version || 1,
+          versionHistory: [],
+          engineConfig: { ...DEFAULT_ENGINE_CONFIG },
         };
       }
     } catch {
@@ -931,7 +939,7 @@ export function serializeFlowGraphToString(graph: SerializedFlowGraph): string {
     author: snap.author,
     changeNote: snap.changeNote,
     nodeCount: snap.nodeCount,
-    nodes: (snap.nodes || []).slice(0, 15).map((n) => ({
+    nodes: (snap.nodes || []).slice(0, 30).map((n) => ({
       id: n.id,
       category: n.category,
       subType: n.subType,
@@ -939,13 +947,9 @@ export function serializeFlowGraphToString(graph: SerializedFlowGraph): string {
       subtitle: n.subtitle,
       branchPath: n.branchPath,
       config: {
-        channel: n.config?.channel,
-        subjectOrTemplate: n.config?.subjectOrTemplate ? n.config.subjectOrTemplate.slice(0, 100) : undefined,
-        messagePreview: n.config?.messagePreview ? n.config.messagePreview.slice(0, 120) : undefined,
-        delayAmount: n.config?.delayAmount,
-        delayUnit: n.config?.delayUnit,
-        targetTag: n.config?.targetTag,
-        targetList: n.config?.targetList,
+        ...(n.config || {}),
+        subjectOrTemplate: n.config?.subjectOrTemplate ? n.config.subjectOrTemplate.slice(0, 160) : undefined,
+        messagePreview: n.config?.messagePreview ? n.config.messagePreview.slice(0, 400) : undefined,
       },
     })),
   }));
