@@ -104,7 +104,7 @@ interface CampaignsViewProps {
   ) => Promise<void>;
   onCreateAutomation?: (
     data: Omit<Automation, 'id' | 'workspaceId' | 'ownerId' | 'createdAt' | 'updatedAt'>
-  ) => Promise<void>;
+  ) => Promise<Automation | void>;
   onUpdateWorkspace?: (
     data: Omit<Workspace, 'id' | 'ownerId' | 'createdAt' | 'updatedAt'>
   ) => Promise<void>;

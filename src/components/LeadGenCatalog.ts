@@ -1233,11 +1233,11 @@ export function buildDefaultFormFieldsForFormat(format: LeadGenToolFormat): Lead
     ...baseFields,
     {
       id: 'fld_phone',
-      label: 'WhatsApp / SMS Phone',
+      label: 'Phone / WhatsApp Number',
       fieldKey: 'phone',
       inputType: 'tel',
-      placeholder: '+1 (555) 019-2831',
-      required: false,
+      placeholder: '+1 (555) 019-2831 (Phone / WhatsApp)',
+      required: true,
       isCustomField: false,
     },
   ];

@@ -29,6 +29,7 @@ import {
   ChatbotMatchType,
   Contact,
   ContactList,
+  Automation,
   AutomationFlow,
   Workspace,
   UserPrivateProfile,
@@ -85,7 +86,7 @@ interface ChatbotsViewProps {
   ) => Promise<void>;
   onCreateAutomation?: (
     data: Omit<AutomationFlow, 'id' | 'workspaceId' | 'ownerId' | 'createdAt' | 'updatedAt'>
-  ) => Promise<void>;
+  ) => Promise<Automation | AutomationFlow | void>;
   onCreateTask?: (
     data: Omit<TaskItem, 'id' | 'workspaceId' | 'ownerId' | 'createdAt' | 'updatedAt'>
   ) => Promise<void>;

@@ -4135,6 +4135,8 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
                                 className="w-full px-3.5 py-2 text-xs bg-slate-50 border border-slate-200 rounded-xl text-[#0F172A]"
                               />
                             </div>
+                          )}
+
                           {selectedNode.subType === 'enroll_workflow' && (
                             <div>
                               <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 mb-1">
