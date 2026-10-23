@@ -21,7 +21,13 @@
         "category": {
           "type": "string",
           "description": "Primary business segment.",
-          "enum": ["creator", "freelancer", "coach", "agency", "smb"]
+          "enum": [
+            "creator",
+            "freelancer",
+            "coach",
+            "agency",
+            "smb"
+          ]
         },
         "timezone": {
           "type": "string",
@@ -32,7 +38,13 @@
         "currency": {
           "type": "string",
           "description": "ISO currency code.",
-          "enum": ["USD", "EUR", "GBP", "NGN", "CAD"]
+          "enum": [
+            "USD",
+            "EUR",
+            "GBP",
+            "NGN",
+            "CAD"
+          ]
         },
         "senderName": {
           "type": "string",
@@ -212,11 +224,20 @@
         },
         "role": {
           "type": "string",
-          "enum": ["owner", "admin", "editor", "analyst"]
+          "enum": [
+            "owner",
+            "admin",
+            "editor",
+            "analyst"
+          ]
         },
         "status": {
           "type": "string",
-          "enum": ["active", "invited", "revoked"]
+          "enum": [
+            "active",
+            "invited",
+            "revoked"
+          ]
         },
         "createdAt": {
           "type": "string",
@@ -272,11 +293,21 @@
         },
         "stage": {
           "type": "string",
-          "enum": ["lead", "warm_lead", "qualified", "customer", "churned"]
+          "enum": [
+            "lead",
+            "warm_lead",
+            "qualified",
+            "customer",
+            "churned"
+          ]
         },
         "temperature": {
           "type": "string",
-          "enum": ["hot", "warm", "cold"]
+          "enum": [
+            "hot",
+            "warm",
+            "cold"
+          ]
         },
         "source": {
           "type": "string",
@@ -285,7 +316,11 @@
         },
         "consentStatus": {
           "type": "string",
-          "enum": ["opted_in", "pending_double_opt_in", "unsubscribed"]
+          "enum": [
+            "opted_in",
+            "pending_double_opt_in",
+            "unsubscribed"
+          ]
         },
         "listName": {
           "type": "string",
@@ -414,7 +449,12 @@
         },
         "status": {
           "type": "string",
-          "enum": ["active", "paused", "draft", "archived"]
+          "enum": [
+            "active",
+            "paused",
+            "draft",
+            "archived"
+          ]
         },
         "enrolledCount": {
           "type": "number"
@@ -484,7 +524,11 @@
         },
         "channel": {
           "type": "string",
-          "enum": ["email", "whatsapp", "sms"]
+          "enum": [
+            "email",
+            "whatsapp",
+            "sms"
+          ]
         },
         "targetList": {
           "type": "string",
@@ -503,7 +547,12 @@
         },
         "status": {
           "type": "string",
-          "enum": ["draft", "scheduled", "sending", "sent"]
+          "enum": [
+            "draft",
+            "scheduled",
+            "sending",
+            "sent"
+          ]
         },
         "recipientCount": {
           "type": "number"
@@ -598,7 +647,12 @@
         },
         "assetType": {
           "type": "string",
-          "enum": ["landing_page", "inline_form", "popup_form", "lead_magnet_funnel"]
+          "enum": [
+            "landing_page",
+            "inline_form",
+            "popup_form",
+            "lead_magnet_funnel"
+          ]
         },
         "slug": {
           "type": "string",
@@ -642,7 +696,11 @@
         },
         "status": {
           "type": "string",
-          "enum": ["published", "draft", "archived"]
+          "enum": [
+            "published",
+            "draft",
+            "archived"
+          ]
         },
         "viewsCount": {
           "type": "number"
@@ -706,7 +764,11 @@
         },
         "matchType": {
           "type": "string",
-          "enum": ["exact", "contains", "first_message"]
+          "enum": [
+            "exact",
+            "contains",
+            "first_message"
+          ]
         },
         "welcomeMessage": {
           "type": "string",
@@ -722,7 +784,11 @@
         },
         "status": {
           "type": "string",
-          "enum": ["active", "paused", "archived"]
+          "enum": [
+            "active",
+            "paused",
+            "archived"
+          ]
         },
         "sessionsCount": {
           "type": "number"
@@ -779,11 +845,20 @@
         },
         "category": {
           "type": "string",
-          "enum": ["follow_up", "campaign_review", "compliance_check", "onboarding"]
+          "enum": [
+            "follow_up",
+            "campaign_review",
+            "compliance_check",
+            "onboarding"
+          ]
         },
         "priority": {
           "type": "string",
-          "enum": ["high", "medium", "low"]
+          "enum": [
+            "high",
+            "medium",
+            "low"
+          ]
         },
         "dueDate": {
           "type": "string",
@@ -797,7 +872,11 @@
         },
         "status": {
           "type": "string",
-          "enum": ["pending", "in_progress", "completed"]
+          "enum": [
+            "pending",
+            "in_progress",
+            "completed"
+          ]
         },
         "createdAt": {
           "type": "string",
@@ -861,7 +940,13 @@
         },
         "channel": {
           "type": "string",
-          "enum": ["email", "whatsapp", "sms", "web", "crm"]
+          "enum": [
+            "email",
+            "whatsapp",
+            "sms",
+            "web",
+            "crm"
+          ]
         },
         "createdAt": {
           "type": "string",
@@ -912,11 +997,21 @@
         },
         "category": {
           "type": "string",
-          "enum": ["newsletter", "vip_buyers", "lead_magnet", "webinar", "custom"]
+          "enum": [
+            "newsletter",
+            "vip_buyers",
+            "lead_magnet",
+            "webinar",
+            "custom"
+          ]
         },
         "defaultConsent": {
           "type": "string",
-          "enum": ["opted_in", "pending_double_opt_in", "unsubscribed"]
+          "enum": [
+            "opted_in",
+            "pending_double_opt_in",
+            "unsubscribed"
+          ]
         },
         "defaultTags": {
           "type": "array",
@@ -924,7 +1019,12 @@
         },
         "colorAccent": {
           "type": "string",
-          "enum": ["emerald", "amber", "indigo", "rose"]
+          "enum": [
+            "emerald",
+            "amber",
+            "indigo",
+            "rose"
+          ]
         },
         "killSwitchEnabled": {
           "type": "boolean",
@@ -995,11 +1095,19 @@
         },
         "channel": {
           "type": "string",
-          "enum": ["whatsapp", "email", "sms"]
+          "enum": [
+            "whatsapp",
+            "email",
+            "sms"
+          ]
         },
         "matchType": {
           "type": "string",
-          "enum": ["contains", "exact", "any_inbound"]
+          "enum": [
+            "contains",
+            "exact",
+            "any_inbound"
+          ]
         },
         "subjectLine": {
           "type": "string",
@@ -1008,7 +1116,11 @@
         },
         "status": {
           "type": "string",
-          "enum": ["live", "paused", "draft"]
+          "enum": [
+            "live",
+            "paused",
+            "draft"
+          ]
         },
         "triggeredCount": {
           "type": "number"
@@ -1079,7 +1191,11 @@
         },
         "channel": {
           "type": "string",
-          "enum": ["whatsapp", "email", "sms"]
+          "enum": [
+            "whatsapp",
+            "email",
+            "sms"
+          ]
         },
         "subjectOrContext": {
           "type": "string",
@@ -1098,11 +1214,19 @@
         },
         "lastSender": {
           "type": "string",
-          "enum": ["lead", "operator", "autoresponder"]
+          "enum": [
+            "lead",
+            "operator",
+            "autoresponder"
+          ]
         },
         "status": {
           "type": "string",
-          "enum": ["unread", "replied", "archived"]
+          "enum": [
+            "unread",
+            "replied",
+            "archived"
+          ]
         },
         "unreadCount": {
           "type": "number"
@@ -1136,6 +1260,88 @@
         "status",
         "unreadCount",
         "messagesJson",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "WhatsAppAccount": {
+      "title": "WhatsAppAccount",
+      "description": "WhatsApp Embedded Signup connection credentials linked to logged-in user.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "UID of the logged-in user who connected the account.",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userEmail": {
+          "type": "string",
+          "description": "Email address of the logged-in user.",
+          "maxLength": 128,
+          "minLength": 3
+        },
+        "phone_number_id": {
+          "type": "string",
+          "description": "Meta WhatsApp Business Phone Number ID.",
+          "maxLength": 64,
+          "minLength": 1
+        },
+        "access_token": {
+          "type": "string",
+          "description": "Permanent or system access token from Meta OAuth token exchange.",
+          "maxLength": 512,
+          "minLength": 1
+        },
+        "waba_id": {
+          "type": "string",
+          "description": "WhatsApp Business Account (WABA) ID.",
+          "maxLength": 64,
+          "minLength": 1
+        },
+        "display_phone_number": {
+          "type": "string",
+          "description": "Formatted WhatsApp Business Phone Number.",
+          "maxLength": 64,
+          "minLength": 1
+        },
+        "verified_name": {
+          "type": "string",
+          "description": "Verified Meta Business Profile Name.",
+          "maxLength": 128,
+          "minLength": 1
+        },
+        "status": {
+          "type": "string",
+          "description": "Connection status.",
+          "enum": [
+            "connected",
+            "disconnected"
+          ]
+        },
+        "metaAppId": {
+          "type": "string",
+          "description": "Meta Application ID used for Embedded Signup.",
+          "maxLength": 64,
+          "minLength": 1
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when account was linked."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when account was last updated."
+        }
+      },
+      "required": [
+        "userId",
+        "phone_number_id",
+        "access_token",
+        "status",
         "createdAt",
         "updatedAt"
       ]
@@ -1193,6 +1399,10 @@
     "/activities/{activityId}": {
       "schema": "ActivityLog",
       "description": "Customer journey and workspace activity events."
+    },
+    "/whatsapp_accounts/{accountId}": {
+      "schema": "WhatsAppAccount",
+      "description": "WhatsApp Embedded Signup accounts linked to logged-in users with access_token and phone_number_id."
     }
   }
 }

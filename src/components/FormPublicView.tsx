@@ -11,6 +11,7 @@ export interface FormPublicViewProps {
    * Defaults to true if accessed as a public link.
    */
   isPublicView?: boolean;
+  isLoading?: boolean;
   asset?: Partial<CaptureAsset> | null;
   formSchema?: LeadGenFormField[];
   onSubmit?: (lead: {
@@ -59,6 +60,7 @@ export const defaultPublicFormSchema: LeadGenFormField[] = [
 
 export const FormPublicView: React.FC<FormPublicViewProps> = ({
   isPublicView = true,
+  isLoading = false,
   asset,
   formSchema,
   onSubmit,
@@ -74,10 +76,12 @@ export const FormPublicView: React.FC<FormPublicViewProps> = ({
   const [errorMessage, setErrorMessage] = useState('');
 
   // Fallback metadata from asset or sensible defaults
-  const title = asset?.title || asset?.headline || 'Lead Capture & Consultation Request';
+  // Prioritize headline if set by user, otherwise title
+  const title = asset?.headline || asset?.title || 'Lead Capture & Consultation Request';
   const description =
-    asset?.subheadline ||
-    'Please enter your details below. Our team will follow up via Email and WhatsApp.';
+    asset?.subheadline !== undefined
+      ? asset.subheadline
+      : 'Please enter your details below. Our team will follow up via Email and WhatsApp.';
   const ctaText = asset?.ctaText || 'Submit Details';
   const targetList = asset?.targetList || 'General Inbound Leads';
   const redirectUrl = asset?.redirectUrl || '';
@@ -205,20 +209,26 @@ export const FormPublicView: React.FC<FormPublicViewProps> = ({
 
       {/* Main Public Form Container */}
       <main className="flex-1 flex items-center justify-center p-4 sm:p-6 lg:p-8">
-        <div className="w-full max-w-md bg-white border border-slate-200 rounded-2xl shadow-xl p-6 sm:p-8 space-y-6">
-          <div className="space-y-1.5 text-center">
-            <h1 className="font-display text-xl sm:text-2xl font-bold text-slate-950">
-              {title}
-            </h1>
-            {description && (
-              <p className="text-xs sm:text-sm text-slate-600 leading-relaxed">
-                {description}
-              </p>
-            )}
+        {isLoading ? (
+          <div className="w-full max-w-md bg-white border border-slate-200 rounded-2xl shadow-xl p-8 space-y-4 text-center">
+            <div className="w-10 h-10 border-4 border-emerald-600 border-t-transparent rounded-full animate-spin mx-auto" />
+            <p className="text-sm font-medium text-slate-600">Loading form...</p>
           </div>
+        ) : (
+          <div className="w-full max-w-md bg-white border border-slate-200 rounded-2xl shadow-xl p-6 sm:p-8 space-y-6">
+            <div className="space-y-1.5 text-center">
+              <h1 className="font-display text-xl sm:text-2xl font-bold text-slate-950">
+                {title}
+              </h1>
+              {description && (
+                <p className="text-xs sm:text-sm text-slate-600 leading-relaxed">
+                  {description}
+                </p>
+              )}
+            </div>
 
-          {submitted ? (
-            <div className="p-6 bg-emerald-50 border border-emerald-200 rounded-xl space-y-3 text-center">
+            {submitted ? (
+              <div className="p-6 bg-emerald-50 border border-emerald-200 rounded-xl space-y-3 text-center">
               <div className="w-12 h-12 bg-emerald-100 text-emerald-700 rounded-full flex items-center justify-center mx-auto">
                 <CheckCircle2 className="w-6 h-6" />
               </div>
@@ -387,6 +397,7 @@ export const FormPublicView: React.FC<FormPublicViewProps> = ({
             </form>
           )}
         </div>
+        )}
       </main>
     </div>
   );

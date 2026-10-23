@@ -432,6 +432,29 @@ service cloud.firestore {
       data.updatedAt is timestamp;
     }
 
+    function isValidWhatsAppAccount(data) {
+      return data.keys().hasAll([
+        'userId', 'phone_number_id', 'access_token', 'status', 'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'userId', 'userEmail', 'phone_number_id', 'access_token', 'waba_id',
+        'display_phone_number', 'verified_name', 'status', 'metaAppId',
+        'createdAt', 'updatedAt'
+      ]) &&
+      data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 && data.userId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.userId == request.auth.uid &&
+      (!('userEmail' in data) || (data.userEmail is string && data.userEmail.size() >= 3 && data.userEmail.size() <= 128)) &&
+      data.phone_number_id is string && data.phone_number_id.size() >= 1 && data.phone_number_id.size() <= 64 &&
+      data.access_token is string && data.access_token.size() >= 1 && data.access_token.size() <= 512 &&
+      (!('waba_id' in data) || (data.waba_id is string && data.waba_id.size() <= 64)) &&
+      (!('display_phone_number' in data) || (data.display_phone_number is string && data.display_phone_number.size() <= 64)) &&
+      (!('verified_name' in data) || (data.verified_name is string && data.verified_name.size() <= 128)) &&
+      data.status is string && data.status in ['connected', 'disconnected'] &&
+      (!('metaAppId' in data) || (data.metaAppId is string && data.metaAppId.size() <= 64)) &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
     // =========================================================================
     // 3. COLLECTION RULES
     // =========================================================================
@@ -922,6 +945,37 @@ service cloud.firestore {
         isValidId(threadId) &&
         existing().ownerId == request.auth.uid &&
         isWorkspaceOwner(existing().workspaceId);
+    }
+
+    // WhatsApp Accounts (Meta Embedded Signup 1-Click Connect)
+    match /whatsapp_accounts/{accountId} {
+      allow get: if isVerified() &&
+        isValidId(accountId) &&
+        (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isVerified() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isVerified() &&
+        isValidId(accountId) &&
+        isValidWhatsAppAccount(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isVerified() &&
+        isValidId(accountId) &&
+        isValidWhatsAppAccount(incoming()) &&
+        incoming().userId == existing().userId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() || (
+            existing().userId == request.auth.uid && (
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'userEmail', 'phone_number_id', 'access_token', 'waba_id',
+                'display_phone_number', 'verified_name', 'status', 'metaAppId', 'updatedAt'
+              ])
+            )
+          )
+        );
+      allow delete: if isVerified() &&
+        isValidId(accountId) &&
+        (existing().userId == request.auth.uid || isAdmin());
     }
   }
 }

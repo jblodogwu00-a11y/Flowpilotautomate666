@@ -138,6 +138,39 @@ export const CaptureAssetsView: React.FC<CaptureAssetsViewProps> = ({
     return {};
   });
 
+  const publishFormAssetToServer = (asset: CaptureAsset, meta?: LeadGenAssetExtendedMetadata) => {
+    try {
+      const ext = meta || getExtendedForAsset(asset);
+      fetch('/api/forms/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          asset: {
+            ...asset,
+            headline: asset.headline || asset.title,
+            subheadline: asset.subheadline,
+            ctaText: asset.ctaText,
+            redirectUrl: asset.redirectUrl,
+            toolFormat: asset.toolFormat || ext.toolFormat,
+            targetList: asset.targetList,
+          },
+          extendedMeta: ext,
+        }),
+      }).catch(() => {});
+    } catch {
+      // non-fatal
+    }
+  };
+
+  // Synchronize all assets to server public forms store so incognito links display exact custom copy
+  useEffect(() => {
+    if (assets.length > 0) {
+      assets.forEach((a) => {
+        publishFormAssetToServer(a);
+      });
+    }
+  }, [assets]);
+
   const saveExtendedMeta = (slug: string, meta: LeadGenAssetExtendedMetadata) => {
     setExtendedMap((prev) => {
       const next = { ...prev, [slug]: meta };
@@ -770,6 +803,7 @@ export const CaptureAssetsView: React.FC<CaptureAssetsViewProps> = ({
         ownerId: editingAsset?.ownerId || 'owner',
         ...payload,
       };
+      publishFormAssetToServer(savedSnapshot, extMeta);
       setJustPublishedAsset(savedSnapshot);
       setIsModalOpen(false);
       setEditingAsset(null);

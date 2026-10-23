@@ -76,6 +76,7 @@ import { CaptureAssetsView, AssetLeadSubmissionExtra } from './components/Captur
 import { FunnelBuilderView } from './components/FunnelBuilderView';
 import { ChatbotsView } from './components/ChatbotsView';
 import { WorkspaceSettingsView } from './components/WorkspaceSettingsView';
+import { WhatsAppEmbeddedSignupPage } from './components/WhatsAppEmbeddedSignupPage';
 import { AuthModal, AuthModalMode } from './components/AuthModal';
 import { DesignSystemModal } from './components/DesignSystemModal';
 import { SystemDiagnosticsModal } from './components/SystemDiagnosticsModal';
@@ -110,7 +111,7 @@ export default function App() {
     return !user;
   });
 
-  // Public Form Page route detection (e.g. /form/[id], /public/form, /form, ?form=, ?capture=)
+  // Public Form Page route detection (e.g. /form/[id], /public/form, /p/[slug], /form, ?form=, ?capture=)
   const [isFormRoute, setIsFormRoute] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
     const path = window.location.pathname.toLowerCase();
@@ -118,10 +119,56 @@ export default function App() {
     return (
       path.startsWith('/form') ||
       path.startsWith('/public/form') ||
+      path.startsWith('/p/') ||
       params.has('form') ||
       params.has('capture')
     );
   });
+
+  const [publicFetchedAsset, setPublicFetchedAsset] = useState<Partial<CaptureAsset> | null>(null);
+  const [isLoadingPublicForm, setIsLoadingPublicForm] = useState<boolean>(false);
+
+  // WhatsApp Embedded Signup Page Route (/dashboard/settings/whatsapp or /settings/whatsapp)
+  const [isWhatsAppSettingsRoute, setIsWhatsAppSettingsRoute] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    const path = window.location.pathname.toLowerCase();
+    return (
+      path === "/dashboard/settings/whatsapp" ||
+      path === "/dashboard/settings/whatsapp/" ||
+      path === "/settings/whatsapp" ||
+      path === "/settings/whatsapp/"
+    );
+  });
+
+  useEffect(() => {
+    const handlePopState = () => {
+      if (typeof window === "undefined") return;
+      const path = window.location.pathname.toLowerCase();
+      setIsWhatsAppSettingsRoute(
+        path === "/dashboard/settings/whatsapp" ||
+        path === "/dashboard/settings/whatsapp/" ||
+        path === "/settings/whatsapp" ||
+        path === "/settings/whatsapp/"
+      );
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  }, []);
+
+  const navigateToWhatsAppEmbeddedSignup = () => {
+    if (typeof window !== "undefined") {
+      window.history.pushState({}, "", "/dashboard/settings/whatsapp");
+      setIsWhatsAppSettingsRoute(true);
+    }
+  };
+
+  const navigateBackFromWhatsAppEmbeddedSignup = () => {
+    if (typeof window !== "undefined") {
+      window.history.pushState({}, "", "/");
+      setIsWhatsAppSettingsRoute(false);
+      setActiveTab("settings");
+    }
+  };
 
   // When user signs in, smoothly transition to workspace
   useEffect(() => {
@@ -169,6 +216,41 @@ export default function App() {
       setSnapshot(loaded);
     }
   }, [activeUid, user?.email]);
+
+  // Fetch published form from server when opened in Incognito or unauthenticated visitor session
+  useEffect(() => {
+    if (!isFormRoute || typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const cap = params.get('capture') || params.get('form') || '';
+    const pathPart = window.location.pathname.replace(/^\/(form|public\/form|p)\/?/i, '');
+    const requestedIdentifier = (cap || pathPart).trim();
+
+    // Check if we already have a local asset with custom headline/cta
+    const localMatch = (snapshot?.assets || []).find(
+      (a) => a.slug === requestedIdentifier || a.id === requestedIdentifier
+    );
+    if (localMatch && (localMatch.headline || localMatch.ctaText)) {
+      setPublicFetchedAsset(localMatch);
+      return;
+    }
+
+    setIsLoadingPublicForm(true);
+    const queryUrl = requestedIdentifier
+      ? `/api/forms/public?slug=${encodeURIComponent(requestedIdentifier)}`
+      : '/api/forms/public';
+
+    fetch(queryUrl)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.ok && data?.asset) {
+          setPublicFetchedAsset(data.asset);
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        setIsLoadingPublicForm(false);
+      });
+  }, [isFormRoute, snapshot?.assets]);
 
   // Persist snapshot to localStorage and sync to server
   const updateSnapshot = useCallback(
@@ -897,6 +979,23 @@ export default function App() {
         `Email: ${lead.email} | Target list: ${asset.targetList || 'General'}`,
         'web'
       );
+
+      // Persist lead to server public capture endpoint so incognito submissions trigger server automations
+      fetch('/api/leads/capture', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          assetId: asset.id,
+          assetName: asset.title || asset.headline,
+          targetList: asset.targetList || 'General Contacts',
+          fullName: lead.fullName,
+          email: lead.email,
+          phone: lead.phone,
+          company: extra?.company || '',
+          customTags: extra?.customTags,
+          redirectUrl: asset.redirectUrl,
+        }),
+      }).catch(() => {});
     },
     [activeUid, handleLogActivity, snapshot.workspace.id, updateSnapshot]
   );
@@ -1212,30 +1311,67 @@ export default function App() {
     { id: 'settings', label: 'Workspace & Gateway', icon: Settings },
   ];
 
+  if (isWhatsAppSettingsRoute) {
+    return (
+      <ErrorBoundary fallbackTitle="WhatsApp Embedded Signup" onReset={() => (window.location.href = "/")}>
+        <WhatsAppEmbeddedSignupPage
+          userId={activeUid}
+          userEmail={user?.email || "jonajukej777@gmail.com"}
+          onBackToDashboard={navigateBackFromWhatsAppEmbeddedSignup}
+          onAccountConnected={(acc) => {
+            updateSnapshot((prev) => ({
+              ...prev,
+              workspace: {
+                ...prev.workspace,
+                whatsappConnected: true,
+              },
+              privateProfile: prev.privateProfile ? {
+                ...prev.privateProfile,
+                whatsappConnected: true,
+                whatsappBusinessNumber: acc.display_phone_number || prev.privateProfile.whatsappBusinessNumber,
+              } : prev.privateProfile,
+            }));
+          }}
+        />
+      </ErrorBoundary>
+    );
+  }
+
   if (isFormRoute) {
-    const matchedAsset =
-      snapshot.assets.find((a) => {
-        if (typeof window === 'undefined') return false;
-        const params = new URLSearchParams(window.location.search);
-        const cap = params.get('capture') || params.get('form') || '';
-        const pathPart = window.location.pathname.replace(/^\/(form|public\/form)\/?/i, '');
-        return a.slug === cap || a.id === cap || a.slug === pathPart || a.id === pathPart;
-      }) || snapshot.assets[0];
+    const params = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
+    const cap = params?.get('capture') || params?.get('form') || '';
+    const pathPart = typeof window !== 'undefined'
+      ? window.location.pathname.replace(/^\/(form|public\/form|p)\/?/i, '')
+      : '';
+    const requestedSlug = (cap || pathPart).trim();
+
+    // Prefer local match if it has custom content, otherwise use server-fetched asset (for incognito sessions)
+    const localMatch = snapshot.assets.find(
+      (a) => a.slug === requestedSlug || a.id === requestedSlug
+    );
+    const activeDisplayAsset =
+      localMatch && (localMatch.headline || localMatch.ctaText)
+        ? localMatch
+        : publicFetchedAsset || localMatch || snapshot.assets[0];
+
+    const activeFormSchema = (activeDisplayAsset as any)?.formFields || undefined;
 
     return (
       <ErrorBoundary fallbackTitle="Public Lead Form" onReset={() => (window.location.href = '/')}>
         <FormPublicView
           isPublicView={true}
-          asset={matchedAsset}
+          isLoading={isLoadingPublicForm && !activeDisplayAsset}
+          asset={activeDisplayAsset}
+          formSchema={activeFormSchema}
           onSubmit={async (lead) => {
             await handleSubmitAssetLead(
-              matchedAsset || {
+              (activeDisplayAsset as CaptureAsset) || {
                 id: 'pub_form',
                 workspaceId: activeUid,
                 ownerId: activeUid,
                 title: 'Public Lead Capture Form',
                 assetType: 'inline_form',
-                slug: 'public-lead-form',
+                slug: requestedSlug || 'public-lead-form',
                 headline: 'Public Lead Capture Form',
                 subheadline: 'Captured via public shareable form link',
                 ctaText: 'Submit Details',
@@ -1786,6 +1922,7 @@ export default function App() {
                   }}
                   onReseedWorkspace={handleReseedWorkspace}
                   onRestoreWorkspaceSnapshot={handleRestoreWorkspaceSnapshot}
+                  onNavigateToWhatsAppEmbeddedSignup={navigateToWhatsAppEmbeddedSignup}
                 />
               )}
             </ErrorBoundary>

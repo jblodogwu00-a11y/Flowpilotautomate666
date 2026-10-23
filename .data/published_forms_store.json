@@ -1,0 +1,22 @@
+[
+  {
+    "id": "form_vip-exclusive-invite",
+    "slug": "vip-exclusive-invite",
+    "title": "VIP Masterclass Access",
+    "headline": "Exclusive 2026 Sovereign Creator Masterclass",
+    "subheadline": "Reserve your private invitation and unlock instant funnel blueprints.",
+    "ctaText": "Claim Your VIP Pass Now →",
+    "redirectUrl": "",
+    "toolFormat": "inline_form",
+    "targetList": "VIP Course Buyers List",
+    "requireDoubleOptIn": false,
+    "status": "published",
+    "visualTheme": "classic_ivory_brass",
+    "seoTitle": "VIP Masterclass Access | Official Form",
+    "seoDescription": "Reserve your private invitation and unlock instant funnel blueprints.",
+    "viewsCount": 1,
+    "submissionsCount": 0,
+    "createdAt": "2026-10-23T12:41:46.520Z",
+    "updatedAt": "2026-10-23T12:41:46.520Z"
+  }
+]

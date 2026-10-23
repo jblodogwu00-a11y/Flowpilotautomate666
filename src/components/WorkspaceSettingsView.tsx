@@ -108,6 +108,7 @@ interface WorkspaceSettingsViewProps {
   onOpenAuth: (mode: AuthModalMode) => void;
   onReseedWorkspace: () => Promise<void>;
   onRestoreWorkspaceSnapshot?: (snapshot: WorkspaceSnapshot) => void;
+  onNavigateToWhatsAppEmbeddedSignup?: () => void;
 }
 
 export const WorkspaceSettingsView: React.FC<WorkspaceSettingsViewProps> = ({
@@ -128,6 +129,7 @@ export const WorkspaceSettingsView: React.FC<WorkspaceSettingsViewProps> = ({
   onOpenAuth,
   onReseedWorkspace,
   onRestoreWorkspaceSnapshot,
+  onNavigateToWhatsAppEmbeddedSignup,
 }) => {
   const [backupNotice, setBackupNotice] = useState<string | null>(null);
   const [selectedWebhookEventPreview, setSelectedWebhookEventPreview] = useState<
@@ -337,6 +339,15 @@ export const WorkspaceSettingsView: React.FC<WorkspaceSettingsViewProps> = ({
     getStoredChannelGatewayConfig().whatsapp.ultramsgToken || ''
   );
   const [waConnectorNotice, setWaConnectorNotice] = useState('');
+  const [waAccount, setWaAccount] = useState<{
+    id?: string;
+    userId?: string;
+    phone_number_id?: string;
+    display_phone_number?: string;
+    verified_name?: string;
+    waba_id?: string;
+    status?: string;
+  } | null>(null);
 
   const [smsProviderMode, setSmsProviderMode] = useState<SmsProviderMode>(() =>
     getStoredChannelGatewayConfig().sms.providerMode || 'builtin_relay'
@@ -445,6 +456,21 @@ export const WorkspaceSettingsView: React.FC<WorkspaceSettingsViewProps> = ({
       setScheduledJobs(res.jobs);
     });
     setDeliveryReceipts(getStoredDeliveryReceipts());
+
+    const targetUid = currentUserUid || workspace.ownerId || 'default_workspace';
+    fetch(`/api/auth/whatsapp/status?userId=${encodeURIComponent(targetUid)}`)
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (data?.connected && data?.account) {
+          setWaAccount(data.account);
+          setWhatsappConnected(true);
+          if (data.account.display_phone_number && !whatsappBusinessNumber) {
+            setWhatsappBusinessNumber(data.account.display_phone_number);
+          }
+        }
+      })
+      .catch(() => {});
+
     return () => {
       unsubAuth();
       unsubGmail();
@@ -1607,129 +1633,106 @@ export const WorkspaceSettingsView: React.FC<WorkspaceSettingsViewProps> = ({
                   />
                 </div>
 
-                {/* Built-In WhatsApp Gateway Mode Selector */}
-                <div className="p-3 rounded-xl bg-white border border-emerald-200 space-y-2.5">
+                {/* Modern 1-Click WhatsApp Embedded Signup & Gateway State */}
+                <div className="p-3.5 rounded-xl bg-white border border-emerald-200 space-y-3 shadow-2xs">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-[11px] font-bold uppercase tracking-wider text-emerald-800">
-                      WhatsApp Gateway Connector
+                      WhatsApp 1-Click Connection
                     </span>
-                    <span className="text-[11px] font-semibold text-emerald-700">
-                      {waProviderMode === 'builtin_relay' ? 'Built-In Relay' : 'API Connected'}
+                    <span className={`text-[11px] font-bold px-2 py-0.5 rounded-md ${
+                      waAccount?.status === 'connected' || whatsappConnected
+                        ? 'bg-emerald-100 text-emerald-800'
+                        : 'bg-slate-100 text-slate-600'
+                    }`}>
+                      {waAccount?.status === 'connected' || whatsappConnected
+                        ? '● Meta API Active'
+                        : '○ Setup Available'}
                     </span>
                   </div>
 
-                  <select
-                    value={waProviderMode}
-                    onChange={(e) => {
-                      const next = e.target.value as WhatsAppProviderMode;
-                      setWaProviderMode(next);
-                      persistCurrentGatewayConnectors(next, undefined);
-                      setWaConnectorNotice(
-                        `Switched WhatsApp Gateway to ${getWhatsAppProviderLabel(next)}.`
-                      );
-                    }}
-                    className="w-full px-3 py-2 text-xs font-semibold bg-slate-50 border border-slate-300 rounded-lg text-slate-900"
-                  >
-                    <option value="builtin_relay">
-                      FlowPilot Built-In WhatsApp Auto-Pilot Relay + Direct wa.me (Ready)
-                    </option>
-                    <option value="meta_cloud_api">
-                      Meta WhatsApp Business Cloud API (Graph v21.0)
-                    </option>
-                    <option value="twilio_whatsapp">
-                      Twilio WhatsApp Business API Gateway
-                    </option>
-                    <option value="ultramsg_gateway">
-                      UltraMsg / Evolution WhatsApp Cloud Gateway
-                    </option>
-                  </select>
-
-                  {waProviderMode === 'meta_cloud_api' && (
-                    <div className="space-y-2 pt-1">
-                      <input
-                        type="text"
-                        value={metaPhoneNumberId}
-                        onChange={(e) => setMetaPhoneNumberId(e.target.value)}
-                        placeholder="Meta Phone Number ID (e.g., 104928193847291)"
-                        className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-300 rounded-lg text-slate-900"
-                      />
-                      <input
-                        type="password"
-                        value={metaAccessToken}
-                        onChange={(e) => setMetaAccessToken(e.target.value)}
-                        placeholder="Meta Permanent System User Access Token (EAAG...)"
-                        className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-300 rounded-lg text-slate-900"
-                      />
+                  {waAccount?.status === 'connected' ? (
+                    <div className="p-3 bg-emerald-50/70 border border-emerald-200 rounded-xl space-y-2 text-xs">
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-emerald-950 flex items-center gap-1.5">
+                          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                          <span>Connected via Meta Embedded Signup</span>
+                        </span>
+                        <span className="font-mono text-[10px] text-emerald-700 bg-white px-2 py-0.5 rounded border border-emerald-200">
+                          WABA Active
+                        </span>
+                      </div>
+                      <div className="text-slate-600 space-y-0.5 text-[11px]">
+                        <div>
+                          <strong className="text-slate-800">Verified Name:</strong>{' '}
+                          {waAccount.verified_name || senderName || 'WhatsApp Business Account'}
+                        </div>
+                        <div>
+                          <strong className="text-slate-800">Phone Number:</strong>{' '}
+                          <span className="font-mono text-emerald-900 font-semibold">
+                            {waAccount.display_phone_number || whatsappBusinessNumber}
+                          </span>
+                        </div>
+                        {waAccount.phone_number_id && (
+                          <div>
+                            <strong className="text-slate-800">Phone Number ID:</strong>{' '}
+                            <span className="font-mono">{waAccount.phone_number_id}</span>
+                          </div>
+                        )}
+                      </div>
+                      <div className="pt-1 flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (onNavigateToWhatsAppEmbeddedSignup) {
+                              onNavigateToWhatsAppEmbeddedSignup();
+                            } else {
+                              window.location.href = '/dashboard/settings/whatsapp';
+                            }
+                          }}
+                          className="px-2.5 py-1 text-[11px] font-bold text-emerald-900 bg-white hover:bg-emerald-100 border border-emerald-300 rounded-lg cursor-pointer"
+                        >
+                          Manage Connection / Re-connect
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="space-y-2.5">
+                      <p className="text-xs text-slate-600 leading-relaxed">
+                        Connect your WhatsApp Business Account in 1 click using the official Meta Embedded Signup flow. Your automations and auto-responders start sending immediately.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (onNavigateToWhatsAppEmbeddedSignup) {
+                            onNavigateToWhatsAppEmbeddedSignup();
+                          } else {
+                            window.location.href = '/dashboard/settings/whatsapp';
+                          }
+                        }}
+                        className="w-full py-2.5 px-3 text-xs font-bold text-white bg-[#1877F2] hover:bg-[#166fe5] rounded-xl cursor-pointer shadow-xs inline-flex items-center justify-center gap-2 transition-colors"
+                      >
+                        <svg className="w-4 h-4 fill-current" viewBox="0 0 24 24">
+                          <path d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/>
+                        </svg>
+                        <span>Connect WhatsApp with Meta 1-Click</span>
+                      </button>
                     </div>
                   )}
 
-                  {waProviderMode === 'twilio_whatsapp' && (
-                    <div className="space-y-2 pt-1">
-                      <input
-                        type="text"
-                        value={waTwilioSid}
-                        onChange={(e) => setWaTwilioSid(e.target.value)}
-                        placeholder="Twilio Account SID (AC...)"
-                        className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-300 rounded-lg text-slate-900"
-                      />
-                      <input
-                        type="password"
-                        value={waTwilioToken}
-                        onChange={(e) => setWaTwilioToken(e.target.value)}
-                        placeholder="Twilio Auth Token"
-                        className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-300 rounded-lg text-slate-900"
-                      />
-                    </div>
-                  )}
-
-                  {waProviderMode === 'ultramsg_gateway' && (
-                    <div className="space-y-2 pt-1">
-                      <input
-                        type="text"
-                        value={ultramsgInstanceId}
-                        onChange={(e) => setUltramsgInstanceId(e.target.value)}
-                        placeholder="UltraMsg / Evolution Instance ID (e.g., instance94812)"
-                        className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-300 rounded-lg text-slate-900"
-                      />
-                      <input
-                        type="password"
-                        value={ultramsgToken}
-                        onChange={(e) => setUltramsgToken(e.target.value)}
-                        placeholder="Gateway API Token"
-                        className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-300 rounded-lg text-slate-900"
-                      />
-                    </div>
-                  )}
-
-                  <div className="flex items-center justify-between gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        persistCurrentGatewayConnectors();
-                        setWaConnectorNotice(
-                          `WhatsApp Gateway Active: ${getWhatsAppProviderLabel(waProviderMode)}`
-                        );
-                      }}
-                      className="px-2.5 py-1.5 text-[11px] font-bold text-emerald-900 bg-emerald-100 hover:bg-emerald-200 rounded-lg cursor-pointer whitespace-nowrap"
-                    >
-                      Activate Connector
-                    </button>
+                  <div className="pt-2 border-t border-slate-100 flex items-center justify-between gap-2">
+                    <span className="text-[11px] text-slate-500 font-medium">
+                      Built-in Auto-Pilot Relay: <strong className="text-emerald-800">Active</strong>
+                    </span>
                     <button
                       type="button"
                       disabled={isTestingDelivery}
                       onClick={() => handleRunLiveChannelTest('whatsapp')}
-                      className="px-3 py-1.5 text-[11px] font-bold text-white bg-[#047857] hover:bg-[#065F46] rounded-lg cursor-pointer inline-flex items-center gap-1 whitespace-nowrap"
+                      className="px-3 py-1.5 text-[11px] font-bold text-white bg-[#047857] hover:bg-[#065F46] rounded-lg cursor-pointer inline-flex items-center gap-1 whitespace-nowrap shadow-2xs"
                     >
                       <Send className="w-3 h-3" />
-                      <span>Send Live WhatsApp Now</span>
+                      <span>Send Live WhatsApp Test</span>
                     </button>
                   </div>
-
-                  {waConnectorNotice && (
-                    <div className="text-[11px] font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5">
-                      {waConnectorNotice}
-                    </div>
-                  )}
                 </div>
 
                 {/* Per-Account Saved WhatsApp Identities & Default Selector */}
@@ -1997,191 +2000,92 @@ export const WorkspaceSettingsView: React.FC<WorkspaceSettingsViewProps> = ({
                     </span>
                   </div>
 
-                  <select
-                    value={emailProviderMode}
-                    onChange={(e) => {
-                      const next = e.target.value as EmailProviderMode;
-                      setEmailProviderMode(next);
-                      persistCurrentGatewayConnectors(undefined, undefined, next);
-                      setGmailNotice(`Switched Email Gateway to ${getEmailProviderLabel(next)}.`);
-                    }}
-                    className="w-full px-3 py-2 text-xs font-semibold bg-slate-50 border border-slate-300 rounded-lg text-slate-900"
-                  >
-                    <option value="builtin_relay">
-                      FlowPilot Verified Email Relay + Direct Mail Bridge (Ready)
-                    </option>
-                    <option value="gmail_oauth">
-                      Google Workspace Gmail API (OAuth 2.0 Direct)
-                    </option>
-                    <option value="resend_api">
-                      Resend Transactional Email API (Custom Domain DKIM/SPF)
-                    </option>
-                    <option value="sendgrid_api">
-                      Twilio SendGrid Email API (High-Volume Transactional)
-                    </option>
-                    <option value="smtp">
-                      Standard SMTP Transport (Nodemailer: Postmark / SES / Mailgun / Custom)
-                    </option>
-                  </select>
-
-                  {emailProviderMode === 'resend_api' && (
-                    <div className="space-y-2 pt-1">
-                      <input
-                        type="password"
-                        value={resendApiKey}
-                        onChange={(e) => setResendApiKey(e.target.value)}
-                        placeholder="Resend Live API Key (re_...)"
-                        className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-300 rounded-lg text-slate-900"
-                      />
-                    </div>
-                  )}
-
-                  {emailProviderMode === 'sendgrid_api' && (
-                    <div className="space-y-2 pt-1">
-                      <input
-                        type="password"
-                        value={sendgridApiKey}
-                        onChange={(e) => setSendgridApiKey(e.target.value)}
-                        placeholder="SendGrid Live API Key (SG....)"
-                        className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-300 rounded-lg text-slate-900"
-                      />
-                    </div>
-                  )}
-
-                  {emailProviderMode === 'smtp' && (
-                    <div className="space-y-2 pt-1">
-                      <div className="grid grid-cols-3 gap-2">
-                        <div className="col-span-2">
-                          <input
-                            type="text"
-                            value={smtpHost}
-                            onChange={(e) => setSmtpHost(e.target.value)}
-                            placeholder="SMTP Host (smtp.mailgun.org)"
-                            className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-300 rounded-lg text-slate-900"
-                          />
-                        </div>
-                        <div>
-                          <input
-                            type="number"
-                            value={smtpPort}
-                            onChange={(e) => setSmtpPort(e.target.value)}
-                            placeholder="Port (587)"
-                            className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-300 rounded-lg text-slate-900"
-                          />
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-2 gap-2">
-                        <input
-                          type="text"
-                          value={smtpUser}
-                          onChange={(e) => setSmtpUser(e.target.value)}
-                          placeholder="SMTP Username / API Key"
-                          className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-300 rounded-lg text-slate-900"
-                        />
-                        <input
-                          type="password"
-                          value={smtpPass}
-                          onChange={(e) => setSmtpPass(e.target.value)}
-                          placeholder="SMTP Password / Secret"
-                          className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-300 rounded-lg text-slate-900"
-                        />
-                      </div>
-                      <input
-                        type="email"
-                        value={smtpFromEmail}
-                        onChange={(e) => setSmtpFromEmail(e.target.value)}
-                        placeholder="From Email (e.g. hello@yourdomain.com)"
-                        className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-300 rounded-lg text-slate-900"
-                      />
-                    </div>
-                  )}
-
-                  <div className="flex flex-wrap items-center justify-between gap-2 pt-0.5">
-                    <div>
+                  <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+                    <div className="flex items-center justify-between gap-2">
                       <div className="text-xs font-bold text-slate-900">
                         {gmailConnected && connectedGmailAddress
-                          ? `Connected: ${connectedGmailAddress}`
-                          : 'Google OAuth / API Dispatch'}
+                          ? `Connected Google Account: ${connectedGmailAddress}`
+                          : 'Google Workspace Gmail API (OAuth 2.0 Direct)'}
                       </div>
+                      <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md ${
+                        gmailConnected ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-200/80 text-slate-700'
+                      }`}>
+                        {gmailConnected ? '● OAuth Connected' : '1-Click Connect'}
+                      </span>
                     </div>
 
-                    {gmailConnected ? (
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      {gmailConnected && connectedGmailAddress
+                        ? 'All outbound emails dispatch securely through your authenticated Google Workspace session with automatic SPF/DKIM validation.'
+                        : 'Connect your Google account in 1 click to dispatch automated sequences and broadcast emails directly from your Gmail address.'}
+                    </p>
+
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                      {gmailConnected ? (
+                        <button
+                          type="button"
+                          onClick={handleDisconnectGmailOAuth}
+                          className="px-3 py-1.5 text-xs font-bold text-red-700 bg-red-50 hover:bg-red-100 border border-red-200 rounded-lg cursor-pointer whitespace-nowrap"
+                        >
+                          Disconnect Gmail
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          disabled={isConnectingGmail}
+                          onClick={handleConnectGmailOAuth}
+                          className="gsi-material-button inline-flex items-center gap-2 px-3 py-1.5 bg-white hover:bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold text-slate-800 shadow-2xs cursor-pointer whitespace-nowrap shrink-0"
+                        >
+                          <div className="gsi-material-button-icon w-4 h-4 shrink-0">
+                            <svg
+                              version="1.1"
+                              xmlns="http://www.w3.org/2000/svg"
+                              viewBox="0 0 48 48"
+                              className="w-4 h-4 block"
+                            >
+                              <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
+                              <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
+                              <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
+                              <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
+                              <path fill="none" d="M0 0h48v48H0z"/>
+                            </svg>
+                          </div>
+                          <span className="gsi-material-button-contents">
+                            {isConnectingGmail ? 'Connecting...' : 'Sign in with Google'}
+                          </span>
+                        </button>
+                      )}
+
                       <button
                         type="button"
-                        onClick={handleDisconnectGmailOAuth}
-                        className="px-2.5 py-1.5 text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg cursor-pointer whitespace-nowrap shrink-0"
+                        disabled={isTestingDelivery}
+                        onClick={() => handleRunLiveChannelTest('email')}
+                        className="px-3 py-1.5 text-[11px] font-bold text-white bg-slate-900 hover:bg-slate-800 rounded-lg cursor-pointer inline-flex items-center gap-1 whitespace-nowrap shadow-2xs"
                       >
-                        Disconnect
+                        <Send className="w-3 h-3 text-emerald-400" />
+                        <span>Send Live Email Test</span>
                       </button>
-                    ) : (
-                      <button
-                        type="button"
-                        disabled={isConnectingGmail}
-                        onClick={handleConnectGmailOAuth}
-                        className="gsi-material-button inline-flex items-center gap-2 px-3 py-1.5 bg-white hover:bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold text-slate-800 shadow-2xs cursor-pointer whitespace-nowrap shrink-0"
-                      >
-                        <div className="gsi-material-button-icon w-4 h-4 shrink-0">
-                          <svg
-                            version="1.1"
-                            xmlns="http://www.w3.org/2000/svg"
-                            viewBox="0 0 48 48"
-                            className="w-4 h-4 block"
-                          >
-                            <path
-                              fill="#EA4335"
-                              d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
-                            ></path>
-                            <path
-                              fill="#4285F4"
-                              d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
-                            ></path>
-                            <path
-                              fill="#FBBC05"
-                              d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
-                            ></path>
-                            <path
-                              fill="#34A853"
-                              d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
-                            ></path>
-                            <path fill="none" d="M0 0h48v48H0z"></path>
-                          </svg>
-                        </div>
-                        <span className="gsi-material-button-contents">
-                          {isConnectingGmail ? 'Connecting...' : 'Sign in with Google'}
-                        </span>
-                      </button>
+                    </div>
+
+                    {gmailNotice && (
+                      <div className="text-[11px] font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5">
+                        {gmailNotice}
+                      </div>
                     )}
                   </div>
 
-                  <div className="flex items-center justify-between gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        persistCurrentGatewayConnectors();
-                        setGmailNotice(
-                          `Email Gateway Active: ${getEmailProviderLabel(emailProviderMode)}`
-                        );
-                      }}
-                      className="px-2.5 py-1.5 text-[11px] font-bold text-emerald-950 bg-emerald-100 hover:bg-emerald-200 rounded-lg cursor-pointer whitespace-nowrap"
-                    >
-                      Activate Connector
-                    </button>
-                    <button
-                      type="button"
-                      disabled={isTestingDelivery}
-                      onClick={() => handleRunLiveChannelTest('email')}
-                      className="px-3 py-1.5 text-[11px] font-bold text-white bg-slate-900 hover:bg-slate-800 rounded-lg cursor-pointer inline-flex items-center gap-1 whitespace-nowrap"
-                    >
-                      <Send className="w-3 h-3 text-emerald-400" />
-                      <span>Send Live Email Now</span>
-                    </button>
-                  </div>
-
-                  {gmailNotice && (
-                    <div className="text-[11px] font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5">
-                      {gmailNotice}
+                  {/* FlowPilot Platform Relay Badge */}
+                  <div className="p-2.5 rounded-xl bg-blue-50/60 border border-blue-200 flex items-center justify-between gap-2 text-xs">
+                    <div className="flex items-center gap-2">
+                      <CheckCircle2 className="w-4 h-4 text-blue-700 shrink-0" />
+                      <span className="font-semibold text-slate-800">
+                        FlowPilot Verified Multi-Domain Relay
+                      </span>
                     </div>
-                  )}
+                    <span className="text-[10px] font-mono font-bold text-blue-800 bg-blue-100 px-2 py-0.5 rounded">
+                      SPF / DKIM Signed
+                    </span>
+                  </div>
                 </div>
 
                 {/* Per-Account Saved Email Identities & Default Selector */}
@@ -2377,111 +2281,32 @@ export const WorkspaceSettingsView: React.FC<WorkspaceSettingsViewProps> = ({
                     </span>
                   </div>
 
-                  <select
-                    value={smsProviderMode}
-                    onChange={(e) => {
-                      const next = e.target.value as SmsProviderMode;
-                      setSmsProviderMode(next);
-                      persistCurrentGatewayConnectors(undefined, next);
-                      setSmsConnectorNotice(
-                        `Switched SMS Gateway to ${getSmsProviderLabel(next)}.`
-                      );
-                    }}
-                    className="w-full px-3 py-2 text-xs font-semibold bg-slate-50 border border-slate-300 rounded-lg text-slate-900"
-                  >
-                    <option value="builtin_relay">
-                      FlowPilot Built-In SMS Carrier Relay + Direct sms: (Ready)
-                    </option>
-                    <option value="twilio_sms">
-                      Twilio Programmable SMS Gateway (10DLC / Global)
-                    </option>
-                    <option value="termii_sms">
-                      Termii Carrier SMS Gateway (DND & Global Routes)
-                    </option>
-                    <option value="africastalking_sms">
-                      Africa's Talking Bulk & Transactional SMS Gateway
-                    </option>
-                  </select>
+                  <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-3">
+                    <p className="text-xs text-slate-600 leading-relaxed">
+                      Pre-verified Tier-1 telecom routes with automatic 10DLC compliance and global handset delivery. Dispatches directly using your alphanumeric sender ID.
+                    </p>
 
-                  {smsProviderMode === 'twilio_sms' && (
-                    <div className="space-y-2 pt-1">
-                      <input
-                        type="text"
-                        value={smsTwilioSid}
-                        onChange={(e) => setSmsTwilioSid(e.target.value)}
-                        placeholder="Twilio Account SID (AC...)"
-                        className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-300 rounded-lg text-slate-900"
-                      />
-                      <input
-                        type="password"
-                        value={smsTwilioToken}
-                        onChange={(e) => setSmsTwilioToken(e.target.value)}
-                        placeholder="Twilio Auth Token"
-                        className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-300 rounded-lg text-slate-900"
-                      />
+                    <div className="flex items-center justify-between gap-2 pt-1">
+                      <div className="text-xs text-slate-700">
+                        Sender ID: <strong className="font-mono text-slate-950 font-bold">{smsSenderId || 'FLOWPILOT'}</strong>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={isTestingDelivery}
+                        onClick={() => handleRunLiveChannelTest('sms')}
+                        className="px-3 py-1.5 text-[11px] font-bold text-white bg-slate-900 hover:bg-slate-800 rounded-lg cursor-pointer inline-flex items-center gap-1 whitespace-nowrap shadow-2xs"
+                      >
+                        <Send className="w-3 h-3 text-amber-400" />
+                        <span>Send Live SMS Test</span>
+                      </button>
                     </div>
-                  )}
 
-                  {smsProviderMode === 'termii_sms' && (
-                    <div className="space-y-2 pt-1">
-                      <input
-                        type="password"
-                        value={termiiApiKey}
-                        onChange={(e) => setTermiiApiKey(e.target.value)}
-                        placeholder="Termii Live API Key (TL...)"
-                        className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-300 rounded-lg text-slate-900"
-                      />
-                    </div>
-                  )}
-
-                  {smsProviderMode === 'africastalking_sms' && (
-                    <div className="space-y-2 pt-1">
-                      <input
-                        type="text"
-                        value={africasTalkingUsername}
-                        onChange={(e) => setAfricasTalkingUsername(e.target.value)}
-                        placeholder="Africa's Talking App Username"
-                        className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-300 rounded-lg text-slate-900"
-                      />
-                      <input
-                        type="password"
-                        value={africasTalkingApiKey}
-                        onChange={(e) => setAfricasTalkingApiKey(e.target.value)}
-                        placeholder="Africa's Talking Live API Key (atsk_...)"
-                        className="w-full px-2.5 py-1.5 text-xs font-mono bg-white border border-slate-300 rounded-lg text-slate-900"
-                      />
-                    </div>
-                  )}
-
-                  <div className="flex items-center justify-between gap-2 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        persistCurrentGatewayConnectors();
-                        setSmsConnectorNotice(
-                          `SMS Gateway Active: ${getSmsProviderLabel(smsProviderMode)}`
-                        );
-                      }}
-                      className="px-2.5 py-1.5 text-[11px] font-bold text-amber-950 bg-amber-100 hover:bg-amber-200 rounded-lg cursor-pointer whitespace-nowrap"
-                    >
-                      Activate Connector
-                    </button>
-                    <button
-                      type="button"
-                      disabled={isTestingDelivery}
-                      onClick={() => handleRunLiveChannelTest('sms')}
-                      className="px-3 py-1.5 text-[11px] font-bold text-white bg-slate-900 hover:bg-slate-800 rounded-lg cursor-pointer inline-flex items-center gap-1 whitespace-nowrap"
-                    >
-                      <Send className="w-3 h-3 text-amber-400" />
-                      <span>Send Live SMS Now</span>
-                    </button>
+                    {smsConnectorNotice && (
+                      <div className="text-[11px] font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5">
+                        {smsConnectorNotice}
+                      </div>
+                    )}
                   </div>
-
-                  {smsConnectorNotice && (
-                    <div className="text-[11px] font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5">
-                      {smsConnectorNotice}
-                    </div>
-                  )}
                 </div>
 
                 {/* Per-Account Saved SMS Identities & Default Selector */}
@@ -2631,6 +2456,37 @@ export const WorkspaceSettingsView: React.FC<WorkspaceSettingsViewProps> = ({
                 ? 'Dispatching Across Channels...'
                 : 'Test All 3 Channels Now (WhatsApp + Email + SMS)'}
             </span>
+          </button>
+        </div>
+
+        {/* META WHATSAPP EMBEDDED SIGNUP BANNER */}
+        <div className="p-5 rounded-2xl bg-gradient-to-r from-emerald-900 via-slate-900 to-slate-950 text-white border border-emerald-500/30 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm">
+          <div className="space-y-1 max-w-2xl">
+            <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 text-[11px] font-bold uppercase tracking-wider border border-emerald-400/30">
+              <Zap className="w-3 h-3 text-emerald-400" />
+              <span>Official Meta Facebook SDK · 1-Click Connect</span>
+            </div>
+            <h3 className="font-display text-base sm:text-lg font-bold text-white">
+              WhatsApp Embedded Signup
+            </h3>
+            <p className="text-xs text-slate-300 leading-relaxed">
+              Connect your WhatsApp Business number with 1 click using the Meta Facebook SDK. Saves your Phone Number ID and Access Token to database table <code className="font-mono text-emerald-300 font-semibold">whatsapp_accounts</code> so all workflows and automations send immediately.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              if (onNavigateToWhatsAppEmbeddedSignup) {
+                onNavigateToWhatsAppEmbeddedSignup();
+              } else if (typeof window !== "undefined") {
+                window.history.pushState({}, "", "/dashboard/settings/whatsapp");
+                window.dispatchEvent(new PopStateEvent("popstate"));
+              }
+            }}
+            className="py-3 px-5 text-xs font-bold text-slate-950 bg-emerald-400 hover:bg-emerald-300 active:scale-95 rounded-xl cursor-pointer inline-flex items-center justify-center gap-2 shrink-0 transition-all shadow-md"
+          >
+            <MessageSquare className="w-4 h-4 text-slate-950" />
+            <span>Launch Embedded Signup (/dashboard/settings/whatsapp)</span>
           </button>
         </div>
 
