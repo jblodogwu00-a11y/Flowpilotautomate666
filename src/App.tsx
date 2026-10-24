@@ -77,6 +77,8 @@ import { FunnelBuilderView } from './components/FunnelBuilderView';
 import { ChatbotsView } from './components/ChatbotsView';
 import { WorkspaceSettingsView } from './components/WorkspaceSettingsView';
 import { WhatsAppEmbeddedSignupPage } from './components/WhatsAppEmbeddedSignupPage';
+import { WhatsAppConnectView } from './components/WhatsAppConnectView';
+import { WhatsAppTemplatesView } from './components/WhatsAppTemplatesView';
 import { AuthModal, AuthModalMode } from './components/AuthModal';
 import { DesignSystemModal } from './components/DesignSystemModal';
 import { SystemDiagnosticsModal } from './components/SystemDiagnosticsModal';
