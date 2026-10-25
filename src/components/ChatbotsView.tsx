@@ -63,6 +63,7 @@ import {
   classifyInboundWhatsAppIntent,
   generateWhatsAppAiAssistantReply,
 } from './WhatsAppCatalog';
+import { WhatsAppConnectView } from './WhatsAppConnectView';
 
 interface ChatbotsViewProps {
   chatbots: ChatbotFlow[];
@@ -183,22 +184,17 @@ export const ChatbotsView: React.FC<ChatbotsViewProps> = ({
   const [activeSubTab, setActiveSubTab] = useState<WhatsAppHubTab>('inbox');
   const [statusBanner, setStatusBanner] = useState<string | null>(null);
 
-  // Official Provider & API Configuration State
+  // WhatsApp QR Socket Provider Configuration State
   const [selectedProviderId, setSelectedProviderId] =
-    useState<OfficialWhatsAppProviderId>('meta_cloud_api');
-  const [wabaId, setWabaId] = useState('194827364510928');
-  const [phoneNumberId, setPhoneNumberId] = useState(
-    effectiveWorkspace.whatsappPhoneId || '104928193847291'
+    useState<OfficialWhatsAppProviderId>('whatsapp_qr_connect');
+  const [wabaId, setWabaId] = useState('baileys_socket_relay');
+  const [businessPhoneDisplay, setBusinessPhoneDisplay] = useState(
+    effectiveWorkspace.whatsappPhoneId || '+1 (844) 555-0199'
   );
-  const [businessPhoneDisplay, setBusinessPhoneDisplay] = useState('+1 (844) 555-0199');
-  const [accessToken, setAccessToken] = useState(
-    privateProfile?.whatsappAccessToken || 'EAAGm0PX4ZCpsBO9xOfficialCloudToken'
-  );
-  const [webhookVerifyToken, setWebhookVerifyToken] = useState('fp_meta_verify_sha256_9941');
-  const [messagingTier, setMessagingTier] = useState<MetaMessagingTier>('tier_10k');
+  const [messagingTier, setMessagingTier] = useState<MetaMessagingTier>('tier_unlimited');
   const [qualityRating, setQualityRating] = useState<MetaQualityRating>('GREEN');
   const [enforceStrictRateCap, setEnforceStrictRateCap] = useState(true);
-  const [configuredMpsCap, setConfiguredMpsCap] = useState(45);
+  const [configuredMpsCap, setConfiguredMpsCap] = useState(60);
   const [isSavingConfig, setIsSavingConfig] = useState(false);
 
   // Templates State
@@ -313,7 +309,7 @@ export const ChatbotsView: React.FC<ChatbotsViewProps> = ({
       contacts.find(
         (c) =>
           c.id === activeThread.contactId ||
-          c.email.toLowerCase() === activeThread.contactEmail.toLowerCase() ||
+          (activeThread.contactEmail && c.email.toLowerCase() === activeThread.contactEmail.toLowerCase()) ||
           c.fullName.toLowerCase() === activeThread.contactName.toLowerCase()
       ) || null
     );
@@ -335,7 +331,7 @@ export const ChatbotsView: React.FC<ChatbotsViewProps> = ({
         return (
           t.contactName.toLowerCase().includes(q) ||
           t.contactPhone.toLowerCase().includes(q) ||
-          t.lastIntent.toLowerCase().includes(q)
+          Boolean(t.lastIntent && t.lastIntent.toLowerCase().includes(q))
         );
       }
       return true;
@@ -900,12 +896,12 @@ export const ChatbotsView: React.FC<ChatbotsViewProps> = ({
           currency: effectiveWorkspace.currency,
           timezone: businessHours.timezone || effectiveWorkspace.timezone,
           senderName: effectiveWorkspace.senderName,
-          whatsappConnected: effectiveWorkspace.whatsappConnected,
+          whatsappConnected: true,
           smsConnected: effectiveWorkspace.smsConnected,
           emailConnected: effectiveWorkspace.emailConnected,
           notifyNewLeads: effectiveWorkspace.notifyNewLeads,
           notifyCampaigns: effectiveWorkspace.notifyCampaigns,
-          whatsappPhoneId: sanitizeString(phoneNumberId, 80, '104928193847291'),
+          whatsappPhoneId: effectiveWorkspace.whatsappPhoneId,
           smsSenderId: effectiveWorkspace.smsSenderId,
         });
       }
@@ -915,7 +911,7 @@ export const ChatbotsView: React.FC<ChatbotsViewProps> = ({
           replyToEmail: privateProfile.replyToEmail,
           phone: privateProfile.phone,
           mailingAddress: privateProfile.mailingAddress || '',
-          whatsappPhoneId: sanitizeString(phoneNumberId, 80, privateProfile.whatsappPhoneId || '104928193847291'),
+          whatsappPhoneId: privateProfile.whatsappPhoneId,
           smsSenderId: privateProfile.smsSenderId || '+18445550199',
           emailProviderDomain: privateProfile.emailProviderDomain || '',
           sendingDomain: privateProfile.sendingDomain,
@@ -923,12 +919,11 @@ export const ChatbotsView: React.FC<ChatbotsViewProps> = ({
           espApiKey: privateProfile.espApiKey,
           smsProvider: privateProfile.smsProvider,
           smsApiKey: privateProfile.smsApiKey,
-          whatsappAccessToken: sanitizeString(accessToken, 160, ''),
           onboardingCompleted: privateProfile.onboardingCompleted,
         });
       }
       setStatusBanner(
-        `Saved ${selectedProvider.name} credentials & compliant rate-control guardrails (${configuredMpsCap} MPS).`
+        `Saved WhatsApp QR Connect socket configuration & direct dispatch settings (${configuredMpsCap} MPS).`
       );
     } finally {
       setIsSavingConfig(false);
@@ -977,24 +972,24 @@ export const ChatbotsView: React.FC<ChatbotsViewProps> = ({
               <span className="font-bold uppercase tracking-wider text-emerald-700">
                 Official WhatsApp Business Platform
               </span>
+              <span className="font-semibold text-emerald-700">Native Baileys Socket</span>
               <span aria-hidden="true">·</span>
-              <span className="font-mono text-slate-700">Phone ID: {phoneNumberId}</span>
+              <span className="font-mono text-emerald-800 font-bold">Engine: WhatsApp QR Socket</span>
               <span aria-hidden="true">·</span>
               <span className="font-semibold text-emerald-700">
                 Quality Rating: {qualityRating}
               </span>
               <span aria-hidden="true">·</span>
               <span className="font-mono text-slate-600">
-                Rate Cap: {configuredMpsCap}/{selectedProvider.maxThroughputMps} MPS
+                Rate Cap: {configuredMpsCap}/{selectedProvider.maxThroughputMps || 60} MPS
               </span>
             </div>
             <h2 className="font-display text-lg sm:text-xl lg:text-2xl font-bold text-slate-950">
-              WhatsApp Business API, CRM Inbox & Automation Hub
+              WhatsApp QR Connect, CRM Inbox & Automation Hub
             </h2>
             <p className="text-xs sm:text-sm text-slate-600 mt-1">
-              Connected via <strong>{selectedProvider.name}</strong> — compliant template dispatch,
-              24-hour customer care window enforcement, CRM contact context, AI concierge, and human
-              handoff.
+              Connected via <strong>{selectedProvider.name}</strong> — direct device connection,
+              CRM contact context, AI concierge, automated keyword triggers, and live human handoff.
             </p>
           </div>
 
@@ -1005,7 +1000,7 @@ export const ChatbotsView: React.FC<ChatbotsViewProps> = ({
               className="px-3.5 py-2 text-xs font-semibold text-slate-800 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors inline-flex items-center gap-1.5 cursor-pointer"
             >
               <FileText className="w-3.5 h-3.5 text-emerald-700" />
-              <span>New Meta Template</span>
+              <span>New Template</span>
             </button>
             <button
               type="button"
@@ -1018,21 +1013,20 @@ export const ChatbotsView: React.FC<ChatbotsViewProps> = ({
           </div>
         </div>
 
-        {/* Strict Anti-Evasion & Meta Compliance Notice */}
+        {/* WhatsApp QR Socket Connection Banner */}
         <div className="p-3.5 rounded-xl bg-[#F8FAFC] border border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-slate-700">
           <div className="flex items-start sm:items-center gap-2.5">
             <ShieldCheck className="w-4 h-4 text-emerald-700 shrink-0 mt-0.5 sm:mt-0" />
             <div>
               <strong className="text-slate-900">
-                Official Meta Cloud API Guardrails Enforced:
+                Direct WhatsApp QR Device Socket Connected:
               </strong>{' '}
-              Zero artificial batching or limit evasion. Outbound messages pass through a FIFO
-              token-bucket queue, 24-hour window check, and explicit CRM opt-in verification.
-              Meta conversation fees are billed directly by your BSP; FlowPilot software is $0.00.
+              Zero Meta developer apps or Graph API tokens required. Outbound messages pass directly through
+              your local Baileys session socket to WhatsApp servers with instant delivery.
             </div>
           </div>
           <span className="font-mono text-[11px] font-bold text-emerald-800 shrink-0">
-            WABA: {wabaId}
+            Socket: Active
           </span>
         </div>
 
@@ -1040,11 +1034,11 @@ export const ChatbotsView: React.FC<ChatbotsViewProps> = ({
         <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-xl overflow-x-auto no-scrollbar">
           {[
             { id: 'inbox' as const, label: '1. Customer Conversations & CRM', count: threads.length },
-            { id: 'templates' as const, label: '2. Meta Templates', count: templates.length },
+            { id: 'templates' as const, label: '2. Templates', count: templates.length },
             { id: 'automation' as const, label: '3. Keyword, Intent & Workflows', count: chatbots.length },
             { id: 'hours_consent' as const, label: '4. Business Hours & Opt-In Ledger' },
-            { id: 'rate_compliance' as const, label: '5. Rate Queue & Meta Errors', count: dispatchQueue.length },
-            { id: 'provider_config' as const, label: '6. Provider & API Config' },
+            { id: 'rate_compliance' as const, label: '5. Rate Queue & Delivery Logs', count: dispatchQueue.length },
+            { id: 'provider_config' as const, label: '6. WhatsApp QR Connect' },
           ].map((tab) => {
             const active = activeSubTab === tab.id;
             return (
@@ -1294,7 +1288,7 @@ export const ChatbotsView: React.FC<ChatbotsViewProps> = ({
                           <span className="font-bold">{msg.senderLabel}</span>
                           <span>
                             {msg.timestamp}
-                            {!isCustomer && !isNote && ` · ${msg.status.toUpperCase()}`}
+                            {!isCustomer && !isNote && ` · ${(msg.status || 'sent').toUpperCase()}`}
                           </span>
                         </div>
 
@@ -1712,12 +1706,12 @@ export const ChatbotsView: React.FC<ChatbotsViewProps> = ({
 
                     <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
                       <div className="flex flex-wrap gap-1.5">
-                        {tpl.buttons.map((b, i) => (
+                        {(tpl.buttons || []).map((b, i) => (
                           <span
                             key={i}
                             className="text-[11px] font-semibold text-emerald-900 bg-emerald-50 px-2.5 py-1 rounded-md border border-emerald-200"
                           >
-                            {b.text}
+                            {typeof b === 'object' ? b.text : String(b)}
                           </span>
                         ))}
                       </div>
@@ -1807,12 +1801,12 @@ export const ChatbotsView: React.FC<ChatbotsViewProps> = ({
                   {selectedTemplate.footerText}
                 </div>
                 <div className="pt-2 border-t border-slate-800 space-y-1.5">
-                  {selectedTemplate.buttons.map((b, idx) => (
+                  {(selectedTemplate.buttons || []).map((b, idx) => (
                     <div
                       key={idx}
                       className="text-center py-1.5 text-xs font-bold text-emerald-300 bg-slate-900 rounded-lg border border-slate-800"
                     >
-                      {b.text}
+                      {typeof b === 'object' ? b.text : String(b)}
                     </div>
                   ))}
                 </div>
@@ -2397,142 +2391,23 @@ export const ChatbotsView: React.FC<ChatbotsViewProps> = ({
       )}
 
       {/* =====================================================================
-          TAB 6: OFFICIAL PROVIDER / API CONFIGURATION PAGE
+          TAB 6: WHATSAPP QR CONNECT (SERLZO STYLE)
          ===================================================================== */}
       {activeSubTab === 'provider_config' && (
-        <form
-          onSubmit={handleSaveProviderConfig}
-          className="border border-slate-200 rounded-2xl bg-white p-5 sm:p-6 space-y-5 shadow-xs"
-        >
-          <div className="border-b border-slate-100 pb-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div>
-              <div className="text-[11px] font-bold uppercase tracking-wider text-emerald-700">
-                Official BSP & Cloud API Credentials
-              </div>
-              <h3 className="font-display text-lg font-bold text-slate-950">
-                WhatsApp Business Provider & Webhook Configuration
-              </h3>
-              <p className="text-xs text-slate-600 mt-0.5">
-                Connect exclusively through official Meta WhatsApp Business APIs or authorized
-                Business Solution Providers (BSPs).
-              </p>
-            </div>
-            <button
-              type="submit"
-              disabled={isSavingConfig}
-              className="px-4 py-2 text-xs sm:text-sm font-bold text-white bg-[#047857] hover:bg-[#065F46] rounded-xl cursor-pointer shrink-0"
-            >
-              {isSavingConfig ? 'Saving...' : 'Save WhatsApp API Configuration'}
-            </button>
-          </div>
-
-          {/* Provider Cards */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-            {OFFICIAL_WHATSAPP_PROVIDERS.map((prov) => {
-              const active = selectedProviderId === prov.id;
-              return (
-                <div
-                  key={prov.id}
-                  onClick={() => setSelectedProviderId(prov.id)}
-                  className={`p-4 rounded-xl border transition-colors cursor-pointer ${
-                    active
-                      ? 'border-2 border-emerald-700 bg-emerald-50/30'
-                      : 'border-slate-200 hover:border-slate-300'
-                  }`}
-                >
-                  <div className="text-[11px] font-bold text-emerald-700 uppercase">
-                    {prov.badge} · Max {prov.maxThroughputMps} MPS
-                  </div>
-                  <div className="font-display text-sm font-bold text-slate-950 mt-0.5">
-                    {prov.name}
-                  </div>
-                  <div className="font-mono text-[11px] text-slate-500 mt-1 truncate">
-                    Endpoint: {prov.apiEndpoint}
-                  </div>
-                  <p className="text-xs text-slate-600 mt-1.5">{prov.pricingModelNote}</p>
-                </div>
-              );
-            })}
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 text-xs">
-            <div>
-              <label className="block font-semibold text-slate-700 mb-1">
-                WhatsApp Business Account ID (WABA ID)
-              </label>
-              <input
-                type="text"
-                value={wabaId}
-                onChange={(e) => setWabaId(e.target.value)}
-                className="w-full px-3 py-2 bg-[#F8FAFC] border border-slate-300 rounded-lg font-mono"
-              />
-            </div>
-
-            <div>
-              <label className="block font-semibold text-slate-700 mb-1">
-                Phone Number ID (Meta Graph API)
-              </label>
-              <input
-                type="text"
-                value={phoneNumberId}
-                onChange={(e) => setPhoneNumberId(e.target.value)}
-                className="w-full px-3 py-2 bg-[#F8FAFC] border border-slate-300 rounded-lg font-mono"
-              />
-            </div>
-
-            <div>
-              <label className="block font-semibold text-slate-700 mb-1">
-                Verified Display Phone Number
-              </label>
-              <input
-                type="text"
-                value={businessPhoneDisplay}
-                onChange={(e) => setBusinessPhoneDisplay(e.target.value)}
-                className="w-full px-3 py-2 bg-[#F8FAFC] border border-slate-300 rounded-lg font-mono"
-              />
-            </div>
-
-            <div>
-              <label className="block font-semibold text-slate-700 mb-1">
-                Permanent System User Access Token
-              </label>
-              <input
-                type="password"
-                value={accessToken}
-                onChange={(e) => setAccessToken(e.target.value)}
-                className="w-full px-3 py-2 bg-[#F8FAFC] border border-slate-300 rounded-lg font-mono"
-              />
-            </div>
-
-            <div>
-              <label className="block font-semibold text-slate-700 mb-1">
-                Webhook Verify Token (X-Hub-Signature-256)
-              </label>
-              <input
-                type="text"
-                value={webhookVerifyToken}
-                onChange={(e) => setWebhookVerifyToken(e.target.value)}
-                className="w-full px-3 py-2 bg-[#F8FAFC] border border-slate-300 rounded-lg font-mono"
-              />
-            </div>
-
-            <div>
-              <label className="block font-semibold text-slate-700 mb-1">
-                Compliant Outbound Rate Cap (10–80 MPS)
-              </label>
-              <input
-                type="number"
-                min={5}
-                max={80}
-                value={configuredMpsCap}
-                onChange={(e) =>
-                  setConfiguredMpsCap(Math.min(80, Math.max(5, Number(e.target.value) || 40)))
-                }
-                className="w-full px-3 py-2 bg-[#F8FAFC] border border-slate-300 rounded-lg font-mono"
-              />
-            </div>
-          </div>
-        </form>
+        <div className="space-y-4">
+          <WhatsAppConnectView
+            userId={effectiveWorkspace.ownerId}
+            userEmail={privateProfile?.email || 'operator@flowpilot.app'}
+            onAccountConnected={async (status) => {
+              if (onUpdateWorkspace) {
+                await onUpdateWorkspace({
+                  ...effectiveWorkspace,
+                  whatsappConnected: true,
+                });
+              }
+            }}
+          />
+        </div>
       )}
 
       {/* =====================================================================

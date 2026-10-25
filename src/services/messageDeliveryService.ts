@@ -327,18 +327,31 @@ export function hydrateGatewayConfigFromPrivateProfile(
   return getStoredChannelGatewayConfig(uid);
 }
 
-export function getWhatsAppProviderLabel(mode: WhatsAppProviderMode): string {
-  switch (mode) {
-    case 'meta_cloud_api':
-      return 'Meta WhatsApp Business Cloud API (Live Connector)';
-    case 'twilio_whatsapp':
-      return 'Twilio WhatsApp Business Gateway (Live Connector)';
-    case 'ultramsg_gateway':
-      return 'UltraMsg / Evolution WhatsApp Gateway (Live Connector)';
-    default:
-      return 'FlowPilot Built-In WhatsApp Auto-Pilot Relay + Direct wa.me Bridge';
+export function getWhatsAppProviderLabel(mode?: string): string {
+  return 'WhatsApp QR Connect (Baileys Native Engine)';
+}
+
+export async function sendWhatsApp(params: {
+  to: string;
+  message: string;
+  userId?: string;
+}): Promise<{ ok: boolean; messageId?: string; detail: string }> {
+  try {
+    const res = await fetch('/api/whatsapp/send', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        to: params.to,
+        message: params.message,
+        userId: params.userId || 'default_workspace',
+      }),
+    });
+    return await res.json();
+  } catch (err: any) {
+    return { ok: false, detail: err.message || 'Network error sending WhatsApp message' };
   }
 }
+
 
 export function getSmsProviderLabel(mode: SmsProviderMode): string {
   switch (mode) {
@@ -618,10 +631,49 @@ export async function deliverChannelMessage(
   const cleanRecipient = (payload.to || '').trim() || defaultRecipient;
   const webhookUrl = getStoredOutboundWebhookUrl();
 
+  // DIRECT BAILEYS QR WHATSAPP SENDER DISPATCH
+  if (payload.channel === 'whatsapp') {
+    try {
+      const waRes = await fetch('/api/whatsapp/send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          to: cleanRecipient,
+          message: payload.body,
+          userId: payload.workspace?.ownerId || 'default_workspace',
+        }),
+      });
+      if (waRes.ok) {
+        const waData = await waRes.json();
+        const receipt: MessageDeliveryReceipt = {
+          receiptId: waData.messageId || `rcpt_wa_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          channel: 'whatsapp',
+          status: 'delivered',
+          providerUsed: 'WhatsApp QR Connect (Baileys)',
+          fromIdentity: resolvedFrom,
+          senderName,
+          toRecipient: cleanRecipient,
+          leadName: payload.leadName || 'Lead Contact',
+          bodyPreview: payload.body.slice(0, 240),
+          source: payload.source,
+          listName: payload.listName || 'General Contacts',
+          directLaunchUrl: `https://wa.me/${cleanRecipient.replace(/[^0-9]/g, '')}?text=${encodeURIComponent(payload.body)}`,
+          timestamp: new Date().toISOString(),
+          detailMessage: waData.detail || `Delivered via Baileys WhatsApp QR to ${cleanRecipient}`,
+        };
+        saveReceiptToLocalHistory(receipt);
+        return receipt;
+      }
+    } catch (waErr: any) {
+      console.warn('[deliverChannelMessage] /api/whatsapp/send notice:', waErr);
+    }
+  }
+
   try {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
+
     if (gmailToken) {
       headers.Authorization = `Bearer ${gmailToken}`;
     }

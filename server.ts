@@ -35,11 +35,14 @@ const WHATSAPP_ACCOUNTS_STORE_PATH = path.join(DATA_DIR, 'whatsapp_accounts_stor
 const WHATSAPP_TEMPLATES_STORE_PATH = path.join(DATA_DIR, 'whatsapp_templates_store.json');
 const PUBLISHED_FORMS_STORE_PATH = path.join(DATA_DIR, 'published_forms_store.json');
 
-// Meta WhatsApp Embedded Signup 1-Click Connect Configuration
-export const FACEBOOK_APP_ID = process.env.FACEBOOK_APP_ID || process.env.META_APP_ID || '1109730181566504';
-export const FACEBOOK_APP_SECRET = process.env.FACEBOOK_APP_SECRET || process.env.META_APP_SECRET || '2335bf985133e10dc2fd29c7dd703cd4';
-export const META_APP_ID = FACEBOOK_APP_ID;
-export const META_APP_SECRET = FACEBOOK_APP_SECRET;
+import {
+  getOrStartWhatsAppSession,
+  getWhatsAppSessionStatus,
+  disconnectWhatsAppSession,
+  sendWhatsAppMessage,
+  autoRestoreSavedWhatsAppSessions,
+  formatWhatsAppNumber,
+} from './src/services/whatsappBaileysService.js';
 
 // Database Table: whatsapp_accounts (Linked to Logged-In User)
 export interface WhatsAppAccountRecord {
@@ -491,6 +494,7 @@ function buildServerStarterWorkspaceSnapshot(
 }
 
 loadPersistentStoresFromDisk();
+autoRestoreSavedWhatsAppSessions().catch((err) => console.error('[WhatsApp Restore] Error restoring sessions:', err));
 
 export interface DeliveryReceiptRecord {
   receiptId: string;
@@ -655,7 +659,7 @@ export interface RuntimeEmailConnector {
 }
 
 // ============================================================================
-// DEDICATED sendWhatsApp FUNCTION (Requirement 4: Uses User's Token from Database)
+// DEDICATED sendWhatsApp FUNCTION (Powered by Baileys WhatsApp QR Socket)
 // ============================================================================
 export async function sendWhatsApp(params: {
   to: string;
@@ -667,187 +671,24 @@ export async function sendWhatsApp(params: {
   templateName?: string;
   templateLanguage?: string;
 }): Promise<{ deliveredViaApi: boolean; provider: string; detail: string; messageId?: string }> {
-  // Requirement 4: Read logged-in user's token from whatsapp_accounts database table, not global ENV
-  const account = getWhatsAppAccountForUser(params.userId);
-
-  // Enforcement: Only APPROVED templates can be used in automation
-  if (params.templateName) {
-    const templates = getWhatsAppTemplatesForWaba(account?.waba_id);
-    const found = templates.find((t) => t.name === params.templateName);
-    if (found && found.status !== 'APPROVED') {
-      throw new Error(`Only APPROVED templates can be used in automation. Template "${params.templateName}" is currently ${found.status}.`);
-    }
-  }
-
-  let waToken = '';
-  let waPhoneId = '';
-  let providerSource = '';
-
-  if (account && account.status === 'connected' && account.access_token && account.phone_number_id) {
-    waToken = account.access_token.trim();
-    waPhoneId = account.phone_number_id.trim();
-    providerSource = `User Embedded Signup (${account.display_phone_number || waPhoneId})`;
-  } else if (params.whatsappConnector?.metaAccessToken && params.whatsappConnector?.metaPhoneNumberId) {
-    waToken = params.whatsappConnector.metaAccessToken.trim();
-    waPhoneId = params.whatsappConnector.metaPhoneNumberId.trim();
-    providerSource = 'Workspace Custom Connector';
-  } else {
-    // Fallback to global ENV only if no user has connected an account in DB
-    waToken = (process.env.WHATSAPP_ACCESS_TOKEN || '').trim();
-    waPhoneId = (process.env.WHATSAPP_PHONE_NUMBER_ID || '').trim();
-    providerSource = 'Global Environment';
-  }
-
-  const cleanRecipient = normalizePhoneForWhatsApp(params.to);
-  const cleanFrom = params.from || account?.display_phone_number || waPhoneId || '+1 (555) 019-2834';
-
-  // 1. Meta WhatsApp Business Cloud API v21.0
-  if (waToken && waPhoneId && waToken !== 'MY_WHATSAPP_ACCESS_TOKEN') {
-    try {
-      const payload: any = {
-        messaging_product: 'whatsapp',
-        recipient_type: 'individual',
-        to: cleanRecipient,
-      };
-
-      if (params.templateName) {
-        payload.type = 'template';
-        payload.template = {
-          name: params.templateName,
-          language: { code: params.templateLanguage || 'en_US' },
-        };
-      } else {
-        payload.type = 'text';
-        payload.text = { preview_url: true, body: params.body };
-      }
-
-      const res = await fetch(`https://graph.facebook.com/v21.0/${waPhoneId}/messages`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${waToken}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(payload),
-      });
-
-      const data = await res.json().catch(() => null);
-
-      if (res.ok && data?.messages?.[0]?.id) {
-        return {
-          deliveredViaApi: true,
-          provider: `Meta WhatsApp Business Cloud API (${providerSource})`,
-          detail: `Delivered via Meta Graph API (Phone ID: ${waPhoneId}) from WhatsApp Business Number ${cleanFrom} to ${params.to}`,
-          messageId: data.messages[0].id,
-        };
-      } else if (!res.ok) {
-        console.warn('[sendWhatsApp] Meta Cloud API response warning:', data);
-        const errMsg = data?.error?.message || `HTTP ${res.status}`;
-        return {
-          deliveredViaApi: true,
-          provider: `Meta WhatsApp Business Cloud API (${providerSource})`,
-          detail: `Meta API Dispatched (${errMsg}) · Sender: ${cleanFrom} → Recipient: ${params.to}`,
-        };
-      }
-    } catch (err: any) {
-      console.error('[sendWhatsApp] Meta fetch error:', err);
-    }
-  }
-
-  // 2. Twilio WhatsApp Business Gateway
-  const mode = params.whatsappConnector?.providerMode || 'builtin_relay';
-  const twilioSid = (
-    params.whatsappConnector?.twilioAccountSid ||
-    process.env.TWILIO_ACCOUNT_SID ||
-    ''
-  ).trim();
-  const twilioToken = (
-    params.whatsappConnector?.twilioAuthToken ||
-    process.env.TWILIO_AUTH_TOKEN ||
-    ''
-  ).trim();
-  const twilioFrom = (
-    params.whatsappConnector?.twilioFromNumber ||
-    process.env.TWILIO_PHONE_NUMBER ||
-    params.from ||
-    ''
-  ).trim();
-
-  if ((mode === 'twilio_whatsapp' || (twilioSid && twilioToken)) && twilioSid && twilioToken && twilioFrom) {
-    try {
-      const authHeader = Buffer.from(`${twilioSid}:${twilioToken}`).toString('base64');
-      const formData = new URLSearchParams();
-      formData.append('To', `whatsapp:${normalizePhoneForE164(params.to)}`);
-      formData.append('From', `whatsapp:${normalizePhoneForE164(twilioFrom)}`);
-      formData.append('Body', params.body);
-      const res = await fetch(
-        `https://api.twilio.com/2010-04-01/Accounts/${twilioSid}/Messages.json`,
-        {
-          method: 'POST',
-          headers: {
-            Authorization: `Basic ${authHeader}`,
-            'Content-Type': 'application/x-www-form-urlencoded',
-          },
-          body: formData.toString(),
-        }
-      );
-      if (res.ok) {
-        return {
-          deliveredViaApi: true,
-          provider: 'Twilio WhatsApp Business Gateway (Live)',
-          detail: `Delivered via Twilio WhatsApp Gateway from ${params.from || twilioFrom} to ${params.to}`,
-        };
-      }
-    } catch {
-      // Fallback
-    }
-    if (mode === 'twilio_whatsapp') {
-      return {
-        deliveredViaApi: true,
-        provider: 'Twilio WhatsApp Business Gateway (Connected)',
-        detail: `Dispatched via Twilio WhatsApp Connector · From: ${params.from || twilioFrom} (${params.senderName || 'FlowPilot'}) → To: ${params.to}`,
-      };
-    }
-  }
-
-  // 3. UltraMsg / Evolution WhatsApp Gateway
-  const ultraInstance = (params.whatsappConnector?.ultramsgInstanceId || '').trim();
-  const ultraToken = (params.whatsappConnector?.ultramsgToken || '').trim();
-  if (mode === 'ultramsg_gateway' && ultraInstance && ultraToken) {
-    try {
-      const formData = new URLSearchParams();
-      formData.append('token', ultraToken);
-      formData.append('to', normalizePhoneForE164(params.to));
-      formData.append('body', params.body);
-      const res = await fetch(
-        `https://api.ultramsg.com/${encodeURIComponent(ultraInstance)}/messages/chat`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: formData.toString(),
-        }
-      );
-      if (res.ok) {
-        return {
-          deliveredViaApi: true,
-          provider: 'UltraMsg / Evolution WhatsApp Gateway (Live)',
-          detail: `Delivered via UltraMsg Instance (${ultraInstance}) · From: ${params.from || 'UltraMsg'} → To: ${params.to}`,
-        };
-      }
-    } catch {
-      // Fallback
-    }
+  try {
+    const targetUser = params.userId || 'default_workspace';
+    const result = await sendWhatsAppMessage(targetUser, params.to, params.body);
     return {
       deliveredViaApi: true,
-      provider: 'UltraMsg / Evolution WhatsApp Gateway (Connected)',
-      detail: `Dispatched via UltraMsg WhatsApp Connector (${ultraInstance}) · From: ${params.from || 'UltraMsg'} → To: ${params.to}`,
+      provider: 'WhatsApp QR Connect (Baileys)',
+      detail: result.detail,
+      messageId: result.messageId,
+    };
+  } catch (err: any) {
+    console.warn('[sendWhatsApp] Baileys socket error:', err.message);
+    const formatted = formatWhatsAppNumber(params.to);
+    return {
+      deliveredViaApi: false,
+      provider: 'WhatsApp QR Connect',
+      detail: err.message || `Dispatched to linked WhatsApp device (+${formatted})`,
     };
   }
-
-  return {
-    deliveredViaApi: true,
-    provider: account ? `Meta WhatsApp Cloud API (${account.display_phone_number || 'Live Connected'})` : 'FlowPilot Built-In WhatsApp Auto-Pilot Relay',
-    detail: `Dispatched live via FlowPilot WhatsApp Relay · From: ${cleanFrom} (${params.senderName || 'FlowPilot'}) → To: ${params.to}`,
-  };
 }
 
 async function dispatchWhatsAppCloudOrTwilio(params: {
@@ -1662,10 +1503,9 @@ async function startServer() {
   }, 1500);
 
   // 1. Check Multi-Channel Gateway & Background Scheduler Status
-  app.get('/api/messages/gateway-status', (_req, res) => {
-    const hasMetaWhatsApp = Boolean(
-      process.env.WHATSAPP_ACCESS_TOKEN && process.env.WHATSAPP_PHONE_NUMBER_ID
-    );
+  app.get('/api/messages/gateway-status', (req, res) => {
+    const userId = String(req.query.userId || req.headers['x-user-id'] || 'default_workspace').trim();
+    const waSession = getWhatsAppSessionStatus(userId);
     const hasTwilio = Boolean(
       process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN
     );
@@ -1676,21 +1516,17 @@ async function startServer() {
     res.json({
       ok: true,
       channels: {
-        whatsapp: (() => {
-          const connectedAcc = getWhatsAppAccountForUser();
-          const isWaConnected = Boolean(connectedAcc && connectedAcc.status === 'connected');
-          return {
-            ready: true,
-            connected: isWaConnected,
-            mode: isWaConnected ? 'meta_cloud_api' : (hasMetaWhatsApp ? 'meta_cloud_api' : (hasTwilio ? 'twilio_whatsapp_api' : 'platform_relay_and_direct')),
-            providerLabel: isWaConnected
-              ? ("Meta WhatsApp Cloud API (Embedded Signup: " + (connectedAcc?.display_phone_number || connectedAcc?.phone_number_id || "Active") + ")")
-              : (hasMetaWhatsApp ? 'Meta WhatsApp Cloud API (Live)' : 'FlowPilot WhatsApp Relay + Direct wa.me Bridge'),
-            phoneNumberId: connectedAcc?.phone_number_id || undefined,
-            displayPhoneNumber: connectedAcc?.display_phone_number || undefined,
-            verifiedName: connectedAcc?.verified_name || undefined,
-          };
-        })(),
+        whatsapp: {
+          ready: true,
+          connected: Boolean(waSession.connected),
+          mode: 'baileys_qr',
+          providerLabel: waSession.connected
+            ? `WhatsApp QR Connect (Active: +${waSession.number})`
+            : 'WhatsApp QR Connect (Awaiting Scan)',
+          number: waSession.number || undefined,
+          connectedAt: waSession.connectedAt || undefined,
+        },
+
         email: {
           ready: true,
           mode: hasResend
@@ -2244,640 +2080,156 @@ async function startServer() {
 
 
   // ==========================================================================
-  // META WHATSAPP EMBEDDED SIGNUP 1-CLICK CONNECT & CALLBACK ENDPOINTS
+  // WHATSAPP QR CONNECT (BAILEYS) API ROUTES
   // ==========================================================================
-  // META WHATSAPP EMBEDDED SIGNUP 1-CLICK CONNECT & CALLBACK ENDPOINTS (PART 1)
-  // ==========================================================================
-  const handleWhatsAppConfig = (_req: express.Request, res: express.Response) => {
-    res.json({
-      appId: FACEBOOK_APP_ID,
-      metaAppId: FACEBOOK_APP_ID,
-      apiVersion: 'v21.0',
-    });
-  };
-  app.get('/api/whatsapp/config', handleWhatsAppConfig);
-  app.get('/api/auth/whatsapp/config', handleWhatsAppConfig);
-
-  const handleWhatsAppStatus = (req: express.Request, res: express.Response) => {
-    const userId = String(req.query.userId || req.headers['x-user-id'] || '').trim();
-    const account = getWhatsAppAccountForUser(userId);
-    if (!account || account.status !== 'connected') {
-      res.json({
-        connected: false,
-        appId: FACEBOOK_APP_ID,
-      });
-      return;
-    }
-
-    res.json({
-      connected: true,
-      appId: FACEBOOK_APP_ID,
-      account: {
-        id: account.id,
-        userId: account.userId,
-        phone_number_id: account.phone_number_id,
-        waba_id: account.waba_id,
-        business_id: account.business_id,
-        whatsapp_number: account.whatsapp_number || account.display_phone_number,
-        display_phone_number: account.display_phone_number || account.whatsapp_number,
-        verified_name: account.verified_name,
-        status: account.status,
-        connectedAt: account.connectedAt,
-        updatedAt: account.updatedAt,
-      },
-    });
-  };
-  app.get('/api/whatsapp/status', handleWhatsAppStatus);
-  app.get('/api/auth/whatsapp/status', handleWhatsAppStatus);
-
-  // Exchange Meta Code for Access Token and Save to Database Table whatsapp_accounts
-  // POST https://graph.facebook.com/v21.0/oauth/access_token?client_id={APP_ID}&client_secret={APP_SECRET}&code={CODE}
-  const handleWhatsAppCallback = async (req: express.Request, res: express.Response) => {
+  app.get('/api/whatsapp/qr', async (req, res) => {
     try {
-      const { code, phoneNumberId, wabaId, businessId, whatsappNumber, userId, userEmail } = req.body || {};
-
-      if (!code) {
-        res.status(400).json({ ok: false, error: 'Authorization code is required from Facebook/Meta Embedded Signup.' });
-        return;
-      }
-
-      const targetUserId = String(userId || req.headers['x-user-id'] || 'admin_user').trim();
-      const cleanEmail = String(userEmail || 'jonajukej777@gmail.com').trim();
-
-      console.log(`[WhatsApp Auth] Exchanging code for access token. App ID: ${FACEBOOK_APP_ID}, User: ${targetUserId}`);
-
-      let accessToken = '';
-      let resolvedPhoneId = String(phoneNumberId || '').trim();
-      let resolvedWabaId = String(wabaId || '').trim();
-      let resolvedBusinessId = String(businessId || '').trim();
-      let resolvedWhatsappNumber = String(whatsappNumber || '').trim();
-      let displayPhoneNumber = '';
-      let verifiedName = 'WhatsApp Business Account';
-
-      // 1. Exchange CODE for Access Token:
-      // POST https://graph.facebook.com/v21.0/oauth/access_token?client_id={APP_ID}&client_secret={APP_SECRET}&code={CODE}
-      try {
-        const tokenUrl = new URL('https://graph.facebook.com/v21.0/oauth/access_token');
-        tokenUrl.searchParams.set('client_id', FACEBOOK_APP_ID);
-        tokenUrl.searchParams.set('client_secret', FACEBOOK_APP_SECRET);
-        tokenUrl.searchParams.set('code', code);
-
-        // Try POST first as specified by user
-        let tokenRes = await fetch(tokenUrl.toString(), { method: 'POST' });
-        if (!tokenRes.ok) {
-          // Fallback to GET for Graph OAuth endpoint compatibility
-          tokenRes = await fetch(tokenUrl.toString(), { method: 'GET' });
-        }
-        const tokenData = await tokenRes.json();
-
-        if (tokenData && tokenData.access_token) {
-          accessToken = tokenData.access_token;
-          console.log('[WhatsApp Auth] Access token successfully obtained from Meta Graph API.');
-        } else {
-          console.warn('[WhatsApp Auth] Meta token exchange notice:', tokenData);
-          if (code.startsWith('EAA') || code.length > 40) {
-            accessToken = code;
-          } else {
-            res.status(400).json({
-              ok: false,
-              error: tokenData?.error?.message || 'Failed to exchange Facebook authorization code for access token.',
-            });
-            return;
-          }
-        }
-      } catch (fetchErr: any) {
-        console.error('[WhatsApp Auth] Token exchange fetch failed:', fetchErr);
-        if (code.startsWith('EAA') || code.length > 40) {
-          accessToken = code;
-        } else {
-          res.status(500).json({ ok: false, error: fetchErr.message || 'Network error communicating with Meta Graph API.' });
-          return;
-        }
-      }
-
-      // 2. Fetch WABA_ID, Phone Number ID, and Business ID via Meta Graph API v21.0
-      if (accessToken) {
-        try {
-          // Inspect debug_token to get granular_scopes and business_id
-          const debugUrl = `https://graph.facebook.com/v21.0/debug_token?input_token=${encodeURIComponent(accessToken)}&access_token=${FACEBOOK_APP_ID}|${FACEBOOK_APP_SECRET}`;
-          const debugRes = await fetch(debugUrl);
-          if (debugRes.ok) {
-            const debugData = await debugRes.json();
-            const scopes = debugData?.data?.granular_scopes || [];
-            const waScope = scopes.find((s: any) => s.scope === 'whatsapp_business_management' || s.scope === 'whatsapp_business_messaging');
-            if (waScope?.target_ids?.[0] && !resolvedWabaId) {
-              resolvedWabaId = waScope.target_ids[0];
-            }
-            if (debugData?.data?.business_id && !resolvedBusinessId) {
-              resolvedBusinessId = debugData.data.business_id;
-            }
-          }
-        } catch (dbgErr) {
-          console.warn('[WhatsApp Auth] debug_token non-fatal query error:', dbgErr);
-        }
-
-        // Fetch WABA details to obtain Business ID if still missing
-        if (resolvedWabaId && !resolvedBusinessId) {
-          try {
-            const wabaDetailRes = await fetch(`https://graph.facebook.com/v21.0/${resolvedWabaId}?fields=id,name,owner_business_info,primary_business_location&access_token=${accessToken}`);
-            if (wabaDetailRes.ok) {
-              const wabaData = await wabaDetailRes.json();
-              if (wabaData?.owner_business_info?.id) {
-                resolvedBusinessId = wabaData.owner_business_info.id;
-              }
-            }
-          } catch (wabaErr) {
-            console.warn('[WhatsApp Auth] WABA details non-fatal query error:', wabaErr);
-          }
-        }
-
-        // Fetch Phone Numbers registered under WABA
-        if (resolvedWabaId) {
-          try {
-            const phoneListRes = await fetch(`https://graph.facebook.com/v21.0/${resolvedWabaId}/phone_numbers?access_token=${accessToken}`);
-            if (phoneListRes.ok) {
-              const phoneListData = await phoneListRes.json();
-              if (phoneListData?.data?.[0]) {
-                const primary = phoneListData.data[0];
-                if (!resolvedPhoneId) resolvedPhoneId = primary.id;
-                displayPhoneNumber = primary.display_phone_number || '';
-                verifiedName = primary.verified_name || verifiedName;
-              }
-            }
-          } catch (phoneErr) {
-            console.warn('[WhatsApp Auth] Phone numbers non-fatal query error:', phoneErr);
-          }
-        }
-
-        // Fetch Phone Number ID detail directly if known
-        if (resolvedPhoneId && (!displayPhoneNumber || !verifiedName)) {
-          try {
-            const phoneDetailRes = await fetch(`https://graph.facebook.com/v21.0/${resolvedPhoneId}?access_token=${accessToken}`);
-            if (phoneDetailRes.ok) {
-              const phoneDetailData = await phoneDetailRes.json();
-              displayPhoneNumber = phoneDetailData.display_phone_number || displayPhoneNumber;
-              verifiedName = phoneDetailData.verified_name || verifiedName;
-            }
-          } catch (pDetailErr) {
-            console.warn('[WhatsApp Auth] Phone detail non-fatal query error:', pDetailErr);
-          }
-        }
-      }
-
-      // Generate clean resilient identifiers if in local sandbox/test mode
-      if (!resolvedWabaId) {
-        resolvedWabaId = 'waba_' + Date.now();
-      }
-      if (!resolvedPhoneId) {
-        resolvedPhoneId = 'wa_phone_' + Date.now();
-      }
-      if (!resolvedBusinessId) {
-        resolvedBusinessId = 'biz_' + Date.now();
-      }
-      if (!displayPhoneNumber) {
-        displayPhoneNumber = resolvedWhatsappNumber || '+234 812 345 6789';
-      }
-      if (!resolvedWhatsappNumber) {
-        resolvedWhatsappNumber = displayPhoneNumber;
-      }
-
-      const now = new Date().toISOString();
-      const accountRecord: WhatsAppAccountRecord = {
-        id: `wa_acc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-        userId: targetUserId,
-        userEmail: cleanEmail,
-        phone_number_id: resolvedPhoneId,
-        waba_id: resolvedWabaId,
-        business_id: resolvedBusinessId,
-        access_token: accessToken,
-        whatsapp_number: resolvedWhatsappNumber,
-        display_phone_number: displayPhoneNumber,
-        verified_name: verifiedName,
-        status: 'connected',
-        metaAppId: FACEBOOK_APP_ID,
-        connectedAt: now,
-        updatedAt: now,
-      };
-
-      // Save to DB for that user: waba_id, phone_number_id, business_id, access_token, whatsapp_number
-      saveWhatsAppAccountToDatabase(accountRecord);
-
-      // Seed starter approved default template for the WABA so automations have an approved template ready immediately
-      const existingTemplates = getWhatsAppTemplatesForWaba(resolvedWabaId);
-      if (existingTemplates.length === 0) {
-        saveWhatsAppTemplateToDatabase({
-          id: `tpl_welcome_${Date.now()}`,
-          userId: targetUserId,
-          waba_id: resolvedWabaId,
-          name: 'welcome_lead_greeting',
-          category: 'MARKETING',
-          language: 'en_US',
-          status: 'APPROVED',
-          components: [
-            { type: 'BODY', text: 'Hello {{1}}, thank you for contacting us! We have received your inquiry and will follow up shortly.' },
-            { type: 'FOOTER', text: 'Powered by FlowPilot WhatsApp Cloud' },
-          ],
-          createdAt: now,
-          updatedAt: now,
-        });
-        saveWhatsAppTemplateToDatabase({
-          id: `tpl_order_${Date.now()}`,
-          userId: targetUserId,
-          waba_id: resolvedWabaId,
-          name: 'lead_confirmation_notice',
-          category: 'UTILITY',
-          language: 'en_US',
-          status: 'APPROVED',
-          components: [
-            { type: 'BODY', text: 'Hi {{1}}, your registration with FlowPilot has been verified. Welcome aboard!' },
-            { type: 'FOOTER', text: 'Reply STOP to opt out' },
-          ],
-          createdAt: now,
-          updatedAt: now,
-        });
-      }
-
-      // Sync to workspace snapshot so workspace immediately marks WhatsApp active
-      const snap = serverWorkspaceSnapshotsByUid.get(targetUserId) as any;
-      if (snap && snap.workspace) {
-        snap.workspace.whatsappConnected = true;
-        if (snap.privateProfile) {
-          snap.privateProfile.whatsappBusinessNumber = displayPhoneNumber;
-          snap.privateProfile.whatsappConnected = true;
-        }
-        serverWorkspaceSnapshotsByUid.set(targetUserId, snap);
-        flushWorkspacesStoreToDisk();
-      }
-
-      // Trigger queued automation jobs on connect
-      let triggeredJobsCount = 0;
-      for (const job of scheduledAutomationJobs) {
-        if (job.channel === 'whatsapp' && job.status === 'queued') {
-          job.status = 'dispatched';
-          job.processedAt = now;
-          sendWhatsApp({
-            to: job.toRecipient,
-            from: displayPhoneNumber,
-            senderName: job.senderName,
-            body: job.body,
-            userId: targetUserId,
-          }).catch((err) => console.error('[WhatsApp Auto-Dispatch] Error sending:', err));
-          triggeredJobsCount++;
-        }
-      }
-
-      console.log(`[WhatsApp Auth] WhatsApp account connected for user ${targetUserId}. WABA: ${resolvedWabaId}, Phone ID: ${resolvedPhoneId}, Business ID: ${resolvedBusinessId}, Number: ${displayPhoneNumber}`);
-
+      const userId = String(req.query.userId || req.headers['x-user-id'] || 'default_workspace').trim();
+      const refresh = String(req.query.refresh || '').toLowerCase() === 'true';
+      const session = await getOrStartWhatsAppSession(userId, refresh);
       res.json({
         ok: true,
-        message: 'WhatsApp Embedded Signup connected successfully.',
-        account: {
-          id: accountRecord.id,
-          userId: accountRecord.userId,
-          waba_id: accountRecord.waba_id,
-          phone_number_id: accountRecord.phone_number_id,
-          business_id: accountRecord.business_id,
-          whatsapp_number: accountRecord.whatsapp_number,
-          display_phone_number: accountRecord.display_phone_number,
-          verified_name: accountRecord.verified_name,
-          status: accountRecord.status,
-          connectedAt: accountRecord.connectedAt,
-        },
+        connected: session.connected,
+        number: session.number || '',
+        connectedAt: session.connectedAt || '',
+        qr: session.qr || '',
+        qrExpiresAt: session.qrExpiresAt || 0,
       });
-    } catch (error: any) {
-      console.error('[WhatsApp Auth] Callback error:', error);
-      res.status(500).json({ ok: false, error: error.message || 'Internal server error processing WhatsApp callback' });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err.message || 'Failed to initialize WhatsApp QR' });
     }
-  };
+  });
 
-  app.post('/api/whatsapp/callback', handleWhatsAppCallback);
-  app.post('/api/auth/whatsapp/callback', handleWhatsAppCallback);
-
-  const handleWhatsAppDisconnect = (req: express.Request, res: express.Response) => {
-    const userId = String(req.body.userId || req.headers['x-user-id'] || '').trim();
-    const account = getWhatsAppAccountForUser(userId);
-    if (account) {
-      account.status = 'disconnected';
-      account.updatedAt = new Date().toISOString();
-      saveWhatsAppAccountToDatabase(account);
+  app.post('/api/whatsapp/qr', async (req, res) => {
+    try {
+      const userId = String(req.body?.userId || req.headers['x-user-id'] || 'default_workspace').trim();
+      const refresh = Boolean(req.body?.refresh);
+      const session = await getOrStartWhatsAppSession(userId, refresh);
+      res.json({
+        ok: true,
+        connected: session.connected,
+        number: session.number || '',
+        connectedAt: session.connectedAt || '',
+        qr: session.qr || '',
+        qrExpiresAt: session.qrExpiresAt || 0,
+      });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err.message || 'Failed to initialize WhatsApp QR' });
     }
-    res.json({ ok: true, message: 'WhatsApp account disconnected successfully' });
+  });
+
+  app.get('/api/whatsapp/status', (req, res) => {
+    try {
+      const userId = String(req.query.userId || req.headers['x-user-id'] || 'default_workspace').trim();
+      const status = getWhatsAppSessionStatus(userId);
+      res.json({
+        connected: Boolean(status.connected),
+        number: status.number || '',
+        connectedAt: status.connectedAt || null,
+        reconnectAttempts: status.reconnectAttempts || 0,
+      });
+    } catch (err: any) {
+      res.status(500).json({ connected: false, number: '', error: err.message });
+    }
+  });
+
+  // WhatsApp QR Disconnect
+  const handleWhatsAppDisconnect = async (req: express.Request, res: express.Response) => {
+    try {
+      const userId = String(req.body?.userId || req.headers['x-user-id'] || 'default_workspace').trim();
+      await disconnectWhatsAppSession(userId);
+      res.json({ ok: true, message: 'WhatsApp session disconnected and logged out successfully' });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err.message || 'Failed to disconnect WhatsApp session' });
+    }
   };
   app.post('/api/whatsapp/disconnect', handleWhatsAppDisconnect);
   app.post('/api/auth/whatsapp/disconnect', handleWhatsAppDisconnect);
 
-  app.post('/api/whatsapp/test', async (req, res) => {
-    const { to, message, userId } = req.body || {};
-    if (!to || !message) {
-      res.status(400).json({ ok: false, error: 'Recipient phone and message are required' });
-      return;
-    }
-    const result = await sendWhatsApp({
-      to: String(to).trim(),
-      body: String(message).trim(),
-      userId: String(userId || '').trim(),
-      senderName: 'FlowPilot Admin',
-    });
-    res.json({ ok: true, result });
-  });
-  app.post('/api/auth/whatsapp/test', async (req, res) => {
-    const { to, message, userId } = req.body || {};
-    if (!to || !message) {
-      res.status(400).json({ ok: false, error: 'Recipient phone and message are required' });
-      return;
-    }
-    const result = await sendWhatsApp({
-      to: String(to).trim(),
-      body: String(message).trim(),
-      userId: String(userId || '').trim(),
-      senderName: 'FlowPilot Admin',
-    });
-    res.json({ ok: true, result });
-  });
-
-  // ==========================================================================
-  // PART 2 - TEMPLATE CREATOR INSIDE DASHBOARD (APIs for /dashboard/whatsapp-templates)
-  // ==========================================================================
-
-  // 1. API to LIST templates:
-  // GET https://graph.facebook.com/v21.0/{WABA_ID}/message_templates?fields=name,category,status,language,rejected_reason
-  app.get('/api/whatsapp/templates', async (req, res) => {
+  // WhatsApp QR Send
+  const handleWhatsAppSend = async (req: express.Request, res: express.Response) => {
     try {
-      const userId = String(req.query.userId || req.headers['x-user-id'] || '').trim();
-      const account = getWhatsAppAccountForUser(userId);
+      const { to, message, text, body, userId } = req.body || {};
+      const targetPhone = String(to || '').trim();
+      const content = String(message || text || body || '').trim();
+      const targetUser = String(userId || req.headers['x-user-id'] || 'default_workspace').trim();
 
-      if (!account || account.status !== 'connected' || !account.waba_id) {
-        res.status(400).json({
-          ok: false,
-          error: 'No WhatsApp Business Account (WABA) connected. Please connect WhatsApp first at /dashboard/whatsapp-connect.',
-        });
+      if (!targetPhone || !content) {
+        res.status(400).json({ ok: false, error: 'Recipient number (to) and message text are required.' });
         return;
       }
 
-      const wabaId = account.waba_id;
-      const localTemplates = getWhatsAppTemplatesForWaba(wabaId);
+      const result = await sendWhatsAppMessage(targetUser, targetPhone, content);
+      res.json({ ...result });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err.message || 'Failed to send WhatsApp message via Baileys socket' });
+    }
+  };
+  app.post('/api/whatsapp/send', handleWhatsAppSend);
+  app.post('/api/whatsapp/test', handleWhatsAppSend);
+  app.post('/api/auth/whatsapp/test', handleWhatsAppSend);
 
-      // Query Meta Graph API if access_token is present
-      if (account.access_token && account.access_token !== 'sandbox_token') {
-        try {
-          const metaUrl = `https://graph.facebook.com/v21.0/${wabaId}/message_templates?fields=name,category,status,language,rejected_reason,components`;
-          const metaRes = await fetch(metaUrl, {
-            headers: {
-              Authorization: `Bearer ${account.access_token}`,
-              'Content-Type': 'application/json',
-            },
-          });
 
-          if (metaRes.ok) {
-            const metaData = await metaRes.json();
-            const graphTemplates: any[] = metaData?.data || [];
-
-            // Merge Meta Graph templates into local storage
-            for (const gt of graphTemplates) {
-              const matchedLocal = localTemplates.find((l) => l.name === gt.name);
-              const templateRecord: WhatsAppTemplateRecord = {
-                id: gt.id || matchedLocal?.id || `tpl_${gt.name}`,
-                userId: account.userId,
-                waba_id: wabaId,
-                name: gt.name,
-                category: gt.category || 'MARKETING',
-                language: gt.language || 'en_US',
-                status: (gt.status || 'PENDING').toUpperCase() as any,
-                rejected_reason: gt.rejected_reason || undefined,
-                components: gt.components || matchedLocal?.components || [],
-                createdAt: matchedLocal?.createdAt || new Date().toISOString(),
-                updatedAt: new Date().toISOString(),
-              };
-              saveWhatsAppTemplateToDatabase(templateRecord);
-            }
-          }
-        } catch (metaErr) {
-          console.warn('[WhatsApp Templates] Meta list fetch notice:', metaErr);
-        }
-      }
-
-      // Return current templates for this WABA
-      const currentTemplates = getWhatsAppTemplatesForWaba(wabaId);
+  // ==========================================================================
+  // WHATSAPP QR LOCAL TEMPLATES & QUICK REPLIES
+  // ==========================================================================
+  app.get('/api/whatsapp/templates', (req, res) => {
+    try {
+      const templates = getWhatsAppTemplatesForWaba();
       res.json({
         ok: true,
-        waba_id: wabaId,
-        templates: currentTemplates,
+        templates,
       });
     } catch (err: any) {
-      console.error('[WhatsApp Templates] Error listing templates:', err);
       res.status(500).json({ ok: false, error: err.message || 'Failed to list WhatsApp templates' });
     }
   });
 
-  // 2. API to CREATE template:
-  // POST https://graph.facebook.com/v21.0/{WABA_ID}/message_templates with Bearer token
-  app.post('/api/whatsapp/templates', async (req, res) => {
+  app.post('/api/whatsapp/templates', (req, res) => {
     try {
-      const userId = String(req.body.userId || req.headers['x-user-id'] || '').trim();
-      const account = getWhatsAppAccountForUser(userId);
-
-      if (!account || account.status !== 'connected' || !account.waba_id) {
-        res.status(400).json({
-          ok: false,
-          error: 'No WhatsApp Business Account (WABA) connected. Please connect WhatsApp first at /dashboard/whatsapp-connect.',
-        });
-        return;
-      }
-
-      const { name, category, language = 'en_US', body, header, footer, buttons } = req.body || {};
-
-      // Validate Template Name: lowercase, underscore, numbers only
-      const cleanName = String(name || '').trim().toLowerCase();
-      if (!cleanName || !/^[a-z0-9_]+$/.test(cleanName)) {
-        res.status(400).json({
-          ok: false,
-          error: 'Template Name must contain only lowercase alphanumeric characters and underscores (e.g. welcome_offer_1).',
-        });
-        return;
-      }
-
-      // Validate Category
-      const cleanCategory = String(category || 'MARKETING').toUpperCase();
-      if (!['MARKETING', 'UTILITY', 'AUTHENTICATION'].includes(cleanCategory)) {
-        res.status(400).json({
-          ok: false,
-          error: 'Category must be MARKETING, UTILITY, or AUTHENTICATION.',
-        });
-        return;
-      }
-
-      // Validate Body
+      const { name, category = 'MARKETING', body, header, footer } = req.body || {};
+      const cleanName = String(name || '').trim().toLowerCase().replace(/[^a-z0-9_]/g, '_');
       const cleanBody = String(body || '').trim();
+
       if (!cleanBody) {
-        res.status(400).json({
-          ok: false,
-          error: 'Template Body text is required and can include variables like {{1}}, {{2}}.',
-        });
+        res.status(400).json({ ok: false, error: 'Template body is required.' });
         return;
-      }
-
-      const wabaId = account.waba_id;
-
-      // Construct Meta Graph API components payload
-      const components: WhatsAppTemplateComponent[] = [];
-
-      if (header && String(header).trim()) {
-        components.push({
-          type: 'HEADER',
-          format: 'TEXT',
-          text: String(header).trim(),
-        });
-      }
-
-      components.push({
-        type: 'BODY',
-        text: cleanBody,
-      });
-
-      if (footer && String(footer).trim()) {
-        components.push({
-          type: 'FOOTER',
-          text: String(footer).trim(),
-        });
-      }
-
-      if (Array.isArray(buttons) && buttons.length > 0) {
-        const validButtons: WhatsAppTemplateButton[] = buttons.map((b: any) => ({
-          type: b.type === 'URL' || b.type === 'PHONE_NUMBER' ? b.type : 'QUICK_REPLY',
-          text: String(b.text || 'Click here').trim(),
-          ...(b.url ? { url: String(b.url).trim() } : {}),
-          ...(b.phone_number ? { phone_number: String(b.phone_number).trim() } : {}),
-        }));
-        components.push({
-          type: 'BUTTONS',
-          buttons: validButtons,
-        });
-      }
-
-      const metaPayload = {
-        name: cleanName,
-        category: cleanCategory,
-        language: String(language || 'en_US').trim(),
-        components,
-      };
-
-      let metaTemplateId = `tpl_${Date.now()}`;
-      let initialStatus: 'APPROVED' | 'PENDING' | 'REJECTED' = 'PENDING';
-      let metaErrorMsg: string | null = null;
-
-      // Send to Meta Graph API if access token is live
-      if (account.access_token && account.access_token !== 'sandbox_token') {
-        try {
-          const metaUrl = `https://graph.facebook.com/v21.0/${wabaId}/message_templates`;
-          const metaRes = await fetch(metaUrl, {
-            method: 'POST',
-            headers: {
-              Authorization: `Bearer ${account.access_token}`,
-              'Content-Type': 'application/json',
-            },
-            body: JSON.stringify(metaPayload),
-          });
-
-          const metaData = await metaRes.json();
-          if (metaRes.ok && metaData.id) {
-            metaTemplateId = metaData.id;
-            initialStatus = (metaData.status || 'PENDING').toUpperCase() as any;
-            console.log(`[WhatsApp Templates] Successfully created template "${cleanName}" in Meta Graph API. ID: ${metaTemplateId}, Status: ${initialStatus}`);
-          } else {
-            console.warn('[WhatsApp Templates] Meta template creation response:', metaData);
-            if (metaData?.error?.message) {
-              metaErrorMsg = metaData.error.message;
-            }
-          }
-        } catch (postErr: any) {
-          console.warn('[WhatsApp Templates] Meta template creation network error:', postErr);
-          metaErrorMsg = postErr.message;
-        }
-      }
-
-      // If in dev environment or test sandbox and Meta gave an error, auto-approve utility/marketing template so user flow can proceed
-      if (metaErrorMsg && !initialStatus) {
-        initialStatus = 'PENDING';
       }
 
       const now = new Date().toISOString();
-      const newTemplateRecord: WhatsAppTemplateRecord = {
-        id: metaTemplateId,
-        userId: account.userId,
-        waba_id: wabaId,
-        name: cleanName,
-        category: cleanCategory as any,
-        language: String(language || 'en_US').trim(),
-        status: initialStatus,
-        rejected_reason: metaErrorMsg ? `Meta notice: ${metaErrorMsg}` : undefined,
-        components,
+      const newTemplate: WhatsAppTemplateRecord = {
+        id: `tpl_${Date.now()}`,
+        waba_id: 'local_qr',
+        name: cleanName || `template_${Date.now()}`,
+        category: category as any,
+        language: 'en_US',
+        status: 'APPROVED',
+        components: [
+          ...(header ? [{ type: 'HEADER' as const, text: String(header) }] : []),
+          { type: 'BODY' as const, text: cleanBody },
+          ...(footer ? [{ type: 'FOOTER' as const, text: String(footer) }] : []),
+        ],
         createdAt: now,
         updatedAt: now,
       };
 
-      saveWhatsAppTemplateToDatabase(newTemplateRecord);
-
-      res.json({
-        ok: true,
-        message: metaErrorMsg
-          ? `Template created in dashboard (${initialStatus}): ${metaErrorMsg}`
-          : `Template "${cleanName}" submitted successfully! Status: ${initialStatus}.`,
-        template: newTemplateRecord,
-      });
+      saveWhatsAppTemplateToDatabase(newTemplate);
+      res.json({ ok: true, template: newTemplate });
     } catch (err: any) {
-      console.error('[WhatsApp Templates] Error creating template:', err);
-      res.status(500).json({ ok: false, error: err.message || 'Failed to create WhatsApp template' });
+      res.status(500).json({ ok: false, error: err.message || 'Failed to save template' });
     }
   });
 
-  // 3. API to DELETE template:
-  // DELETE https://graph.facebook.com/v21.0/{WABA_ID}/message_templates?name={name}
-  const handleTemplateDelete = async (req: express.Request, res: express.Response) => {
+  app.delete('/api/whatsapp/templates/:name', (req, res) => {
     try {
-      const templateName = String(req.params.name || req.query.name || '').trim();
-      const userId = String(req.query.userId || req.body?.userId || req.headers['x-user-id'] || '').trim();
-      const account = getWhatsAppAccountForUser(userId);
-
-      if (!templateName) {
-        res.status(400).json({ ok: false, error: 'Template name is required for deletion.' });
-        return;
-      }
-
-      if (!account || account.status !== 'connected' || !account.waba_id) {
-        res.status(400).json({ ok: false, error: 'No WhatsApp Business Account connected.' });
-        return;
-      }
-
-      const wabaId = account.waba_id;
-
-      // Try Meta Graph API deletion if token is present
-      if (account.access_token && account.access_token !== 'sandbox_token') {
-        try {
-          const deleteUrl = `https://graph.facebook.com/v21.0/${wabaId}/message_templates?name=${encodeURIComponent(templateName)}`;
-          await fetch(deleteUrl, {
-            method: 'DELETE',
-            headers: {
-              Authorization: `Bearer ${account.access_token}`,
-            },
-          });
-        } catch (metaDelErr) {
-          console.warn('[WhatsApp Templates] Meta delete notice:', metaDelErr);
-        }
-      }
-
-      deleteWhatsAppTemplateFromDatabase(wabaId, templateName);
-
-      res.json({
-        ok: true,
-        message: `Template "${templateName}" deleted successfully.`,
-      });
+      const templateName = String(req.params.name || '').trim();
+      deleteWhatsAppTemplateFromDatabase('local_qr', templateName);
+      res.json({ ok: true, message: `Template ${templateName} deleted` });
     } catch (err: any) {
-      console.error('[WhatsApp Templates] Error deleting template:', err);
       res.status(500).json({ ok: false, error: err.message || 'Failed to delete template' });
     }
-  };
-  app.delete('/api/whatsapp/templates/:name', handleTemplateDelete);
-  app.delete('/api/whatsapp/templates', handleTemplateDelete);
+  });
+
 
   // ==========================================================================
   // 6. PUBLIC LEAD CAPTURE ENDPOINT (External HTML Forms & Public Shareable Pages)

@@ -288,7 +288,6 @@ export interface UserPrivateProfile {
   emailProviderDomain: string;
   whatsappBusinessNumber?: string;
   whatsappBusinessPhone?: string;
-  whatsappAccessToken?: string;
   sendingDomain?: string;
   espProvider?: string;
   espApiKey?: string;
@@ -549,6 +548,7 @@ export type ActiveTab =
   | 'assets'
   | 'funnels'
   | 'chatbots'
+  | 'whatsapp_connect'
   | 'settings';
 
 // Defensive payload sanitization helpers matching firebase-blueprint.json

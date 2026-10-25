@@ -20,7 +20,9 @@ import {
   User as UserIcon,
   Menu,
   X,
+  Smartphone,
 } from 'lucide-react';
+
 
 import { useAuth } from './contexts/AuthContext';
 import {
@@ -1301,17 +1303,19 @@ export default function App() {
   // Navigation Items Catalog
   const navItems: NavItem[] = [
     { id: 'dashboard', label: 'Command Center', icon: LayoutDashboard },
+    { id: 'whatsapp_connect', label: 'WhatsApp Connect', icon: Smartphone },
     { id: 'inbox', label: 'Omnichannel Inbox', icon: Inbox, badge: unreadCount > 0 ? unreadCount : undefined },
     { id: 'contacts', label: 'CRM & Audiences', icon: Users },
     { id: 'lists', label: 'Segments & Lists', icon: Layers },
     { id: 'automations', label: 'Workflows & Logic', icon: GitBranch },
     { id: 'autoresponders', label: 'Auto-Responders', icon: Zap },
-    { id: 'campaigns', label: 'Campaigns & SMS', icon: Send },
+    { id: 'campaigns', label: 'Campaigns & Broadcasts', icon: Send },
     { id: 'assets', label: 'Lead Gen & Forms', icon: FileText },
     { id: 'funnels', label: 'Conversion Funnels', icon: Sliders },
     { id: 'chatbots', label: 'WhatsApp & Bots', icon: Bot },
     { id: 'settings', label: 'Workspace & Gateway', icon: Settings },
   ];
+
 
   if (isWhatsAppSettingsRoute) {
     return (
@@ -1330,7 +1334,7 @@ export default function App() {
               privateProfile: prev.privateProfile ? {
                 ...prev.privateProfile,
                 whatsappConnected: true,
-                whatsappBusinessNumber: acc.display_phone_number || prev.privateProfile.whatsappBusinessNumber,
+                whatsappBusinessNumber: acc.number || prev.privateProfile.whatsappBusinessNumber,
               } : prev.privateProfile,
             }));
           }}
@@ -1927,6 +1931,29 @@ export default function App() {
                   onNavigateToWhatsAppEmbeddedSignup={navigateToWhatsAppEmbeddedSignup}
                 />
               )}
+
+              {activeTab === 'whatsapp_connect' && (
+                <WhatsAppConnectView
+                  userId={activeUid}
+                  userEmail={user?.email || undefined}
+                  onBackToDashboard={() => setActiveTab('dashboard')}
+                  onAccountConnected={(acc) => {
+                    updateSnapshot((prev) => ({
+                      ...prev,
+                      workspace: {
+                        ...prev.workspace,
+                        whatsappConnected: true,
+                      },
+                      privateProfile: prev.privateProfile ? {
+                        ...prev.privateProfile,
+                        whatsappConnected: true,
+                        whatsappBusinessNumber: acc.number || prev.privateProfile.whatsappBusinessNumber,
+                      } : prev.privateProfile,
+                    }));
+                  }}
+                />
+              )}
+
             </ErrorBoundary>
           </div>
         )}
