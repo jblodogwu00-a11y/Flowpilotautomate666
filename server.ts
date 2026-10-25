@@ -2189,19 +2189,25 @@ async function startServer() {
   });
 
   // WhatsApp Cloud API Webhook Verification (GET) & Events (POST)
-  app.get('/api/webhook/whatsapp', (req, res) => {
+  const handleWhatsAppWebhookVerify = (req: express.Request, res: express.Response) => {
     const mode = req.query['hub.mode'];
     const token = req.query['hub.verify_token'];
     const challenge = req.query['hub.challenge'];
-    const verifyToken = process.env.WHATSAPP_VERIFY_TOKEN || 'affiliate_pulse_verify';
-    if (mode === 'subscribe' && token === verifyToken) {
+    const validTokens = [
+      process.env.WHATSAPP_VERIFY_TOKEN,
+      process.env.VERIFY_TOKEN,
+      'flowpilot2026',
+      'affiliate_pulse_verify',
+    ].filter(Boolean) as string[];
+
+    if (mode === 'subscribe' && typeof token === 'string' && validTokens.includes(token)) {
       res.status(200).send(challenge);
       return;
     }
     res.status(403).send('Forbidden');
-  });
+  };
 
-  app.post('/api/webhook/whatsapp', (req, res) => {
+  const handleWhatsAppWebhookEvent = (req: express.Request, res: express.Response) => {
     const body = req.body;
     console.log('Webhook received:', JSON.stringify(body, null, 2));
     try {
@@ -2229,7 +2235,12 @@ async function startServer() {
       // Non-fatal
     }
     res.status(200).send('EVENT_RECEIVED');
-  });
+  };
+
+  app.get('/api/webhook/whatsapp', handleWhatsAppWebhookVerify);
+  app.get('/api/webhooks/whatsapp', handleWhatsAppWebhookVerify);
+  app.post('/api/webhook/whatsapp', handleWhatsAppWebhookEvent);
+  app.post('/api/webhooks/whatsapp', handleWhatsAppWebhookEvent);
 
 
   // ==========================================================================
