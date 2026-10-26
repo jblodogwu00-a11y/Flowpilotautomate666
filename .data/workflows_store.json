@@ -1,0 +1,12 @@
+[
+  {
+    "id": "wf_1793017740170_x6v10",
+    "userId": "test_user_1",
+    "name": "Price Inquiry Drip Flow",
+    "nodesJson": "[]",
+    "edgesJson": "[]",
+    "enabled": true,
+    "createdAt": "2026-10-26T12:29:00.170Z",
+    "updatedAt": "2026-10-26T12:29:00.170Z"
+  }
+]

@@ -10,6 +10,7 @@ import pino from 'pino';
 import fs from 'fs';
 import path from 'path';
 import { startAutoResponder } from '../lib/whatsapp/listener.js';
+import { startAutoResponderWorkflowListener } from '../lib/whatsapp/autoResponder.js';
 
 export interface WhatsAppSessionState {
   userId: string;
@@ -111,12 +112,18 @@ export async function getOrStartWhatsAppSession(
 ): Promise<WhatsAppSessionState> {
   const cleanUserId = (userId || 'default_workspace').trim();
 
-  // If already connected and active, return immediately
+  // If already connected and active, or if a valid QR code is already alive and fresh, return immediately
   const existingSocket = activeSockets.get(cleanUserId);
   const existingState = sessionStates.get(cleanUserId);
 
-  if (existingSocket && existingState?.connected && !forceRefreshQr) {
-    return existingState;
+  if (existingSocket && !forceRefreshQr) {
+    if (existingState?.connected) {
+      return existingState;
+    }
+    // Return existing valid QR code if it has not expired yet
+    if (existingState?.qr && (existingState.qrExpiresAt || 0) > Date.now()) {
+      return existingState;
+    }
   }
 
   // If a QR request is already pending, reuse promise to avoid multiple simultaneous socket creates
@@ -152,10 +159,11 @@ export async function getOrStartWhatsAppSession(
 
       sessionStates.set(cleanUserId, currentState);
 
-      // If an existing socket is in error or needs refresh, close it
+      // If an existing socket is in error or needs refresh, close it gracefully
       if (existingSocket) {
         try {
           existingSocket.end(undefined);
+          await new Promise((r) => setTimeout(r, 200));
         } catch {
           // Ignore close error
         }
@@ -178,8 +186,9 @@ export async function getOrStartWhatsAppSession(
       activeSockets.set(cleanUserId, sock);
       (sock as any)._flowpilot_userId = cleanUserId;
 
-      // Automatically register WhatsApp Auto-Responder Listener
+      // Automatically register WhatsApp Auto-Responder Listener & Workflow Engine
       startAutoResponder(sock, { userId: cleanUserId });
+      startAutoResponderWorkflowListener(sock, { userId: cleanUserId });
 
       // Save credentials on updates
       sock.ev.on('creds.update', saveCreds);
@@ -259,9 +268,17 @@ export async function getOrStartWhatsAppSession(
         }
       });
 
-      // Wait a short moment to receive initial QR if not yet authorized
-      if (!state.creds?.registered) {
-        await new Promise((resolve) => setTimeout(resolve, 2500));
+      // Wait up to 3 seconds for QR or connection to arrive, breaking immediately once generated
+      if (!state.creds?.registered && !currentState.connected && !currentState.qr) {
+        const start = Date.now();
+        while (Date.now() - start < 3000) {
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          const updated = sessionStates.get(cleanUserId);
+          if (updated && (updated.qr || updated.connected)) {
+            currentState = updated;
+            break;
+          }
+        }
       }
 
       return sessionStates.get(cleanUserId) || currentState;

@@ -123,6 +123,7 @@ interface AutomationsViewProps {
   onNavigateToLists?: () => void;
   onCreateFormForList?: (listName: string) => void;
   onNavigateToInbox?: () => void;
+  onNavigateToBuilder?: () => void;
   onForwardToInbox?: (payload: {
     leadName: string;
     leadEmail: string;
@@ -138,6 +139,7 @@ interface AutomationsViewProps {
 
 export const AutomationsView: React.FC<AutomationsViewProps> = ({
   automations,
+  onNavigateToBuilder,
   contacts = [],
   lists = [],
   workspace,
@@ -1737,14 +1739,31 @@ export const AutomationsView: React.FC<AutomationsViewProps> = ({
             </button>
           </div>
 
-          <button
-            type="button"
-            onClick={() => setIsModalOpen(true)}
-            className="px-4 py-2 text-xs sm:text-sm font-bold text-white bg-emerald-700 hover:bg-emerald-600 rounded-xl transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
-          >
-            <Plus className="w-4 h-4" />
-            <span>New Workflow</span>
-          </button>
+          <div className="flex items-center gap-2">
+            {onNavigateToBuilder && (
+              <button
+                type="button"
+                onClick={onNavigateToBuilder}
+                className="px-3.5 py-2 text-xs sm:text-sm font-bold text-emerald-950 bg-emerald-400 hover:bg-emerald-300 rounded-xl transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-xs border border-emerald-500/20"
+                title="Open Visual Workflow Builder with React Flow and Minutes/Hours/Days Drip Delays"
+              >
+                <GitBranch className="w-4 h-4 text-emerald-900" />
+                <span>Visual Flow Builder</span>
+                <span className="text-[10px] bg-emerald-600/20 text-emerald-900 font-extrabold px-1.5 py-0.5 rounded-md uppercase tracking-wider">
+                  xyflow
+                </span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() => setIsModalOpen(true)}
+              className="px-4 py-2 text-xs sm:text-sm font-bold text-white bg-emerald-700 hover:bg-emerald-600 rounded-xl transition-colors inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
+            >
+              <Plus className="w-4 h-4" />
+              <span>New Workflow</span>
+            </button>
+          </div>
         </div>
       </div>
 

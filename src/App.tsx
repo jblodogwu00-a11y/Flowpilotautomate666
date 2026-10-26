@@ -21,6 +21,7 @@ import {
   Menu,
   X,
   Smartphone,
+  Split,
 } from 'lucide-react';
 
 
@@ -60,10 +61,15 @@ import {
   WorkspaceSnapshot,
   loadLocalWorkspaceSnapshot,
   saveLocalWorkspaceSnapshot,
+  fetchServerWorkspaceSnapshot,
   pushServerWorkspaceSnapshot,
+  mergeActivities,
+  postUserActivityToServer,
   buildStarterWorkspaceSnapshot,
   normalizeWorkspaceSnapshot,
 } from './services/accountPersistenceService';
+import { db, auth, handleFirestoreError, OperationType } from './firebase';
+import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
 
 import { FlowPilotLogo } from './components/FlowPilotLogo';
 import { LandingPage } from './components/LandingPage';
@@ -81,6 +87,7 @@ import { WorkspaceSettingsView } from './components/WorkspaceSettingsView';
 import { WhatsAppEmbeddedSignupPage } from './components/WhatsAppEmbeddedSignupPage';
 import { WhatsAppConnectView } from './components/WhatsAppConnectView';
 import { WhatsAppTemplatesView } from './components/WhatsAppTemplatesView';
+import { AutomationWorkflowBuilder } from './components/AutomationWorkflowBuilder';
 import { AuthModal, AuthModalMode } from './components/AuthModal';
 import { DesignSystemModal } from './components/DesignSystemModal';
 import { SystemDiagnosticsModal } from './components/SystemDiagnosticsModal';
@@ -213,12 +220,60 @@ export default function App() {
     );
   });
 
-  // Reload snapshot when activeUid changes
+  // Reload snapshot when activeUid or user changes, merging server and pre-login activities
   useEffect(() => {
-    const loaded = loadLocalWorkspaceSnapshot(activeUid, user?.email || undefined);
-    if (loaded) {
-      setSnapshot(loaded);
-    }
+    let isCancelled = false;
+
+    const syncUserData = async () => {
+      // 1. Immediately apply local snapshot for instant UI rendering
+      const loaded = loadLocalWorkspaceSnapshot(activeUid, user?.email || undefined);
+      if (loaded && !isCancelled) {
+        setSnapshot(loaded);
+      }
+
+      // 2. Query server for persisted user snapshot & activities
+      try {
+        const serverSnapshot = await fetchServerWorkspaceSnapshot(activeUid, user?.email || undefined);
+        if (serverSnapshot && !isCancelled) {
+          // If user is authenticated, check for any pre-login activities made under default_workspace
+          const preLoginSnap =
+            activeUid !== 'default_workspace'
+              ? loadLocalWorkspaceSnapshot('default_workspace')
+              : null;
+          const preActivities = preLoginSnap?.activities || [];
+
+          setSnapshot((prev) => {
+            const combinedActivities = mergeActivities(
+              serverSnapshot.activities || [],
+              [...prev.activities, ...preActivities]
+            );
+
+            const reconciled: WorkspaceSnapshot = {
+              ...serverSnapshot,
+              workspace: {
+                ...serverSnapshot.workspace,
+                id: activeUid,
+                ownerId: activeUid,
+              },
+              activities: combinedActivities.slice(0, 150),
+            };
+
+            const activeEmail = user?.email || 'operator@flowpilot.app';
+            saveLocalWorkspaceSnapshot(activeUid, activeEmail, reconciled);
+            pushServerWorkspaceSnapshot(activeUid, activeEmail, reconciled).catch(() => {});
+            return reconciled;
+          });
+        }
+      } catch (err) {
+        console.warn('[Sync] Error syncing user workspace state from server:', err);
+      }
+    };
+
+    syncUserData();
+
+    return () => {
+      isCancelled = true;
+    };
   }, [activeUid, user?.email]);
 
   // Fetch published form from server when opened in Incognito or unauthenticated visitor session
@@ -270,7 +325,7 @@ export default function App() {
     [activeUid, user?.email]
   );
 
-  // Activity Logger
+  // Activity Logger - Persists per user to local storage, server state, dedicated activities endpoint, and Firestore
   const handleLogActivity = useCallback(
     async (
       eventType: ActivityEventType,
@@ -281,7 +336,7 @@ export default function App() {
       const now = new Date().toISOString();
       const newActivity: ActivityLog = {
         id: generateSafeId('act'),
-        workspaceId: snapshot.workspace.id,
+        workspaceId: snapshot.workspace.id || activeUid,
         ownerId: activeUid,
         eventType,
         title: sanitizeString(title, 140, 'Activity logged'),
@@ -290,12 +345,35 @@ export default function App() {
         createdAt: now,
         updatedAt: now,
       };
+
+      // 1. Update React snapshot & persist to local storage + server snapshot
       updateSnapshot((prev) => ({
         ...prev,
-        activities: [newActivity, ...prev.activities].slice(0, 100),
+        activities: [newActivity, ...prev.activities.filter((a) => a.id !== newActivity.id)].slice(0, 150),
       }));
+
+      // 2. Direct server endpoint backup
+      postUserActivityToServer(activeUid, user?.email || undefined, newActivity).catch(() => {});
+
+      // 3. Firestore persistence if Firebase Auth user is present
+      if (auth.currentUser) {
+        try {
+          await setDoc(doc(db, 'activities', newActivity.id), {
+            workspaceId: snapshot.workspace.id || activeUid,
+            ownerId: auth.currentUser.uid,
+            eventType: newActivity.eventType,
+            title: newActivity.title,
+            detail: newActivity.detail,
+            channel: newActivity.channel,
+            createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
+          });
+        } catch (err) {
+          handleFirestoreError(err, OperationType.CREATE, `activities/${newActivity.id}`);
+        }
+      }
     },
-    [activeUid, snapshot.workspace.id, updateSnapshot]
+    [activeUid, snapshot.workspace.id, updateSnapshot, user?.email]
   );
 
   // --------------------------------------------------------------------------
@@ -1308,6 +1386,7 @@ export default function App() {
     { id: 'contacts', label: 'CRM & Audiences', icon: Users },
     { id: 'lists', label: 'Segments & Lists', icon: Layers },
     { id: 'automations', label: 'Workflows & Logic', icon: GitBranch },
+    { id: 'workflow_builder', label: 'Workflow Builder', icon: Split },
     { id: 'autoresponders', label: 'Auto-Responders', icon: Zap },
     { id: 'campaigns', label: 'Campaigns & Broadcasts', icon: Send },
     { id: 'assets', label: 'Lead Gen & Forms', icon: FileText },
@@ -1789,7 +1868,23 @@ export default function App() {
                     setActiveTab('assets');
                   }}
                   onNavigateToInbox={() => setActiveTab('inbox')}
+                  onNavigateToBuilder={() => setActiveTab('workflow_builder')}
                   onForwardToInbox={handleForwardToInboxFromAutomation}
+                />
+              )}
+
+              {activeTab === 'workflow_builder' && (
+                <AutomationWorkflowBuilder
+                  userId={activeUid}
+                  onBack={() => setActiveTab('automations')}
+                  onSaved={() => {
+                    handleLogActivity(
+                      'automation_triggered',
+                      'Visual Workflow Saved',
+                      'Configured drip nodes with minutes/hours/days delays and auto-responder triggers',
+                      'whatsapp'
+                    );
+                  }}
                 />
               )}
 

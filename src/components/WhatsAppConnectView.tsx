@@ -63,8 +63,8 @@ export const WhatsAppConnectView: React.FC<WhatsAppConnectViewProps> = ({
   // Polling ref
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
 
-  // 1. Fetch QR & Status from backend
-  const fetchQrAndStatus = async (forceRefresh: boolean = false) => {
+  // 1. Fetch QR & Status from backend with graceful fallback
+  const fetchQrAndStatus = async (forceRefresh: boolean = false, retryCount: number = 0) => {
     if (forceRefresh) setRefreshingQr(true);
     try {
       const url = forceRefresh
@@ -72,6 +72,25 @@ export const WhatsAppConnectView: React.FC<WhatsAppConnectViewProps> = ({
         : `/api/whatsapp/qr?userId=${encodeURIComponent(userId)}`;
 
       const res = await fetch(url);
+      if (!res.ok) {
+        // Fallback: check status endpoint in case QR generation is processing in background
+        const statusRes = await fetch(`/api/whatsapp/status?userId=${encodeURIComponent(userId)}`);
+        if (statusRes.ok) {
+          const statusData = await statusRes.json();
+          if (statusData.connected) {
+            setStatus({
+              connected: true,
+              number: statusData.number || '',
+              connectedAt: statusData.connectedAt || '',
+              qr: '',
+            });
+            setErrorNotice(null);
+            return;
+          }
+        }
+        throw new Error(`HTTP ${res.status}`);
+      }
+
       const data = await res.json();
 
       if (data && data.ok) {
@@ -88,12 +107,26 @@ export const WhatsAppConnectView: React.FC<WhatsAppConnectViewProps> = ({
         }
         setSecondsRemaining(60);
         setErrorNotice(null);
+
+        // If the socket is initializing and QR has not arrived yet, poll again in 1.5s
+        if (!data.connected && !data.qr && retryCount < 5) {
+          setTimeout(() => fetchQrAndStatus(false, retryCount + 1), 1500);
+        }
       } else if (data?.error) {
-        setErrorNotice(data.error);
+        if (retryCount < 2) {
+          setTimeout(() => fetchQrAndStatus(false, retryCount + 1), 2000);
+        } else {
+          setErrorNotice(data.error);
+        }
       }
     } catch (err: any) {
       console.warn('[WhatsApp QR] Failed to fetch session state:', err);
-      setErrorNotice('Unable to reach WhatsApp QR backend. Retrying...');
+      if (retryCount < 2) {
+        // Transient error - retry automatically before alarming user
+        setTimeout(() => fetchQrAndStatus(false, retryCount + 1), 2000);
+      } else {
+        setErrorNotice('Unable to reach WhatsApp QR backend. Retrying...');
+      }
     } finally {
       setLoading(false);
       setRefreshingQr(false);

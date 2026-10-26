@@ -510,6 +510,62 @@ export async function pushServerWorkspaceSnapshot(
   }
 }
 
+export function mergeActivities(
+  primary: ActivityLog[] = [],
+  secondary: ActivityLog[] = []
+): ActivityLog[] {
+  const map = new Map<string, ActivityLog>();
+
+  // Secondary items first, then primary items (taking precedence)
+  for (const act of [...secondary, ...primary]) {
+    if (!act || !act.title) continue;
+    const key = act.id || `${act.eventType}_${act.title}_${act.createdAt || ''}`;
+    if (!map.has(key)) {
+      map.set(key, act);
+    }
+  }
+
+  const parseTimestamp = (val: unknown): number => {
+    if (!val) return 0;
+    if (typeof val === 'string' || typeof val === 'number') {
+      const parsed = new Date(val).getTime();
+      return isNaN(parsed) ? 0 : parsed;
+    }
+    if (typeof (val as any)?.toDate === 'function') {
+      return (val as any).toDate().getTime();
+    }
+    if (typeof (val as any)?.seconds === 'number') {
+      return (val as any).seconds * 1000;
+    }
+    return 0;
+  };
+
+  return Array.from(map.values()).sort((a, b) => {
+    return parseTimestamp(b.createdAt) - parseTimestamp(a.createdAt);
+  });
+}
+
+export async function postUserActivityToServer(
+  userId: string,
+  email: string | undefined,
+  activity: ActivityLog
+): Promise<void> {
+  if (!userId || userId === 'guest_sandbox') return;
+  try {
+    await fetch('/api/activities', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        userId,
+        email: email ? email.trim().toLowerCase() : undefined,
+        activity,
+      }),
+    });
+  } catch {
+    // Non-fatal background sync
+  }
+}
+
 export async function syncAccountWithServer(params: {
   action: 'signup' | 'verify_code' | 'resend_code' | 'signin' | 'google' | 'reset_password' | 'send_otp';
   email: string;

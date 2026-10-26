@@ -549,6 +549,7 @@ export type ActiveTab =
   | 'funnels'
   | 'chatbots'
   | 'whatsapp_connect'
+  | 'workflow_builder'
   | 'settings';
 
 // Defensive payload sanitization helpers matching firebase-blueprint.json

@@ -1,0 +1,16 @@
+[
+  {
+    "id": "job_1793017811866_jheni",
+    "workflowId": "wf_test_1",
+    "userId": "test_user_1",
+    "leadPhone": "2348012345678",
+    "nextActionAt": 1793018111866,
+    "delayValue": 5,
+    "delayUnit": "Minutes",
+    "message": "Checking in! Did you manage to complete your order?",
+    "actionType": "action_send_whatsapp",
+    "status": "pending",
+    "createdAt": "2026-10-26T12:30:11.866Z",
+    "updatedAt": "2026-10-26T12:30:11.866Z"
+  }
+]

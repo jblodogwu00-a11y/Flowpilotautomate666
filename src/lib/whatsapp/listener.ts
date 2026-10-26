@@ -452,6 +452,37 @@ export function startAutoResponder(
 
           console.log(`Auto responded to ${leadPhone} with keyword ${trigger.keyword}`);
 
+          // Record activity into persistent workspace store
+          try {
+            const storePath = path.join(process.cwd(), '.data', 'workspaces_store.json');
+            if (fs.existsSync(storePath)) {
+              const rawSnap = fs.readFileSync(storePath, 'utf-8');
+              const parsed = JSON.parse(rawSnap);
+              const userSnap = parsed[userId] || parsed['default_workspace'];
+              if (userSnap) {
+                const nowIso = new Date().toISOString();
+                const newAct = {
+                  id: `act_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                  workspaceId: userSnap.workspace?.id || userId,
+                  ownerId: userId,
+                  eventType: 'whatsapp_replied',
+                  title: `Auto-replied to +${leadPhone.replace(/[^0-9]/g, '')}`,
+                  detail: `Trigger Keyword: "${trigger.keyword}" · Reply: "${trigger.replyMessage.slice(0, 120)}"`,
+                  channel: 'whatsapp',
+                  createdAt: nowIso,
+                  updatedAt: nowIso,
+                };
+                const existingActs = Array.isArray(userSnap.activities) ? userSnap.activities : [];
+                userSnap.activities = [newAct, ...existingActs].slice(0, 150);
+                userSnap.updatedAt = nowIso;
+                parsed[userId] = userSnap;
+                fs.writeFileSync(storePath, JSON.stringify(parsed, null, 2), 'utf-8');
+              }
+            }
+          } catch {
+            // Non-fatal
+          }
+
           // Optional callback
           if (typeof options.onAutoReplied === 'function') {
             try {

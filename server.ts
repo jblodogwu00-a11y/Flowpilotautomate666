@@ -44,6 +44,19 @@ import {
   formatWhatsAppNumber,
 } from './src/services/whatsappBaileysService.js';
 
+import {
+  getWorkflowsForUser,
+  saveWorkflow,
+  deleteWorkflow,
+  getWorkflowById,
+  getAllFollowUpJobs,
+} from './src/lib/automation/db.js';
+import { executeWorkflow } from './src/lib/automation/runner.js';
+import {
+  startFollowUpCronDaemon,
+  runFollowUpCron,
+} from './src/lib/automation/followupCron.js';
+
 // Database Table: whatsapp_accounts (Linked to Logged-In User)
 export interface WhatsAppAccountRecord {
   id: string;
@@ -495,6 +508,47 @@ function buildServerStarterWorkspaceSnapshot(
 
 loadPersistentStoresFromDisk();
 autoRestoreSavedWhatsAppSessions().catch((err) => console.error('[WhatsApp Restore] Error restoring sessions:', err));
+startFollowUpCronDaemon();
+
+export function recordServerActivity(
+  userId: string,
+  activity: {
+    eventType?: string;
+    title: string;
+    detail?: string;
+    channel?: string;
+    createdAt?: string;
+  }
+): void {
+  const cleanId = String(userId || 'default_workspace').trim();
+  let snap = serverWorkspaceSnapshotsByUid.get(cleanId);
+  if (!snap) {
+    const acc = serverAccountsByUid.get(cleanId);
+    snap = buildServerStarterWorkspaceSnapshot(
+      cleanId,
+      acc?.email || 'operator@flowpilot.app',
+      acc?.displayName || 'User',
+      acc?.workspaceName || 'My Workspace'
+    );
+  }
+  const now = new Date().toISOString();
+  const actRecord = {
+    id: `act_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+    workspaceId: (snap as any).workspace?.id || cleanId,
+    ownerId: cleanId,
+    eventType: activity.eventType || 'lead_captured',
+    title: String(activity.title || 'Activity').slice(0, 140),
+    detail: String(activity.detail || '').slice(0, 500),
+    channel: activity.channel || 'crm',
+    createdAt: activity.createdAt || now,
+    updatedAt: now,
+  };
+  const list = Array.isArray((snap as any).activities) ? (snap as any).activities : [];
+  (snap as any).activities = [actRecord, ...list].slice(0, 150);
+  (snap as any).updatedAt = now;
+  serverWorkspaceSnapshotsByUid.set(cleanId, snap);
+  flushWorkspacesStoreToDisk();
+}
 
 export interface DeliveryReceiptRecord {
   receiptId: string;
@@ -2083,9 +2137,9 @@ async function startServer() {
   // WHATSAPP QR CONNECT (BAILEYS) API ROUTES
   // ==========================================================================
   app.get('/api/whatsapp/qr', async (req, res) => {
+    const userId = String(req.query.userId || req.headers['x-user-id'] || 'default_workspace').trim();
+    const refresh = String(req.query.refresh || '').toLowerCase() === 'true';
     try {
-      const userId = String(req.query.userId || req.headers['x-user-id'] || 'default_workspace').trim();
-      const refresh = String(req.query.refresh || '').toLowerCase() === 'true';
       const session = await getOrStartWhatsAppSession(userId, refresh);
       res.json({
         ok: true,
@@ -2096,14 +2150,25 @@ async function startServer() {
         qrExpiresAt: session.qrExpiresAt || 0,
       });
     } catch (err: any) {
-      res.status(500).json({ ok: false, error: err.message || 'Failed to initialize WhatsApp QR' });
+      console.warn('[WhatsApp QR] Handshake warning:', err.message);
+      const fallback = getWhatsAppSessionStatus(userId);
+      res.json({
+        ok: true,
+        connected: Boolean(fallback.connected),
+        number: fallback.number || '',
+        connectedAt: fallback.connectedAt || '',
+        qr: fallback.qr || '',
+        qrExpiresAt: fallback.qrExpiresAt || 0,
+        initializing: !fallback.connected && !fallback.qr,
+        notice: err.message || 'Initializing WhatsApp engine',
+      });
     }
   });
 
   app.post('/api/whatsapp/qr', async (req, res) => {
+    const userId = String(req.body?.userId || req.headers['x-user-id'] || 'default_workspace').trim();
+    const refresh = Boolean(req.body?.refresh);
     try {
-      const userId = String(req.body?.userId || req.headers['x-user-id'] || 'default_workspace').trim();
-      const refresh = Boolean(req.body?.refresh);
       const session = await getOrStartWhatsAppSession(userId, refresh);
       res.json({
         ok: true,
@@ -2114,7 +2179,18 @@ async function startServer() {
         qrExpiresAt: session.qrExpiresAt || 0,
       });
     } catch (err: any) {
-      res.status(500).json({ ok: false, error: err.message || 'Failed to initialize WhatsApp QR' });
+      console.warn('[WhatsApp QR] Post handshake warning:', err.message);
+      const fallback = getWhatsAppSessionStatus(userId);
+      res.json({
+        ok: true,
+        connected: Boolean(fallback.connected),
+        number: fallback.number || '',
+        connectedAt: fallback.connectedAt || '',
+        qr: fallback.qr || '',
+        qrExpiresAt: fallback.qrExpiresAt || 0,
+        initializing: !fallback.connected && !fallback.qr,
+        notice: err.message || 'Initializing WhatsApp engine',
+      });
     }
   });
 
@@ -3398,6 +3474,207 @@ async function startServer() {
       uid: resolvedUid,
       updatedAt: enrichedSnapshot.updatedAt,
     });
+  });
+
+  // ==========================================================================
+  // ACTIVITIES API (Dedicated per-user activity logging and persistence)
+  // ==========================================================================
+  app.get('/api/activities', (req, res) => {
+    const userId = String(req.query.userId || req.headers['x-user-id'] || '').trim();
+    const email = String(req.query.email || '').trim().toLowerCase();
+
+    let resolvedUid = userId;
+    if (!resolvedUid && email) {
+      const acc = serverAccountsByEmail.get(email);
+      resolvedUid = acc?.uid || buildDeterministicUidForEmail(email);
+    }
+    if (!resolvedUid) resolvedUid = 'default_workspace';
+
+    let snap = serverWorkspaceSnapshotsByUid.get(resolvedUid);
+    if (!snap && email) {
+      const detUid = buildDeterministicUidForEmail(email);
+      snap = serverWorkspaceSnapshotsByUid.get(detUid);
+    }
+    if (!snap && resolvedUid !== 'default_workspace') {
+      snap = serverWorkspaceSnapshotsByUid.get('default_workspace');
+    }
+
+    const activities = (snap && Array.isArray((snap as any).activities)) ? (snap as any).activities : [];
+    res.json({
+      ok: true,
+      userId: resolvedUid,
+      activities,
+    });
+  });
+
+  app.post('/api/activities', (req, res) => {
+    const { userId, email, activity } = req.body || {};
+    const cleanUser = String(userId || '').trim();
+    const cleanEmail = String(email || '').trim().toLowerCase();
+
+    if (!activity || !activity.title) {
+      res.status(400).json({ ok: false, error: 'Activity object with title is required.' });
+      return;
+    }
+
+    let resolvedUid = cleanUser;
+    if (!resolvedUid && cleanEmail) {
+      const acc = serverAccountsByEmail.get(cleanEmail);
+      resolvedUid = acc?.uid || buildDeterministicUidForEmail(cleanEmail);
+    }
+    if (!resolvedUid) resolvedUid = 'default_workspace';
+
+    let snap = serverWorkspaceSnapshotsByUid.get(resolvedUid);
+    if (!snap && cleanEmail) {
+      const detUid = buildDeterministicUidForEmail(cleanEmail);
+      snap = serverWorkspaceSnapshotsByUid.get(detUid);
+    }
+    if (!snap) {
+      const acc = cleanEmail ? serverAccountsByEmail.get(cleanEmail) : serverAccountsByUid.get(resolvedUid);
+      snap = buildServerStarterWorkspaceSnapshot(
+        resolvedUid,
+        cleanEmail || acc?.email || 'operator@flowpilot.app',
+        acc?.displayName || 'User',
+        acc?.workspaceName || 'My Workspace'
+      );
+    }
+
+    const now = new Date().toISOString();
+    const actId = activity.id || `act_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const savedActivity = {
+      id: actId,
+      workspaceId: (snap as any).workspace?.id || resolvedUid,
+      ownerId: resolvedUid,
+      eventType: activity.eventType || 'lead_captured',
+      title: String(activity.title || 'Activity').slice(0, 140),
+      detail: String(activity.detail || '').slice(0, 500),
+      channel: activity.channel || 'crm',
+      createdAt: activity.createdAt || now,
+      updatedAt: activity.updatedAt || now,
+    };
+
+    const currentList = Array.isArray((snap as any).activities) ? (snap as any).activities : [];
+    const filtered = currentList.filter((a: any) => a && a.id !== actId);
+    (snap as any).activities = [savedActivity, ...filtered].slice(0, 150);
+    (snap as any).updatedAt = now;
+
+    serverWorkspaceSnapshotsByUid.set(resolvedUid, snap);
+    if (cleanEmail) {
+      const detUid = buildDeterministicUidForEmail(cleanEmail);
+      serverWorkspaceSnapshotsByUid.set(detUid, snap);
+    }
+    flushWorkspacesStoreToDisk();
+
+    res.json({
+      ok: true,
+      activity: savedActivity,
+      totalActivities: (snap as any).activities.length,
+    });
+  });
+
+  // ==========================================================================
+  // AUTOMATION WORKFLOW BUILDER & MINUTES/HOURS/DAYS DRIP API
+  // ==========================================================================
+  app.get('/api/workflows', async (req, res) => {
+    try {
+      const userId = String(req.query.userId || req.headers['x-user-id'] || 'default_workspace').trim();
+      const list = await getWorkflowsForUser(userId);
+      res.json({ ok: true, workflows: list });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err.message || 'Failed to list workflows' });
+    }
+  });
+
+  app.get('/api/workflows/:id', async (req, res) => {
+    try {
+      const workflow = await getWorkflowById(req.params.id);
+      if (!workflow) {
+        res.status(404).json({ ok: false, error: 'Workflow not found' });
+        return;
+      }
+      res.json({ ok: true, workflow });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  app.post('/api/workflows', async (req, res) => {
+    try {
+      const { id, userId, name, nodesJson, edgesJson, enabled } = req.body || {};
+      const targetUser = String(userId || req.headers['x-user-id'] || 'default_workspace').trim();
+
+      const saved = await saveWorkflow({
+        id,
+        userId: targetUser,
+        name: String(name || 'Untitled Workflow').trim(),
+        nodesJson: typeof nodesJson === 'string' ? nodesJson : JSON.stringify(nodesJson || []),
+        edgesJson: typeof edgesJson === 'string' ? edgesJson : JSON.stringify(edgesJson || []),
+        enabled: enabled ?? true,
+      });
+
+      res.json({ ok: true, workflow: saved });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err.message || 'Failed to save workflow' });
+    }
+  });
+
+  app.delete('/api/workflows/:id', async (req, res) => {
+    try {
+      const success = await deleteWorkflow(req.params.id);
+      res.json({ ok: true, deleted: success });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err.message || 'Failed to delete workflow' });
+    }
+  });
+
+  app.post('/api/workflows/execute', async (req, res) => {
+    try {
+      const { workflowId, workflow, leadPhone, leadMessage, userId } = req.body || {};
+      const resolvedId = String(workflowId || (workflow && workflow.id) || 'test_workflow').trim();
+      const phone = String(leadPhone || '').trim();
+
+      if (!phone) {
+        res.status(400).json({ ok: false, error: 'leadPhone is required' });
+        return;
+      }
+
+      const result = await executeWorkflow(
+        resolvedId,
+        phone,
+        String(leadMessage || '').trim(),
+        {
+          userId: String(userId || (workflow && workflow.userId) || 'default_workspace').trim(),
+          workflowOverride: workflow || undefined,
+        }
+      );
+
+      res.json({ ok: true, result });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err.message || 'Workflow execution error' });
+    }
+  });
+
+  // Follow-up Drip Cron Route (Runs every minute or on demand)
+  const handleFollowUpCron = async (_req: express.Request, res: express.Response) => {
+    try {
+      const summary = await runFollowUpCron();
+      res.json({ ok: true, ...summary });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err.message || 'Cron error' });
+    }
+  };
+  app.get('/api/cron/followup', handleFollowUpCron);
+  app.post('/api/cron/followup', handleFollowUpCron);
+
+  // Follow-up Drip Jobs Inspector
+  app.get('/api/followup-jobs', async (req, res) => {
+    try {
+      const userId = String(req.query.userId || '').trim();
+      const jobs = await getAllFollowUpJobs(userId || undefined);
+      res.json({ ok: true, jobs });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err.message });
+    }
   });
 
   // Bind port 3000 immediately so container health checks succeed without waiting on Vite warm-up
