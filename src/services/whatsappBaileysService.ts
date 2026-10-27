@@ -1,6 +1,5 @@
 import makeWASocket, {
   DisconnectReason,
-  useMultiFileAuthState,
   makeCacheableSignalKeyStore,
   WASocket,
   ConnectionState,
@@ -11,6 +10,8 @@ import fs from 'fs';
 import path from 'path';
 import { startAutoResponder } from '../lib/whatsapp/listener.js';
 import { startAutoResponderWorkflowListener } from '../lib/whatsapp/autoResponder.js';
+import { useFirestoreAuthState, saveAuthState, getSessionConnectionStatus } from '../lib/whatsapp/session.js';
+import { getFirestoreDoc, setFirestoreDoc } from '../lib/firebaseAdmin.js';
 
 export interface WhatsAppSessionState {
   userId: string;
@@ -18,6 +19,7 @@ export interface WhatsAppSessionState {
   number: string;
   connectedAt?: string;
   qr: string; // Base64 data URL
+  qrRaw?: string; // Raw QR string for Canvas rendering
   qrExpiresAt?: number;
   lastDisconnectReason?: string;
   reconnectAttempts: number;
@@ -133,12 +135,8 @@ export async function getOrStartWhatsAppSession(
 
   const promise = (async () => {
     try {
-      const sessionDir = getUserSessionDir(cleanUserId);
-      if (!fs.existsSync(sessionDir)) {
-        fs.mkdirSync(sessionDir, { recursive: true });
-      }
-
-      const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
+      // Custom Firebase Admin Firestore auth state (Vercel serverless compatible)
+      const { state, saveCreds } = await useFirestoreAuthState(cleanUserId);
 
       let currentState: WhatsAppSessionState = sessionStates.get(cleanUserId) || {
         userId: cleanUserId,
@@ -148,13 +146,19 @@ export async function getOrStartWhatsAppSession(
         reconnectAttempts: 0,
       };
 
-      // Load persisted meta if available
-      const savedMeta = loadSessionMeta(cleanUserId);
-      if (savedMeta?.number) {
-        currentState.number = savedMeta.number;
-      }
-      if (savedMeta?.connectedAt) {
-        currentState.connectedAt = savedMeta.connectedAt;
+      // Load persisted meta from Firestore or local fallback
+      try {
+        const firestoreStatus = await getSessionConnectionStatus(cleanUserId);
+        if (firestoreStatus?.connected) {
+          currentState.connected = true;
+          if (firestoreStatus.number) currentState.number = firestoreStatus.number;
+          if (firestoreStatus.updatedAt) currentState.connectedAt = firestoreStatus.updatedAt;
+        }
+      } catch {
+        // Fallback to local meta if Firestore check fails
+        const savedMeta = loadSessionMeta(cleanUserId);
+        if (savedMeta?.number) currentState.number = savedMeta.number;
+        if (savedMeta?.connectedAt) currentState.connectedAt = savedMeta.connectedAt;
       }
 
       sessionStates.set(cleanUserId, currentState);
@@ -190,8 +194,14 @@ export async function getOrStartWhatsAppSession(
       startAutoResponder(sock, { userId: cleanUserId });
       startAutoResponderWorkflowListener(sock, { userId: cleanUserId });
 
-      // Save credentials on updates
-      sock.ev.on('creds.update', saveCreds);
+      // Save credentials on updates to Firestore
+      sock.ev.on('creds.update', async () => {
+        try {
+          await saveCreds();
+        } catch (err: any) {
+          console.warn(`[Baileys] Error saving creds to Firestore:`, err.message);
+        }
+      });
 
       // Handle connection updates (QR code & connected status)
       sock.ev.on('connection.update', async (update: Partial<ConnectionState>) => {
@@ -199,6 +209,16 @@ export async function getOrStartWhatsAppSession(
 
         if (qr) {
           try {
+            currentState.qrRaw = qr;
+            // 1. Save QR string to Firestore collection whatsapp_qr doc userId
+            setFirestoreDoc('whatsapp_qr', cleanUserId, {
+              userId: cleanUserId,
+              qrCode: qr,
+              status: 'pending',
+              createdAt: new Date().toISOString(),
+            }).catch((err) => console.warn('[Baileys] Firestore whatsapp_qr save error:', err.message));
+
+            // 2. Also generate base64 data URL for fast direct image display
             const qrDataUrl = await QRCode.toDataURL(qr, {
               width: 320,
               margin: 2,
@@ -227,10 +247,27 @@ export async function getOrStartWhatsAppSession(
           currentState.number = formatted;
           currentState.connectedAt = currentState.connectedAt || nowIso;
           currentState.qr = '';
+          currentState.qrRaw = '';
           currentState.qrExpiresAt = undefined;
           currentState.reconnectAttempts = 0;
 
           sessionStates.set(cleanUserId, { ...currentState });
+
+          // Update Firestore collection whatsapp_sessions and whatsapp_qr
+          setFirestoreDoc('whatsapp_sessions', cleanUserId, {
+            userId: cleanUserId,
+            connected: true,
+            number: formatted,
+            updatedAt: nowIso,
+          }, true).catch((e) => console.warn('[Baileys] Firestore session status error:', e.message));
+
+          setFirestoreDoc('whatsapp_qr', cleanUserId, {
+            userId: cleanUserId,
+            qrCode: '',
+            status: 'connected',
+            updatedAt: nowIso,
+          }, true).catch(() => {});
+
           saveSessionMeta(cleanUserId, {
             connected: true,
             number: formatted,
@@ -344,7 +381,21 @@ export function disconnectWhatsAppSession(userId: string = 'default_workspace'):
 
   sessionStates.delete(cleanUserId);
 
-  // Remove session folder and metadata
+  // Update Firestore collections
+  setFirestoreDoc('whatsapp_sessions', cleanUserId, {
+    userId: cleanUserId,
+    connected: false,
+    updatedAt: new Date().toISOString(),
+  }, true).catch(() => {});
+
+  setFirestoreDoc('whatsapp_qr', cleanUserId, {
+    userId: cleanUserId,
+    qrCode: '',
+    status: 'disconnected',
+    updatedAt: new Date().toISOString(),
+  }, true).catch(() => {});
+
+  // Remove local session folder and metadata if present
   try {
     const sessionDir = getUserSessionDir(cleanUserId);
     if (fs.existsSync(sessionDir)) {
@@ -358,7 +409,7 @@ export function disconnectWhatsAppSession(userId: string = 'default_workspace'):
     console.error(`[Baileys] Error deleting session files for ${cleanUserId}:`, err);
   }
 
-  console.log(`[Baileys] Session disconnected and files wiped for ${cleanUserId}`);
+  console.log(`[Baileys] Session disconnected and Firestore updated for ${cleanUserId}`);
   return { ok: true, message: 'WhatsApp session disconnected successfully' };
 }
 

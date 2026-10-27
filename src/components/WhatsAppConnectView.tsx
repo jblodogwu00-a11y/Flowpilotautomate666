@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import QRCode from 'qrcode';
 import {
   MessageSquare,
   CheckCircle2,
@@ -62,6 +63,20 @@ export const WhatsAppConnectView: React.FC<WhatsAppConnectViewProps> = ({
 
   // Polling ref
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  useEffect(() => {
+    if (status.qr && canvasRef.current && !status.qr.startsWith('data:image/')) {
+      QRCode.toCanvas(canvasRef.current, status.qr, {
+        width: 280,
+        margin: 2,
+        color: {
+          dark: '#0f172a',
+          light: '#ffffff',
+        },
+      }).catch((err) => console.warn('[WhatsApp QR] QRCode.toCanvas failed:', err));
+    }
+  }, [status.qr]);
 
   // 1. Fetch QR & Status from backend with graceful fallback
   const fetchQrAndStatus = async (forceRefresh: boolean = false, retryCount: number = 0) => {
@@ -421,11 +436,18 @@ export const WhatsAppConnectView: React.FC<WhatsAppConnectViewProps> = ({
               <div className="lg:col-span-5 flex flex-col items-center text-center">
                 <div className="p-4 bg-white rounded-2xl border-2 border-dashed border-slate-300 dark:border-slate-700 shadow-md inline-block relative group">
                   {status.qr ? (
-                    <img
-                      src={status.qr}
-                      alt="WhatsApp QR Code"
-                      className="w-64 h-64 sm:w-72 sm:h-72 object-contain rounded-lg"
-                    />
+                    status.qr.startsWith('data:image/') ? (
+                      <img
+                        src={status.qr}
+                        alt="WhatsApp QR Code"
+                        className="w-64 h-64 sm:w-72 sm:h-72 object-contain rounded-lg"
+                      />
+                    ) : (
+                      <canvas
+                        ref={canvasRef}
+                        className="w-64 h-64 sm:w-72 sm:h-72 object-contain rounded-lg"
+                      />
+                    )
                   ) : (
                     <div className="w-64 h-64 sm:w-72 sm:h-72 flex flex-col items-center justify-center space-y-3 bg-slate-50 dark:bg-slate-900/40 rounded-lg">
                       <RefreshCw className="w-8 h-8 text-blue-600 animate-spin" />

@@ -977,5 +977,15 @@ service cloud.firestore {
         isValidId(accountId) &&
         (existing().userId == request.auth.uid || isAdmin());
     }
+
+    // WhatsApp Sessions (Baileys credentials stored in Firestore for Vercel serverless persistence)
+    match /whatsapp_sessions/{userId} {
+      allow read, write: if isVerified() && (request.auth.uid == userId || isAdmin());
+    }
+
+    // WhatsApp QR (Baileys QR code for polling in serverless environment)
+    match /whatsapp_qr/{userId} {
+      allow read, write: if isVerified() && (request.auth.uid == userId || isAdmin());
+    }
   }
 }

@@ -2141,12 +2141,14 @@ async function startServer() {
     const refresh = String(req.query.refresh || '').toLowerCase() === 'true';
     try {
       const session = await getOrStartWhatsAppSession(userId, refresh);
+      const qrVal = session.qrRaw || session.qr || '';
       res.json({
         ok: true,
         connected: session.connected,
         number: session.number || '',
         connectedAt: session.connectedAt || '',
-        qr: session.qr || '',
+        qr: qrVal,
+        qrDataUrl: session.qr || '',
         qrExpiresAt: session.qrExpiresAt || 0,
       });
     } catch (err: any) {
@@ -2157,9 +2159,10 @@ async function startServer() {
         connected: Boolean(fallback.connected),
         number: fallback.number || '',
         connectedAt: fallback.connectedAt || '',
-        qr: fallback.qr || '',
+        qr: fallback.qrRaw || fallback.qr || '',
+        qrDataUrl: fallback.qr || '',
         qrExpiresAt: fallback.qrExpiresAt || 0,
-        initializing: !fallback.connected && !fallback.qr,
+        initializing: !fallback.connected && !fallback.qr && !fallback.qrRaw,
         notice: err.message || 'Initializing WhatsApp engine',
       });
     }
@@ -2170,12 +2173,14 @@ async function startServer() {
     const refresh = Boolean(req.body?.refresh);
     try {
       const session = await getOrStartWhatsAppSession(userId, refresh);
+      const qrVal = session.qrRaw || session.qr || '';
       res.json({
         ok: true,
         connected: session.connected,
         number: session.number || '',
         connectedAt: session.connectedAt || '',
-        qr: session.qr || '',
+        qr: qrVal,
+        qrDataUrl: session.qr || '',
         qrExpiresAt: session.qrExpiresAt || 0,
       });
     } catch (err: any) {
@@ -2186,9 +2191,10 @@ async function startServer() {
         connected: Boolean(fallback.connected),
         number: fallback.number || '',
         connectedAt: fallback.connectedAt || '',
-        qr: fallback.qr || '',
+        qr: fallback.qrRaw || fallback.qr || '',
+        qrDataUrl: fallback.qr || '',
         qrExpiresAt: fallback.qrExpiresAt || 0,
-        initializing: !fallback.connected && !fallback.qr,
+        initializing: !fallback.connected && !fallback.qr && !fallback.qrRaw,
         notice: err.message || 'Initializing WhatsApp engine',
       });
     }
