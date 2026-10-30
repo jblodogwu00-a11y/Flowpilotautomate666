@@ -2,9 +2,10 @@ import { getFirestoreDoc } from '../../../../src/lib/firebaseAdmin.js';
 import { getWhatsAppSessionStatus } from '../../../../src/services/whatsappBaileysService.js';
 
 /**
- * 4. STATUS ENDPOINT app/api/whatsapp/status/route.ts:
- * - Check if whatsapp_sessions/{userId} exists and connected
- * - Return connected true/false
+ * 3. STATUS ENDPOINT:
+ * File app/api/whatsapp/status/route.ts
+ * - GET ?userId=xxx check Firestore whatsapp_sessions if creds exist and connected
+ * - Return { connected, phoneNumber }
  */
 export async function GET(req: any) {
   try {
@@ -14,9 +15,12 @@ export async function GET(req: any) {
     // 1. Check if whatsapp_sessions/{userId} exists and connected in Firestore
     const sessionDoc = await getFirestoreDoc('whatsapp_sessions', userId);
     if (sessionDoc) {
+      const phone = sessionDoc.number || sessionDoc.phoneNumber || '';
       return Response.json({
         connected: Boolean(sessionDoc.connected),
-        number: sessionDoc.number || '',
+        phoneNumber: phone,
+        number: phone,
+        pairingCode: sessionDoc.pairingCode || '',
         updatedAt: sessionDoc.updatedAt || null,
       });
     }
@@ -25,12 +29,13 @@ export async function GET(req: any) {
     const localStatus = getWhatsAppSessionStatus(userId);
     return Response.json({
       connected: Boolean(localStatus.connected),
+      phoneNumber: localStatus.number || '',
       number: localStatus.number || '',
       updatedAt: localStatus.connectedAt || null,
     });
   } catch (err: any) {
     return Response.json(
-      { connected: false, number: '', error: err.message },
+      { connected: false, phoneNumber: '', number: '', error: err.message },
       { status: 500 }
     );
   }

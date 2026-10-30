@@ -38,11 +38,13 @@ const PUBLISHED_FORMS_STORE_PATH = path.join(DATA_DIR, 'published_forms_store.js
 import {
   getOrStartWhatsAppSession,
   getWhatsAppSessionStatus,
+  requestWhatsAppPairingCode,
   disconnectWhatsAppSession,
   sendWhatsAppMessage,
   autoRestoreSavedWhatsAppSessions,
   formatWhatsAppNumber,
 } from './src/services/whatsappBaileysService.js';
+import { getFirestoreDoc } from './src/lib/firebaseAdmin.js';
 
 import {
   getWorkflowsForUser,
@@ -2078,140 +2080,241 @@ async function startServer() {
     });
   });
 
-  // WhatsApp Cloud API Webhook Verification (GET) & Events (POST)
+  // ==========================================================================
+  // FLOWPILOT WHATSAPP CLOUD API WEBHOOKS (GET /webhook/whatsapp & POST /webhook/whatsapp)
+  // Permanent Verify Token: flowpilot_verify_a7m4k9x2q8w3
+  // ==========================================================================
+  const FLOWPILOT_PERMANENT_VERIFY_TOKEN = 'flowpilot_verify_a7m4k9x2q8w3';
+
+  // Helper to send reply message via WhatsApp Cloud API
+  const sendWhatsAppCloudMessage = async (to: string, replyText: string) => {
+    const phoneNumberId = process.env.PHONE_NUMBER_ID || process.env.WHATSAPP_PHONE_NUMBER_ID;
+    const permanentToken = process.env.PERMANENT_TOKEN || process.env.WHATSAPP_ACCESS_TOKEN;
+
+    if (!phoneNumberId || !permanentToken) {
+      console.warn('[WhatsApp Cloud API] Notice: PHONE_NUMBER_ID or PERMANENT_TOKEN environment variable not set. Logged reply message only.');
+      return { ok: false, error: 'PHONE_NUMBER_ID or PERMANENT_TOKEN env missing' };
+    }
+
+    const cleanTo = String(to).replace(/[^0-9]/g, '');
+    const url = `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`;
+
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${permanentToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to: cleanTo,
+          type: 'text',
+          text: {
+            preview_url: false,
+            body: replyText,
+          },
+        }),
+      });
+
+      const responseData = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        console.error('[WhatsApp Cloud API] Send message failed:', response.status, responseData);
+        return { ok: false, status: response.status, data: responseData };
+      }
+
+      console.log(`[WhatsApp Cloud API] Successfully sent reply to ${cleanTo}:`, responseData);
+      return { ok: true, data: responseData };
+    } catch (err: any) {
+      console.error('[WhatsApp Cloud API] Network error sending message:', err?.message || err);
+      return { ok: false, error: err?.message || 'Network error' };
+    }
+  };
+
+  // GET /webhook/whatsapp - Webhook Verification
   const handleWhatsAppWebhookVerify = (req: express.Request, res: express.Response) => {
     const mode = req.query['hub.mode'];
     const token = req.query['hub.verify_token'];
     const challenge = req.query['hub.challenge'];
+
     const validTokens = [
+      FLOWPILOT_PERMANENT_VERIFY_TOKEN,
       process.env.WHATSAPP_VERIFY_TOKEN,
       process.env.VERIFY_TOKEN,
       'flowpilot2026',
       'affiliate_pulse_verify',
     ].filter(Boolean) as string[];
 
+    console.log(`[WhatsApp Webhook] Verification attempt received: mode=${mode}, token=${token}`);
+
     if (mode === 'subscribe' && typeof token === 'string' && validTokens.includes(token)) {
+      console.log(`[WhatsApp Webhook] Verification SUCCESSFUL for token: ${token}`);
       res.status(200).send(challenge);
       return;
     }
+
+    console.warn(`[WhatsApp Webhook] Verification FAILED. Provided token did not match expected tokens.`);
     res.status(403).send('Forbidden');
   };
 
-  const handleWhatsAppWebhookEvent = (req: express.Request, res: express.Response) => {
+  // POST /webhook/whatsapp - Incoming Message Event & Keyword Auto-Reply
+  const handleWhatsAppWebhookEvent = async (req: express.Request, res: express.Response) => {
     const body = req.body;
-    console.log('Webhook received:', JSON.stringify(body, null, 2));
+    console.log('[WhatsApp Webhook] Inbound event payload received:', JSON.stringify(body, null, 2));
+
     try {
       const entry = body?.entry?.[0];
       const change = entry?.changes?.[0];
-      const messageObj = change?.value?.messages?.[0];
-      const contactObj = change?.value?.contacts?.[0];
+      const value = change?.value;
+      const messageObj = value?.messages?.[0];
+      const contactObj = value?.contacts?.[0];
+
       if (messageObj) {
-        const fromPhone = messageObj.from || '';
-        const leadName = contactObj?.profile?.name || fromPhone || 'WhatsApp Lead';
-        const textBody = messageObj.text?.body || messageObj.button?.text || 'Interactive response';
+        const from = messageObj.from || '';
+        const leadName = contactObj?.profile?.name || from || 'WhatsApp Lead';
+        
+        // Extract text message content across text, button, or interactive reply
+        let text = '';
+        if (messageObj.type === 'text') {
+          text = messageObj.text?.body || '';
+        } else if (messageObj.type === 'button') {
+          text = messageObj.button?.text || '';
+        } else if (messageObj.type === 'interactive') {
+          text = messageObj.interactive?.button_reply?.title || messageObj.interactive?.list_reply?.title || '';
+        } else {
+          text = messageObj.text?.body || '';
+        }
+
+        console.log(`[WhatsApp Webhook] Message from: ${from} (${leadName}) | Text: "${text}"`);
+
+        // Record in FlowPilot internal CRM & Inbound Queue so it appears in the Omnichannel Inbox
         inboundWebhookQueue.unshift({
           id: `inb_wa_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
           channel: 'whatsapp',
           leadName,
           leadEmail: '',
-          leadPhone: fromPhone,
-          message: textBody,
+          leadPhone: from,
+          message: text || '(Media / Interactive message)',
           subject: 'WhatsApp Inbound Message',
           listName: 'General Contacts',
           receivedAt: new Date().toISOString(),
         });
+
+        // Determine Keyword Auto-Reply logic:
+        // - If message contains "yes" -> reply "Here is the video: [YOUR VIDEO LINK]. Watch and reply DONE"
+        // - If "done" -> reply "Nice! You ready to start today? Reply READY"
+        // - Else -> reply "I got your message. Reply YES to get started"
+        const lowerText = text.toLowerCase().trim();
+        let replyMessage = '';
+
+        if (lowerText.includes('yes')) {
+          replyMessage = 'Here is the video: [YOUR VIDEO LINK]. Watch and reply DONE';
+        } else if (lowerText.includes('done')) {
+          replyMessage = 'Nice! You ready to start today? Reply READY';
+        } else {
+          replyMessage = 'I got your message. Reply YES to get started';
+        }
+
+        console.log(`[WhatsApp Webhook] Auto-reply formulated for ${from}: "${replyMessage}"`);
+
+        // Dispatch reply via WhatsApp Cloud API
+        if (from) {
+          await sendWhatsAppCloudMessage(from, replyMessage);
+        }
       }
-    } catch {
-      // Non-fatal
+    } catch (err: any) {
+      console.error('[WhatsApp Webhook] Error processing incoming event:', err?.message || err);
     }
+
+    // Always acknowledge event immediately to Meta to prevent duplicate delivery
     res.status(200).send('EVENT_RECEIVED');
   };
 
+  // Register endpoints on both /webhook/whatsapp and /api/webhook/whatsapp
+  app.get('/webhook/whatsapp', handleWhatsAppWebhookVerify);
+  app.post('/webhook/whatsapp', handleWhatsAppWebhookEvent);
   app.get('/api/webhook/whatsapp', handleWhatsAppWebhookVerify);
   app.get('/api/webhooks/whatsapp', handleWhatsAppWebhookVerify);
   app.post('/api/webhook/whatsapp', handleWhatsAppWebhookEvent);
   app.post('/api/webhooks/whatsapp', handleWhatsAppWebhookEvent);
 
 
+
   // ==========================================================================
-  // WHATSAPP QR CONNECT (BAILEYS) API ROUTES
+  // WHATSAPP PAIRING CODE (LINK WITH PHONE NUMBER) API ROUTES
   // ==========================================================================
-  app.get('/api/whatsapp/qr', async (req, res) => {
-    const userId = String(req.query.userId || req.headers['x-user-id'] || 'default_workspace').trim();
-    const refresh = String(req.query.refresh || '').toLowerCase() === 'true';
+  app.post('/api/whatsapp/pairing-code', async (req, res) => {
     try {
-      const session = await getOrStartWhatsAppSession(userId, refresh);
-      const qrVal = session.qrRaw || session.qr || '';
+      const userId = String(req.body?.userId || req.headers['x-user-id'] || 'default_workspace').trim();
+      const rawPhone = String(req.body?.phoneNumber || req.body?.phone || '').trim();
+      const cleanPhone = rawPhone.replace(/[^0-9]/g, '');
+
+      if (!cleanPhone || cleanPhone.length < 8 || cleanPhone.length > 16) {
+        res.status(400).json({
+          ok: false,
+          error: `Invalid phone number: "${rawPhone}". Please provide a valid phone number with country code (e.g. 2348012345678, 8 to 16 digits).`,
+        });
+        return;
+      }
+
+      // Check if session is already connected
+      const sessionDoc = await getFirestoreDoc('whatsapp_sessions', userId);
+      if (sessionDoc && sessionDoc.connected) {
+        res.json({
+          ok: true,
+          connected: true,
+          phoneNumber: sessionDoc.number || cleanPhone,
+          message: 'WhatsApp session is already connected!',
+        });
+        return;
+      }
+
+      const result = await requestWhatsAppPairingCode(userId, cleanPhone);
       res.json({
         ok: true,
-        connected: session.connected,
-        number: session.number || '',
-        connectedAt: session.connectedAt || '',
-        qr: qrVal,
-        qrDataUrl: session.qr || '',
-        qrExpiresAt: session.qrExpiresAt || 0,
+        pairingCode: result.pairingCode,
+        phoneNumber: cleanPhone,
+        expiresInSeconds: 60,
       });
     } catch (err: any) {
-      console.warn('[WhatsApp QR] Handshake warning:', err.message);
-      const fallback = getWhatsAppSessionStatus(userId);
-      res.json({
-        ok: true,
-        connected: Boolean(fallback.connected),
-        number: fallback.number || '',
-        connectedAt: fallback.connectedAt || '',
-        qr: fallback.qrRaw || fallback.qr || '',
-        qrDataUrl: fallback.qr || '',
-        qrExpiresAt: fallback.qrExpiresAt || 0,
-        initializing: !fallback.connected && !fallback.qr && !fallback.qrRaw,
-        notice: err.message || 'Initializing WhatsApp engine',
+      console.error('[API /api/whatsapp/pairing-code] Error:', err);
+      res.status(500).json({
+        ok: false,
+        error: err.message || 'Failed to request WhatsApp pairing code.',
       });
     }
   });
 
-  app.post('/api/whatsapp/qr', async (req, res) => {
-    const userId = String(req.body?.userId || req.headers['x-user-id'] || 'default_workspace').trim();
-    const refresh = Boolean(req.body?.refresh);
-    try {
-      const session = await getOrStartWhatsAppSession(userId, refresh);
-      const qrVal = session.qrRaw || session.qr || '';
-      res.json({
-        ok: true,
-        connected: session.connected,
-        number: session.number || '',
-        connectedAt: session.connectedAt || '',
-        qr: qrVal,
-        qrDataUrl: session.qr || '',
-        qrExpiresAt: session.qrExpiresAt || 0,
-      });
-    } catch (err: any) {
-      console.warn('[WhatsApp QR] Post handshake warning:', err.message);
-      const fallback = getWhatsAppSessionStatus(userId);
-      res.json({
-        ok: true,
-        connected: Boolean(fallback.connected),
-        number: fallback.number || '',
-        connectedAt: fallback.connectedAt || '',
-        qr: fallback.qrRaw || fallback.qr || '',
-        qrDataUrl: fallback.qr || '',
-        qrExpiresAt: fallback.qrExpiresAt || 0,
-        initializing: !fallback.connected && !fallback.qr && !fallback.qrRaw,
-        notice: err.message || 'Initializing WhatsApp engine',
-      });
-    }
-  });
-
-  app.get('/api/whatsapp/status', (req, res) => {
+  app.get('/api/whatsapp/status', async (req, res) => {
     try {
       const userId = String(req.query.userId || req.headers['x-user-id'] || 'default_workspace').trim();
+
+      // Check Firestore session first
+      const sessionDoc = await getFirestoreDoc('whatsapp_sessions', userId);
+      if (sessionDoc) {
+        const phone = sessionDoc.number || sessionDoc.phoneNumber || '';
+        res.json({
+          connected: Boolean(sessionDoc.connected),
+          phoneNumber: phone,
+          number: phone,
+          pairingCode: sessionDoc.pairingCode || '',
+          updatedAt: sessionDoc.updatedAt || null,
+        });
+        return;
+      }
+
+      // Fallback to active in-memory socket / session state
       const status = getWhatsAppSessionStatus(userId);
       res.json({
         connected: Boolean(status.connected),
+        phoneNumber: status.number || '',
         number: status.number || '',
         connectedAt: status.connectedAt || null,
         reconnectAttempts: status.reconnectAttempts || 0,
       });
     } catch (err: any) {
-      res.status(500).json({ connected: false, number: '', error: err.message });
+      res.status(500).json({ connected: false, phoneNumber: '', number: '', error: err.message });
     }
   });
 

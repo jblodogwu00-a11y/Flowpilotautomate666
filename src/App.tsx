@@ -88,6 +88,8 @@ import { WhatsAppEmbeddedSignupPage } from './components/WhatsAppEmbeddedSignupP
 import { WhatsAppConnectView } from './components/WhatsAppConnectView';
 import { WhatsAppTemplatesView } from './components/WhatsAppTemplatesView';
 import { AutomationWorkflowBuilder } from './components/AutomationWorkflowBuilder';
+import { PrivacyPolicyPage } from './components/PrivacyPolicyPage';
+
 import { AuthModal, AuthModalMode } from './components/AuthModal';
 import { DesignSystemModal } from './components/DesignSystemModal';
 import { SystemDiagnosticsModal } from './components/SystemDiagnosticsModal';
@@ -151,15 +153,39 @@ export default function App() {
     );
   });
 
+  // Privacy Policy Page Route (/privacy, /privacy-policy, ?page=privacy)
+  const [isPrivacyRoute, setIsPrivacyRoute] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    const path = window.location.pathname.toLowerCase();
+    const search = new URLSearchParams(window.location.search);
+    return (
+      path === "/privacy" ||
+      path === "/privacy/" ||
+      path === "/privacy-policy" ||
+      path === "/privacy-policy/" ||
+      search.get("page") === "privacy" ||
+      search.get("view") === "privacy"
+    );
+  });
+
   useEffect(() => {
     const handlePopState = () => {
       if (typeof window === "undefined") return;
       const path = window.location.pathname.toLowerCase();
+      const search = new URLSearchParams(window.location.search);
       setIsWhatsAppSettingsRoute(
         path === "/dashboard/settings/whatsapp" ||
         path === "/dashboard/settings/whatsapp/" ||
         path === "/settings/whatsapp" ||
         path === "/settings/whatsapp/"
+      );
+      setIsPrivacyRoute(
+        path === "/privacy" ||
+        path === "/privacy/" ||
+        path === "/privacy-policy" ||
+        path === "/privacy-policy/" ||
+        search.get("page") === "privacy" ||
+        search.get("view") === "privacy"
       );
     };
     window.addEventListener("popstate", handlePopState);
@@ -180,6 +206,14 @@ export default function App() {
       setActiveTab("settings");
     }
   };
+
+  const navigateBackFromPrivacy = () => {
+    if (typeof window !== "undefined") {
+      window.history.pushState({}, "", "/");
+      setIsPrivacyRoute(false);
+    }
+  };
+
 
   // When user signs in, smoothly transition to workspace
   useEffect(() => {
@@ -1396,8 +1430,17 @@ export default function App() {
   ];
 
 
+  if (isPrivacyRoute) {
+    return (
+      <ErrorBoundary fallbackTitle="Privacy Policy" onReset={() => (window.location.href = "/")}>
+        <PrivacyPolicyPage onBack={navigateBackFromPrivacy} />
+      </ErrorBoundary>
+    );
+  }
+
   if (isWhatsAppSettingsRoute) {
     return (
+
       <ErrorBoundary fallbackTitle="WhatsApp Embedded Signup" onReset={() => (window.location.href = "/")}>
         <WhatsAppEmbeddedSignupPage
           userId={activeUid}

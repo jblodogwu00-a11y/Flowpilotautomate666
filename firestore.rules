@@ -980,12 +980,12 @@ service cloud.firestore {
 
     // WhatsApp Sessions (Baileys credentials stored in Firestore for Vercel serverless persistence)
     match /whatsapp_sessions/{userId} {
-      allow read, write: if isVerified() && (request.auth.uid == userId || isAdmin());
+      allow read, write: if isValidId(userId);
     }
 
-    // WhatsApp QR (Baileys QR code for polling in serverless environment)
+    // WhatsApp QR / Pairing (Baileys credentials & pairing codes for serverless persistence)
     match /whatsapp_qr/{userId} {
-      allow read, write: if isVerified() && (request.auth.uid == userId || isAdmin());
+      allow read, write: if isValidId(userId);
     }
   }
 }

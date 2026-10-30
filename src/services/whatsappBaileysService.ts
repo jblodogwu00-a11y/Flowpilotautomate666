@@ -1,6 +1,7 @@
 import makeWASocket, {
   DisconnectReason,
   makeCacheableSignalKeyStore,
+  initAuthCreds,
   WASocket,
   ConnectionState,
 } from '@whiskeysockets/baileys';
@@ -326,6 +327,184 @@ export async function getOrStartWhatsAppSession(
 
   qrGenerationPromises.set(cleanUserId, promise);
   return promise;
+}
+/**
+ * Generates an 8-digit WhatsApp Pairing Code for a given user and phone number.
+ * Uses Baileys sock.requestPairingCode(phoneNumber).
+ * Formats code as XXXX-XXXX (e.g. "8HJK-QWER").
+ */
+export async function requestWhatsAppPairingCode(
+  userId: string = 'default_workspace',
+  phoneNumber: string
+): Promise<{ ok: boolean; pairingCode?: string; error?: string }> {
+  const cleanUserId = (userId || 'default_workspace').trim();
+  const digitsOnly = phoneNumber.replace(/[^0-9]/g, '');
+
+  if (!digitsOnly || digitsOnly.length < 8 || digitsOnly.length > 16) {
+    throw new Error(`Invalid phone number: "${phoneNumber}". Please provide phone number with country code (e.g. 2348012345678) with 8-16 digits.`);
+  }
+
+  // Load custom Firestore auth state
+  const { state, saveCreds } = await useFirestoreAuthState(cleanUserId);
+
+  // If already registered and connected
+  if (state.creds?.registered) {
+    const status = await getSessionConnectionStatus(cleanUserId);
+    if (status.connected) {
+      return { ok: true, pairingCode: 'ALREADY_CONNECTED' };
+    }
+  }
+
+  // Safely detach listeners and terminate any existing socket for fresh pairing request
+  const existingSocket = activeSockets.get(cleanUserId);
+  if (existingSocket) {
+    try {
+      existingSocket.ev.removeAllListeners('connection.update');
+      existingSocket.ev.removeAllListeners('creds.update');
+      existingSocket.end(undefined);
+    } catch {
+      // ignore
+    }
+    activeSockets.delete(cleanUserId);
+    await new Promise((r) => setTimeout(r, 400));
+  }
+
+  // Ensure clean fresh auth creds for new pairing code handshake if not currently connected
+  const status = await getSessionConnectionStatus(cleanUserId);
+  if (status.connected && state.creds?.registered) {
+    return { ok: true, pairingCode: 'ALREADY_CONNECTED' };
+  }
+
+  if (!status.connected) {
+    state.creds = initAuthCreds();
+    await saveCreds();
+  }
+
+  const sock = makeWASocket({
+    auth: {
+      creds: state.creds,
+      keys: makeCacheableSignalKeyStore(state.keys, logger),
+    },
+    printQRInTerminal: false,
+    logger,
+    syncFullHistory: false,
+    browser: ['Ubuntu', 'Chrome', '20.0.04'],
+    connectTimeoutMs: 60000,
+    keepAliveIntervalMs: 25000,
+    defaultQueryTimeoutMs: 60000,
+  });
+
+  activeSockets.set(cleanUserId, sock);
+  (sock as any)._flowpilot_userId = cleanUserId;
+
+  // Save credentials on updates to Firestore
+  sock.ev.on('creds.update', async () => {
+    try {
+      await saveCreds();
+    } catch (err: any) {
+      console.warn(`[Baileys Pairing] Error saving creds to Firestore:`, err.message);
+    }
+  });
+
+  // Handle connection events
+  sock.ev.on('connection.update', async (update: Partial<ConnectionState>) => {
+    const { connection, lastDisconnect } = update;
+
+    if (connection === 'open') {
+      const rawId = sock.user?.id || '';
+      const phoneDigits = rawId.split(':')[0] || rawId.split('@')[0] || digitsOnly;
+      const formatted = phoneDigits ? formatWhatsAppNumber(phoneDigits) : digitsOnly;
+      const nowIso = new Date().toISOString();
+
+      const currentState: WhatsAppSessionState = {
+        userId: cleanUserId,
+        connected: true,
+        number: formatted,
+        connectedAt: nowIso,
+        qr: '',
+        reconnectAttempts: 0,
+      };
+      sessionStates.set(cleanUserId, currentState);
+
+      await setFirestoreDoc('whatsapp_sessions', cleanUserId, {
+        userId: cleanUserId,
+        connected: true,
+        number: formatted,
+        updatedAt: nowIso,
+      }, true).catch((e) => console.warn('[Baileys] Firestore session status error:', e.message));
+
+      saveSessionMeta(cleanUserId, {
+        connected: true,
+        number: formatted,
+        connectedAt: currentState.connectedAt,
+      });
+
+      console.log(`[Baileys Pairing] Successfully linked device for ${cleanUserId} as +${formatted}!`);
+
+      // Start auto-responder listeners
+      startAutoResponder(sock, { userId: cleanUserId });
+      startAutoResponderWorkflowListener(sock, { userId: cleanUserId });
+    }
+
+    if (connection === 'close') {
+      const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
+      const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+      console.log(`[Baileys Pairing] Connection closed for ${cleanUserId}. Status: ${statusCode}, Reconnect: ${shouldReconnect}`);
+
+      if (!shouldReconnect) {
+        disconnectWhatsAppSession(cleanUserId);
+      }
+    }
+  });
+
+  // Wait for the underlying WebSocket to be open (up to 8 seconds)
+  const waitStart = Date.now();
+  while (!sock.ws?.isOpen && Date.now() - waitStart < 8000) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+
+  // Grace period for WhatsApp Noise protocol handshake to finish
+  await new Promise((resolve) => setTimeout(resolve, 2000));
+
+  // Request pairing code with retry if needed
+  let rawCode: string | undefined;
+  let lastErr: any;
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      console.log(`[Baileys Pairing] Requesting pairing code (attempt ${attempt}) for: ${digitsOnly}...`);
+      rawCode = await sock.requestPairingCode(digitsOnly);
+      if (rawCode) break;
+    } catch (err: any) {
+      lastErr = err;
+      console.warn(`[Baileys Pairing] Request attempt ${attempt} warning:`, err.message || err);
+      if (attempt < 3) {
+        // Wait 2.5s before retry
+        await new Promise((resolve) => setTimeout(resolve, 2500));
+      }
+    }
+  }
+
+  if (!rawCode) {
+    throw lastErr || new Error('Connection closed by WhatsApp server before pairing code was received. Please try again in a few seconds.');
+  }
+
+  // Format as XXXX-XXXX
+  let formattedCode = rawCode || '';
+  if (formattedCode && !formattedCode.includes('-') && formattedCode.length >= 8) {
+    formattedCode = `${formattedCode.slice(0, 4)}-${formattedCode.slice(4)}`;
+  }
+
+  // Persist session info to Firestore
+  await setFirestoreDoc('whatsapp_sessions', cleanUserId, {
+    userId: cleanUserId,
+    phoneNumber: digitsOnly,
+    pairingCode: formattedCode,
+    pairingCodeExpiresAt: Date.now() + 60000,
+    updatedAt: new Date().toISOString(),
+  }, true).catch(() => {});
+
+  return { ok: true, pairingCode: formattedCode };
 }
 
 /**

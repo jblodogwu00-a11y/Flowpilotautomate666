@@ -838,6 +838,17 @@ export const LandingPage: React.FC<LandingPageProps> = ({
             <a href="#transparency" className="hover:text-emerald-400">
               Provider Cost Transparency
             </a>
+            <a
+              href="/privacy"
+              onClick={(e) => {
+                e.preventDefault();
+                window.history.pushState({}, '', '/privacy');
+                window.dispatchEvent(new PopStateEvent('popstate'));
+              }}
+              className="text-slate-300 hover:text-emerald-400 font-medium"
+            >
+              Privacy Policy
+            </a>
             <button
               type="button"
               onClick={onEnterWorkspace}
@@ -845,6 +856,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
             >
               Open Workspace →
             </button>
+
           </div>
         </div>
       </footer>
