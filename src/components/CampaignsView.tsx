@@ -70,6 +70,8 @@ import {
   triggerOneClickUnsubscribe,
   triggerLiveTrackingTestEvent,
 } from '../services/messageDeliveryService';
+import { EmailEditor } from './EmailEditor';
+
 
 interface CampaignsViewProps {
   campaigns: Campaign[];
@@ -234,8 +236,9 @@ export const CampaignsView: React.FC<CampaignsViewProps> = ({
     return channelSenderIdentities.find((i) => i.isPrimary) || channelSenderIdentities[0];
   }, [channelSenderIdentities, selectedSenderIdentityId]);
   const [preheader, setPreheader] = useState(DEFAULT_REUSABLE_EMAIL_TEMPLATES[0].preheader);
-  const [editorMode, setEditorMode] = useState<'visual_blocks' | 'plain_text'>('visual_blocks');
+  const [editorMode, setEditorMode] = useState<'rich_text' | 'visual_blocks' | 'plain_text'>('rich_text');
   const [emailBlocks, setEmailBlocks] = useState<EmailBlock[]>(
+
     DEFAULT_REUSABLE_EMAIL_TEMPLATES[0].blocks
   );
   const [messageBody, setMessageBody] = useState('');
@@ -3399,37 +3402,54 @@ export const CampaignsView: React.FC<CampaignsViewProps> = ({
               {/* VISUAL EMAIL EDITOR + LIVE PERSONALIZED PREVIEW */}
               {channel === 'email' ? (
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 border border-slate-200 rounded-2xl p-4 bg-slate-50/50">
-                  {/* Left 7 Cols: Visual Block Builder */}
+                  {/* Left 7 Cols: Visual & Rich Text Studio */}
                   <div className="lg:col-span-7 space-y-3">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex items-center gap-1 p-1 bg-slate-200/80 rounded-lg">
-                        <button
-                          type="button"
-                          onClick={() => setEditorMode('visual_blocks')}
-                          className={`px-2.5 py-1 rounded-md text-[11px] font-bold cursor-pointer ${
-                            editorMode === 'visual_blocks'
-                              ? 'bg-[#0F172A] text-white'
-                              : 'text-slate-700'
-                          }`}
-                        >
-                          Visual Block Editor ({emailBlocks.length})
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setMessageBody(serializeBlocksToMessageBody(emailBlocks, preheader));
-                            setEditorMode('plain_text');
-                          }}
-                          className={`px-2.5 py-1 rounded-md text-[11px] font-bold cursor-pointer ${
-                            editorMode === 'plain_text'
-                              ? 'bg-[#0F172A] text-white'
-                              : 'text-slate-700'
-                          }`}
-                        >
-                          Plain-Text / Raw Mode
-                        </button>
-                      </div>
 
+                    {/* Mode Selector */}
+                    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-200 pb-3">
+
+                    <div className="flex items-center gap-1.5 p-1 bg-slate-200/80 rounded-xl">
+                      <button
+                        type="button"
+                        onClick={() => setEditorMode('rich_text')}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-all ${
+                          editorMode === 'rich_text'
+                            ? 'bg-[#0F172A] text-white shadow-xs'
+                            : 'text-slate-700 hover:text-slate-950 hover:bg-white/50'
+                        }`}
+                      >
+                        ✨ Rich Text Studio (ConvertKit / Systeme.io)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setEditorMode('visual_blocks')}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-all ${
+                          editorMode === 'visual_blocks'
+                            ? 'bg-[#0F172A] text-white shadow-xs'
+                            : 'text-slate-700 hover:text-slate-950 hover:bg-white/50'
+                        }`}
+                      >
+                        Visual Blocks ({emailBlocks.length})
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!messageBody && emailBlocks.length > 0) {
+                            setMessageBody(serializeBlocksToMessageBody(emailBlocks, preheader));
+                          }
+                          setEditorMode('plain_text');
+                        }}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-bold cursor-pointer transition-all ${
+                          editorMode === 'plain_text'
+                            ? 'bg-[#0F172A] text-white shadow-xs'
+                            : 'text-slate-700 hover:text-slate-950 hover:bg-white/50'
+                        }`}
+                      >
+                        Raw HTML / Plain
+                      </button>
+                    </div>
+
+                    {editorMode === 'visual_blocks' && (
                       <div className="flex flex-wrap items-center gap-1">
                         {(['header', 'text', 'callout', 'button', 'divider', 'footer'] as const).map(
                           (bType) => (
@@ -3444,14 +3464,38 @@ export const CampaignsView: React.FC<CampaignsViewProps> = ({
                           )
                         )}
                       </div>
-                    </div>
+                    )}
+                  </div>
 
-                    {editorMode === 'visual_blocks' ? (
-                      <div className="space-y-2.5 max-h-[360px] overflow-y-auto pr-1">
+                  {/* 1. RICH TEXT STUDIO (ConvertKit / Systeme.io Quality) */}
+                  {editorMode === 'rich_text' && (
+                    <div className="w-full">
+                      <EmailEditor
+                        initialContent={
+                          messageBody ||
+                          (emailBlocks.length > 0
+                            ? serializeBlocksToMessageBody(emailBlocks, preheader)
+                            : undefined)
+                        }
+                        onChange={(html) => setMessageBody(html)}
+                        subject={subjectOrTemplate}
+                        onSubjectChange={(val) => setSubjectOrTemplate(val)}
+                        preheader={preheader}
+                        onPreheaderChange={(val) => setPreheader(val)}
+                        recipientEmail={samplePreviewContact?.email || 'subscriber@example.com'}
+                      />
+                    </div>
+                  )}
+
+
+                  {/* 2. VISUAL BLOCKS MODE */}
+                  {editorMode === 'visual_blocks' && (
+                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+                      <div className="lg:col-span-12 space-y-2.5 max-h-[460px] overflow-y-auto pr-1">
                         {emailBlocks.map((blk, idx) => (
                           <div
                             key={blk.id}
-                            className="p-3 rounded-xl bg-white border border-slate-200 space-y-2 shadow-2xs"
+                            className="p-3.5 rounded-xl bg-white border border-slate-200 space-y-2 shadow-2xs"
                           >
                             <div className="flex items-center justify-between gap-2">
                               <span className="text-[11px] font-mono font-bold uppercase text-[#047857]">
@@ -3536,14 +3580,24 @@ export const CampaignsView: React.FC<CampaignsViewProps> = ({
                           </div>
                         ))}
                       </div>
-                    ) : (
+                    </div>
+                  )}
+
+                  {/* 3. RAW HTML / PLAIN TEXT */}
+                  {editorMode === 'plain_text' && (
+                    <div className="space-y-2">
+                      <div className="text-xs text-slate-500">
+                        Raw HTML / Plain Text view. Any modifications will be preserved in message delivery:
+                      </div>
                       <textarea
-                        rows={10}
+                        rows={12}
                         value={messageBody}
                         onChange={(e) => setMessageBody(e.target.value)}
-                        className="w-full p-3 bg-white border border-slate-300 rounded-xl font-mono text-xs"
+                        className="w-full p-3.5 bg-slate-900 text-emerald-400 border border-slate-800 rounded-xl font-mono text-xs focus:outline-none"
                       />
-                    )}
+                    </div>
+                  )}
+
 
                     {/* Save as Reusable Template bar */}
                     <div className="pt-2 border-t border-slate-200 flex flex-wrap items-center justify-between gap-2">

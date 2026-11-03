@@ -88,7 +88,9 @@ import { WhatsAppEmbeddedSignupPage } from './components/WhatsAppEmbeddedSignupP
 import { WhatsAppConnectView } from './components/WhatsAppConnectView';
 import { WhatsAppTemplatesView } from './components/WhatsAppTemplatesView';
 import { AutomationWorkflowBuilder } from './components/AutomationWorkflowBuilder';
+import { AutomationBuilderUI } from './components/AutomationBuilderUI';
 import { PrivacyPolicyPage } from './components/PrivacyPolicyPage';
+
 
 import { AuthModal, AuthModalMode } from './components/AuthModal';
 import { DesignSystemModal } from './components/DesignSystemModal';
@@ -1917,19 +1919,14 @@ export default function App() {
               )}
 
               {activeTab === 'workflow_builder' && (
-                <AutomationWorkflowBuilder
-                  userId={activeUid}
-                  onBack={() => setActiveTab('automations')}
-                  onSaved={() => {
-                    handleLogActivity(
-                      'automation_triggered',
-                      'Visual Workflow Saved',
-                      'Configured drip nodes with minutes/hours/days delays and auto-responder triggers',
-                      'whatsapp'
-                    );
-                  }}
-                />
+                <div className="-mx-4 sm:-mx-6 lg:-mx-8 -my-6">
+                  <AutomationBuilderUI
+                    userId={activeUid}
+                    onBackToDashboard={() => setActiveTab('automations')}
+                  />
+                </div>
               )}
+
 
               {activeTab === 'autoresponders' && (
                 <AutoRespondersView
