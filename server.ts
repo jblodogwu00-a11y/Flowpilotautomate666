@@ -58,6 +58,13 @@ import {
   startFollowUpCronDaemon,
   runFollowUpCron,
 } from './src/lib/automation/followupCron.js';
+import {
+  addOrUpdateSharedDomain,
+  verifySharedDomain,
+  sendEmailAsUser,
+  getActiveEmailDomain,
+  getEmailUsers,
+} from './src/lib/customDomainEmail.js';
 
 // Database Table: whatsapp_accounts (Linked to Logged-In User)
 export interface WhatsAppAccountRecord {
@@ -3783,6 +3790,125 @@ async function startServer() {
       res.json({ ok: true, jobs });
     } catch (err: any) {
       res.status(500).json({ ok: false, error: err.message });
+    }
+  });
+
+  // ==========================================================================
+  // CUSTOM DOMAIN EMAIL AUTOMATION (FREE RESEND PLAN: 1 SHARED DOMAIN FOR 2 USERS)
+  // ==========================================================================
+
+  // Endpoint 1: Add or Update Domain for Shared Users ('me' and 'brother')
+  app.post('/api/email/add-domain', async (req, res) => {
+    try {
+      const { fromName, fromEmail, userId } = req.body || {};
+      if (!fromEmail || typeof fromEmail !== 'string' || !fromEmail.includes('@')) {
+        res.status(400).json({ ok: false, error: 'Please enter a valid fromEmail address.' });
+        return;
+      }
+
+      const result = await addOrUpdateSharedDomain({
+        fromName: String(fromName || ''),
+        fromEmail: String(fromEmail || ''),
+        userId: String(userId || 'me'),
+      });
+
+      res.json({
+        ok: true,
+        domain: result.domain,
+        domainId: result.domainId,
+        records: result.records,
+        verified: result.verified,
+        status: result.status,
+        users: result.users,
+        message: `Custom domain ${result.domain} saved successfully for user ${userId || 'me'}.`,
+      });
+    } catch (err: any) {
+      const statusCode = err.message?.includes('For free plan, you must use same domain.') ? 400 : 500;
+      res.status(statusCode).json({
+        ok: false,
+        error: err.message || 'Failed to configure custom domain.',
+      });
+    }
+  });
+
+  // Endpoint 2: Verify Domain DNS Records with Resend API
+  const handleVerifyDomain = async (req: express.Request, res: express.Response) => {
+    try {
+      const domainId = String(req.body?.domainId || req.query?.domainId || '').trim();
+      const result = await verifySharedDomain(domainId || undefined);
+      res.json({
+        ok: true,
+        verified: result.verified,
+        status: result.status,
+        records: result.records,
+        domain: result.domain,
+        message: result.verified
+          ? `✅ Domain ${result.domain} verified. Both emails ready`
+          : `Domain verification status: ${result.status}. DNS records are propagating.`,
+      });
+    } catch (err: any) {
+      res.status(500).json({
+        ok: false,
+        error: err.message || 'Failed to verify domain DNS records.',
+      });
+    }
+  };
+  app.post('/api/email/verify', handleVerifyDomain);
+  app.get('/api/email/verify', handleVerifyDomain);
+
+  // Endpoint 3: Send Email as Configured User ('me' or 'brother')
+  app.post('/api/email/send', async (req, res) => {
+    try {
+      const { userId = 'me', to, subject, html, text } = req.body || {};
+      if (!to || !subject) {
+        res.status(400).json({ ok: false, error: 'Recipient email (to) and subject are required.' });
+        return;
+      }
+
+      const result = await sendEmailAsUser({
+        userId: String(userId),
+        to: String(to),
+        subject: String(subject),
+        html: html ? String(html) : undefined,
+        text: text ? String(text) : undefined,
+      });
+
+      res.json({
+        ok: true,
+        success: true,
+        id: result.id,
+        from: result.from,
+        to: result.to,
+        subject: result.subject,
+        provider: result.provider,
+        message: `Email successfully sent from ${result.from} to ${result.to}!`,
+      });
+    } catch (err: any) {
+      res.status(500).json({
+        ok: false,
+        success: false,
+        error: err.message || 'Failed to dispatch email via Resend API.',
+      });
+    }
+  });
+
+  // Settings Endpoint: Get current shared domain, DNS records, and users
+  app.get('/api/email/settings', async (_req, res) => {
+    try {
+      const domainRecord = await getActiveEmailDomain();
+      const users = await getEmailUsers();
+
+      res.json({
+        ok: true,
+        domain: domainRecord?.domain || '',
+        domainId: domainRecord?.domainId || '',
+        records: domainRecord?.records || [],
+        verified: domainRecord?.verified || false,
+        status: domainRecord?.status || 'not_started',
+        users,
+      });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err.message || 'Failed to fetch email settings' });
     }
   });
 

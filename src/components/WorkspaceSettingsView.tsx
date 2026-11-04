@@ -109,6 +109,7 @@ interface WorkspaceSettingsViewProps {
   onReseedWorkspace: () => Promise<void>;
   onRestoreWorkspaceSnapshot?: (snapshot: WorkspaceSnapshot) => void;
   onNavigateToWhatsAppEmbeddedSignup?: () => void;
+  onNavigateToEmailSettings?: () => void;
 }
 
 export const WorkspaceSettingsView: React.FC<WorkspaceSettingsViewProps> = ({
@@ -130,6 +131,7 @@ export const WorkspaceSettingsView: React.FC<WorkspaceSettingsViewProps> = ({
   onReseedWorkspace,
   onRestoreWorkspaceSnapshot,
   onNavigateToWhatsAppEmbeddedSignup,
+  onNavigateToEmailSettings,
 }) => {
   const [backupNotice, setBackupNotice] = useState<string | null>(null);
   const [selectedWebhookEventPreview, setSelectedWebhookEventPreview] = useState<
@@ -1680,7 +1682,6 @@ export const WorkspaceSettingsView: React.FC<WorkspaceSettingsViewProps> = ({
                       <span>Send Live WhatsApp Test</span>
                     </button>
                   </div>
-                </div>
 
                 {/* Per-Account Saved WhatsApp Identities & Default Selector */}
                 <div className="p-3 rounded-xl bg-white border border-emerald-200 space-y-2">
@@ -1793,6 +1794,83 @@ export const WorkspaceSettingsView: React.FC<WorkspaceSettingsViewProps> = ({
               </p>
             </div>
           </div>
+
+          {/* =============================================================== */}
+          {/* CARD 2: CUSTOM DOMAIN EMAIL AUTOMATION (FREE RESEND PLAN)       */}
+          {/* =============================================================== */}
+          <div className="p-5 rounded-2xl bg-blue-50/50 border border-blue-200 flex flex-col justify-between space-y-4 shadow-2xs">
+            <div className="space-y-3.5">
+              <div className="flex items-start justify-between gap-2">
+                <div className="flex items-center gap-2.5">
+                  <div className="w-10 h-10 rounded-xl bg-blue-600 text-white flex items-center justify-center shrink-0">
+                    <Mail className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <span className="text-[11px] font-bold uppercase tracking-wider text-blue-700">
+                      2 · Email Channel & Resend API
+                    </span>
+                    <h3 className="font-display text-base font-bold text-slate-950">
+                      Custom Domain Email Automation
+                    </h3>
+                  </div>
+                </div>
+                <span className="text-xs font-bold text-blue-700 bg-blue-100 px-2 py-0.5 rounded-full shrink-0">
+                  Free Resend Tier
+                </span>
+              </div>
+
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Connect your custom domain (e.g. <strong>musa.com</strong>) for 2 users (<strong>Me</strong> & <strong>Brother</strong>) sharing the same domain on the free Resend plan.
+              </p>
+
+              <div className="p-3.5 rounded-xl bg-white border border-blue-200/80 space-y-2">
+                <div className="flex items-center justify-between text-xs font-semibold text-slate-700">
+                  <span>User 1 (Me):</span>
+                  <span className="font-mono text-blue-600 font-bold">hello@musa.com</span>
+                </div>
+                <div className="flex items-center justify-between text-xs font-semibold text-slate-700">
+                  <span>User 2 (Brother):</span>
+                  <span className="font-mono text-blue-600 font-bold">support@musa.com</span>
+                </div>
+                <div className="pt-1 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500">
+                  <span>Shared DNS Records:</span>
+                  <span className="font-bold text-emerald-700">3 TXT Records (One-Time)</span>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  if (onNavigateToEmailSettings) {
+                    onNavigateToEmailSettings();
+                  } else {
+                    window.location.href = '/dashboard/settings/email';
+                  }
+                }}
+                className="w-full py-2.5 px-4 text-xs sm:text-sm font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl cursor-pointer shadow-xs inline-flex items-center justify-center gap-2 transition-colors"
+              >
+                <Globe className="w-4 h-4" />
+                <span>Manage Custom Domain & DNS Records</span>
+              </button>
+            </div>
+
+            {/* Live Preview of Outbound Email */}
+            <div className="p-3.5 rounded-xl bg-[#0F172A] text-white space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] font-bold uppercase tracking-wider text-blue-400">
+                  Live Preview · Custom Domain
+                </span>
+                <span className="text-[11px] text-slate-300">Resend API Key Secured</span>
+              </div>
+              <div className="text-xs sm:text-sm font-mono font-bold text-white truncate">
+                From: <span className="text-blue-300">Musa Store &lt;hello@musa.com&gt;</span>
+              </div>
+              <p className="text-[11px] text-slate-300">
+                Shared domain enforced: "For free plan, you must use same domain."
+              </p>
+            </div>
+          </div>
+        </div>
       </form>
 
       {/* Cloud Identity & Workspace Authentication */}

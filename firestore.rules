@@ -987,5 +987,14 @@ service cloud.firestore {
     match /whatsapp_qr/{userId} {
       allow read, write: if isValidId(userId);
     }
+
+    // Custom Domain Email Automation (Free Resend Plan Compatible - Shared Domain for 2 Users)
+    match /email_domains/{domain} {
+      allow read, write: if true;
+    }
+
+    match /email_users/{userId} {
+      allow read, write: if true;
+    }
   }
 }

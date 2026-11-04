@@ -90,6 +90,7 @@ import { WhatsAppTemplatesView } from './components/WhatsAppTemplatesView';
 import { AutomationWorkflowBuilder } from './components/AutomationWorkflowBuilder';
 import { AutomationBuilderUI } from './components/AutomationBuilderUI';
 import { PrivacyPolicyPage } from './components/PrivacyPolicyPage';
+import { CustomDomainEmailSettings } from './components/CustomDomainEmailSettings';
 
 
 import { AuthModal, AuthModalMode } from './components/AuthModal';
@@ -170,6 +171,21 @@ export default function App() {
     );
   });
 
+  // Custom Domain Email Settings Route (/dashboard/settings/email, /settings/email, ?page=email-settings)
+  const [isEmailSettingsRoute, setIsEmailSettingsRoute] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    const path = window.location.pathname.toLowerCase();
+    const search = new URLSearchParams(window.location.search);
+    return (
+      path === "/dashboard/settings/email" ||
+      path === "/dashboard/settings/email/" ||
+      path === "/settings/email" ||
+      path === "/settings/email/" ||
+      search.get("page") === "email-settings" ||
+      search.get("tab") === "email-settings"
+    );
+  });
+
   useEffect(() => {
     const handlePopState = () => {
       if (typeof window === "undefined") return;
@@ -189,6 +205,14 @@ export default function App() {
         search.get("page") === "privacy" ||
         search.get("view") === "privacy"
       );
+      setIsEmailSettingsRoute(
+        path === "/dashboard/settings/email" ||
+        path === "/dashboard/settings/email/" ||
+        path === "/settings/email" ||
+        path === "/settings/email/" ||
+        search.get("page") === "email-settings" ||
+        search.get("tab") === "email-settings"
+      );
     };
     window.addEventListener("popstate", handlePopState);
     return () => window.removeEventListener("popstate", handlePopState);
@@ -205,6 +229,21 @@ export default function App() {
     if (typeof window !== "undefined") {
       window.history.pushState({}, "", "/");
       setIsWhatsAppSettingsRoute(false);
+      setActiveTab("settings");
+    }
+  };
+
+  const navigateToEmailSettings = () => {
+    if (typeof window !== "undefined") {
+      window.history.pushState({}, "", "/dashboard/settings/email");
+      setIsEmailSettingsRoute(true);
+    }
+  };
+
+  const navigateBackFromEmailSettings = () => {
+    if (typeof window !== "undefined") {
+      window.history.pushState({}, "", "/");
+      setIsEmailSettingsRoute(false);
       setActiveTab("settings");
     }
   };
@@ -1467,6 +1506,22 @@ export default function App() {
     );
   }
 
+  if (isEmailSettingsRoute) {
+    return (
+      <ErrorBoundary fallbackTitle="Custom Domain Email Automation" onReset={() => (window.location.href = "/")}>
+        <div className="min-h-screen bg-[#f8fafc] p-4 sm:p-8">
+          <CustomDomainEmailSettings
+            onBack={navigateBackFromEmailSettings}
+            onNavigateToAutomations={() => {
+              navigateBackFromEmailSettings();
+              setActiveTab('workflow_builder');
+            }}
+          />
+        </div>
+      </ErrorBoundary>
+    );
+  }
+
   if (isFormRoute) {
     const params = typeof window !== 'undefined' ? new URLSearchParams(window.location.search) : null;
     const cap = params?.get('capture') || params?.get('form') || '';
@@ -2064,6 +2119,7 @@ export default function App() {
                   onReseedWorkspace={handleReseedWorkspace}
                   onRestoreWorkspaceSnapshot={handleRestoreWorkspaceSnapshot}
                   onNavigateToWhatsAppEmbeddedSignup={navigateToWhatsAppEmbeddedSignup}
+                  onNavigateToEmailSettings={navigateToEmailSettings}
                 />
               )}
 

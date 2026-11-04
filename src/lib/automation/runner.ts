@@ -1,6 +1,7 @@
 import { getWorkflowById, createFollowUpJob } from './db.js';
 import { WorkflowRecord, DelayUnit, FollowUpJobRecord } from './types.js';
 import { sendWhatsAppMessage } from '../../services/whatsappBaileysService.js';
+import { sendEmailAsUser } from '../customDomainEmail.js';
 
 export interface WorkflowExecutionResult {
   workflowId: string;
@@ -243,11 +244,30 @@ export async function executeWorkflow(
 
       // ACTION: Send Email
       if (type === 'action_send_email') {
+        const senderPersona = currentNode.data?.emailSenderPersona || 'me';
+        const msg = currentNode.data?.message || '';
+        let delivered = true;
+
+        if (leadPhone && leadPhone.includes('@')) {
+          try {
+            await sendEmailAsUser({
+              userId: senderPersona,
+              to: leadPhone,
+              subject: `Update from ${workflow.name}`,
+              html: msg,
+              text: msg,
+            });
+            delivered = true;
+          } catch (err: any) {
+            console.warn('[Workflow Runner] Email dispatch notice:', err.message);
+          }
+        }
+
         result.immediateActionsDispatched.push({
           nodeId: currentId,
           actionType: type,
-          message: currentNode.data?.message || '',
-          delivered: true,
+          message: msg,
+          delivered,
         });
         const nextEdges = outgoingEdges.get(currentId) || [];
         for (const e of nextEdges) {
