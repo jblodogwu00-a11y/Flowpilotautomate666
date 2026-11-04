@@ -252,9 +252,9 @@ const ActionNodeComponent = ({ data, selected }: NodeProps<FlowCustomNode>) => {
                 ? 'No further follow-up'
                 : isEmail
                 ? data.emailSenderPersona === 'brother'
-                  ? 'From: Brother (support@musa.com)'
-                  : 'From: Me (hello@musa.com)'
-                : 'Delivered via Baileys'}
+                  ? 'From: Brother (support@passiveincome.work.gd)'
+                  : 'From: Musa (hello@passiveincome.work.gd)'
+                : 'Delivered via WhatsApp API'}
             </p>
           </div>
         </div>

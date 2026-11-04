@@ -93,7 +93,13 @@ export const CustomDomainEmailSettings: React.FC<CustomDomainEmailSettingsProps>
     try {
       const res = await fetch('/api/email/settings');
       if (res.ok) {
-        const data = await res.json();
+        const text = await res.text();
+        let data: any = {};
+        try {
+          data = JSON.parse(text);
+        } catch {
+          data = {};
+        }
         if (data.domain) {
           setSharedDomain(data.domain);
         }
@@ -104,7 +110,7 @@ export const CustomDomainEmailSettings: React.FC<CustomDomainEmailSettingsProps>
           setDnsRecords(data.records);
         }
         setIsDomainVerified(Boolean(data.verified));
-        setDomainStatus(data.status || 'not_started');
+        setDomainStatus(data.status || 'pending');
 
         // Populate users if saved
         if (data.users) {
@@ -211,19 +217,32 @@ export const CustomDomainEmailSettings: React.FC<CustomDomainEmailSettingsProps>
         body: JSON.stringify({ domainId: sharedDomainId }),
       });
 
-      const data = await res.json();
+      const rawText = await res.text();
+      let data: any = null;
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        // If server returns HTML or proxy error, format cleanly instead of throwing syntax error
+        throw new Error(
+          res.ok
+            ? 'Server returned non-JSON response. Please try again.'
+            : `Verification service returned status ${res.status}. Please check your connection.`
+        );
+      }
+
       if (!res.ok || !data.ok) {
         throw new Error(data.error || 'Failed to verify DNS records.');
       }
 
-      setIsDomainVerified(Boolean(data.verified));
+      const verified = Boolean(data.verified);
+      setIsDomainVerified(verified);
       setDomainStatus(data.status);
       if (Array.isArray(data.records) && data.records.length > 0) {
         setDnsRecords(data.records);
       }
 
-      if (data.verified) {
-        setSuccessBanner(`✅ Domain ${sharedDomain || 'musa.com'} verified. Both emails ready`);
+      if (verified) {
+        setSuccessBanner(`✅ Domain ${data.domain || sharedDomain || 'passiveincome.work.gd'} verified. Both emails ready`);
       } else {
         setSuccessBanner(
           `Domain status: "${data.status}". DNS changes can take a few minutes to propagate across global DNS servers. Please retry in a moment.`
@@ -342,10 +361,9 @@ export const CustomDomainEmailSettings: React.FC<CustomDomainEmailSettingsProps>
               </button>
             )}
             <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
-            <span className="text-blue-600 font-bold">Email Automation</span>
-            <span className="px-2 py-0.5 rounded-full bg-blue-50 text-blue-700 text-[10px] font-bold border border-blue-200">
-              Free Resend Plan · 1 Shared Domain
-            </span>
+            <span className="text-blue-600 font-semibold">Email Automation</span>
+            <span className="text-slate-400">·</span>
+            <span className="text-xs text-slate-500 font-medium">Free Resend Plan · 1 Shared Domain</span>
           </div>
           <h1 className="text-2xl font-bold text-slate-900 tracking-tight">
             Custom Domain Email Automation

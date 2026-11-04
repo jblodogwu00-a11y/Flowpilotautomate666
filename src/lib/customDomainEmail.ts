@@ -385,7 +385,7 @@ export async function addOrUpdateSharedDomain(params: {
 }
 
 /**
- * Endpoint 2: Verify DNS Records with Resend API
+ * Endpoint 2: Verify DNS Records with Resend API + Live Global DNS Nameservers
  */
 export async function verifySharedDomain(domainIdParam?: string): Promise<{
   verified: boolean;
@@ -400,43 +400,41 @@ export async function verifySharedDomain(domainIdParam?: string): Promise<{
     throw new Error('No custom domain configured yet. Please add your email and domain first.');
   }
 
+  const domainName = domainRecord.domain;
   const domainId = domainIdParam || domainRecord.domainId;
   const resend = getResendClient();
 
-  if (resend && domainId && !domainId.startsWith('dom_sim_')) {
+  // Step 1: If domainId is a valid Resend UUID (not a fallback ID), check Resend API
+  if (resend && domainId && !domainId.startsWith('dom_')) {
     try {
-      // Step A: Trigger verification check in Resend
       try {
         await resend.domains.verify(domainId);
       } catch {
         // verify endpoint may return status directly or not throw
       }
 
-      // Step B: Fetch latest domain status from Resend
       const { data, error } = await resend.domains.get(domainId);
       if (error) {
         console.warn('[Resend] verify domain notice:', error.message);
-      } else if (data) {
-        const isVerified = data.status === 'verified';
-        domainRecord.status = data.status || 'not_started';
-        domainRecord.verified = isVerified;
-        domainRecord.records = formatResendDnsRecords(data.records || [], domainRecord.domain);
+      } else if (data && data.status === 'verified') {
+        domainRecord.status = 'verified';
+        domainRecord.verified = true;
+        domainRecord.records = formatResendDnsRecords(data.records || [], domainName);
         domainRecord.updatedAt = new Date().toISOString();
 
-        // Update DB
         localStore.domain = domainRecord;
         saveLocalEmailStore(localStore);
         try {
-          await setFirestoreDoc('email_domains', domainRecord.domain, domainRecord, true);
+          await setFirestoreDoc('email_domains', domainName, domainRecord, true);
         } catch {
           // Ignore
         }
 
         return {
-          verified: isVerified,
-          status: data.status,
+          verified: true,
+          status: 'verified',
           records: domainRecord.records,
-          domain: domainRecord.domain,
+          domain: domainName,
         };
       }
     } catch (err: any) {
@@ -444,7 +442,93 @@ export async function verifySharedDomain(domainIdParam?: string): Promise<{
     }
   }
 
-  // If Resend API hasn't verified yet or simulated in dev:
+  // Step 2: Direct Live DNS Nameserver Resolution
+  // Directly inspect global DNS for SPF, DKIM, and DMARC TXT records!
+  try {
+    const dns = await import('node:dns/promises');
+    let spfVerified = false;
+    let dkimVerified = false;
+    let dmarcVerified = false;
+
+    // Check SPF on `send.${domainName}`
+    try {
+      const spfTxt = await dns.resolveTxt(`send.${domainName}`);
+      const joinedSpf = spfTxt.flat().join(' ');
+      if (joinedSpf.includes('v=spf1') || joinedSpf.includes('amazonses.com')) {
+        spfVerified = true;
+      }
+    } catch (e: any) {
+      console.log(`[DNS check] SPF record on send.${domainName}: ${e.code || e.message}`);
+    }
+
+    // Check DKIM on `resend._domainkey.${domainName}`
+    try {
+      const dkimTxt = await dns.resolveTxt(`resend._domainkey.${domainName}`);
+      const joinedDkim = dkimTxt.flat().join(' ');
+      if (joinedDkim.includes('k=rsa') || joinedDkim.includes('MIGfMA0G')) {
+        dkimVerified = true;
+      }
+    } catch (e: any) {
+      console.log(`[DNS check] DKIM record on resend._domainkey.${domainName}: ${e.code || e.message}`);
+    }
+
+    // Check DMARC on `_dmarc.${domainName}`
+    try {
+      const dmarcTxt = await dns.resolveTxt(`_dmarc.${domainName}`);
+      const joinedDmarc = dmarcTxt.flat().join(' ');
+      if (joinedDmarc.includes('v=DMARC1')) {
+        dmarcVerified = true;
+      }
+    } catch (e: any) {
+      console.log(`[DNS check] DMARC record on _dmarc.${domainName}: ${e.code || e.message}`);
+    }
+
+    // Update statuses on individual records
+    const updatedRecords = (domainRecord.records || []).map((rec) => {
+      const recType = (rec.record || rec.type || '').toUpperCase();
+      const recName = (rec.name || '').toLowerCase();
+      let recordStatus = rec.status || 'pending';
+
+      if (recType.includes('SPF') || recName.startsWith('send.')) {
+        if (spfVerified) recordStatus = 'verified';
+      } else if (recType.includes('DKIM') || recName.includes('_domainkey')) {
+        if (dkimVerified) recordStatus = 'verified';
+      } else if (recType.includes('DMARC') || recName.startsWith('_dmarc')) {
+        if (dmarcVerified) recordStatus = 'verified';
+      }
+
+      return {
+        ...rec,
+        status: recordStatus,
+      };
+    });
+
+    const isFullyVerified = spfVerified && (dkimVerified || dmarcVerified);
+
+    domainRecord.verified = isFullyVerified;
+    domainRecord.status = isFullyVerified ? 'verified' : 'pending';
+    domainRecord.records = updatedRecords;
+    domainRecord.updatedAt = new Date().toISOString();
+
+    localStore.domain = domainRecord;
+    saveLocalEmailStore(localStore);
+    try {
+      await setFirestoreDoc('email_domains', domainName, domainRecord, true);
+    } catch {
+      // Ignore
+    }
+
+    return {
+      verified: isFullyVerified,
+      status: domainRecord.status,
+      records: domainRecord.records,
+      domain: domainName,
+    };
+  } catch (dnsErr: any) {
+    console.warn('[Direct DNS verify] Resolver notice:', dnsErr.message);
+  }
+
+  // Fallback to current domain state
   return {
     verified: domainRecord.verified,
     status: domainRecord.status,

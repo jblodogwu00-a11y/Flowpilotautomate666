@@ -165,24 +165,28 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
 
   return (
     <div className="space-y-5 sm:space-y-6">
-      {/* Enterprise & Developer Trust Command Banner (Deep Slate/Navy + Cobalt Blue & Cyan) */}
-      <section className="rounded-2xl bg-[#090D16] text-white p-4 sm:p-6 border border-slate-800 shadow-sm relative overflow-hidden">
-        <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4 sm:gap-5 relative z-10">
+      {/* Enterprise Command Banner */}
+      <section className="rounded-2xl bg-[#0B1120] text-white p-5 sm:p-6 border border-slate-800 shadow-sm relative overflow-hidden">
+        <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-5 relative z-10">
           <div className="flex items-start sm:items-center gap-4">
             <img
               src={classicHeroStudioImg}
               alt="Executive Command Studio"
-              className="hidden sm:block w-24 h-16 rounded-xl object-cover border border-blue-500/40 shrink-0"
+              className="hidden sm:block w-20 h-14 rounded-xl object-cover border border-slate-700 shrink-0"
             />
             <div className="space-y-1">
-              <div className="text-[11px] font-mono uppercase tracking-widest text-[#22D3EE]">
-                Enterprise Automation Command · {workspace.name}
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] font-mono uppercase tracking-wider text-blue-400 font-semibold">
+                  Workspace Overview
+                </span>
+                <span className="text-slate-600">·</span>
+                <span className="text-xs text-slate-400 font-mono">{workspace.name}</span>
               </div>
-              <h2 className="font-display text-lg sm:text-xl lg:text-2xl font-bold text-white tracking-tight">
-                Build pages from scratch or templates, run visual workflows, and dispatch live broadcasts.
+              <h2 className="font-display text-lg sm:text-xl font-bold text-white tracking-tight">
+                Automations, Broadcasts &amp; Multi-Channel CRM
               </h2>
-              <p className="text-xs sm:text-sm text-slate-300">
-                All features unlocked · $0.00 platform subscription · Direct Email, WhatsApp &amp; SMS APIs
+              <p className="text-xs text-slate-400">
+                Resend Custom Domain connected · WhatsApp Cloud API active · Real-time webhooks
               </p>
             </div>
           </div>
@@ -191,7 +195,7 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
             <button
               type="button"
               onClick={() => onQuickAction('add_contact')}
-              className="px-3.5 py-2 text-xs font-bold text-white bg-[#2563EB] hover:bg-[#1D4ED8] rounded-xl transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer shadow-xs"
+              className="px-3.5 py-2 text-xs font-semibold text-white bg-[#2563EB] hover:bg-[#1D4ED8] rounded-lg transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer shadow-xs shadow-blue-500/20"
             >
               <Plus className="w-3.5 h-3.5" />
               <span>Add Contact</span>
@@ -199,189 +203,147 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
 
             <button
               type="button"
-              onClick={() => onQuickAction('create_automation')}
-              className="px-3 py-2 text-xs font-semibold text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+              onClick={() => onNavigate('workflow_builder')}
+              className="px-3 py-2 text-xs font-medium text-white bg-slate-800 hover:bg-slate-700 border border-slate-700/80 rounded-lg transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
             >
-              <GitBranch className="w-3.5 h-3.5 text-[#22D3EE]" />
-              <span>Create Automation</span>
+              <GitBranch className="w-3.5 h-3.5 text-blue-400" />
+              <span>Workflow Builder</span>
             </button>
 
             <button
               type="button"
-              onClick={() => onQuickAction('create_form')}
-              className="px-3 py-2 text-xs font-semibold text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+              onClick={() => onNavigate('email_domain')}
+              className="px-3 py-2 text-xs font-medium text-white bg-slate-800 hover:bg-slate-700 border border-slate-700/80 rounded-lg transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
             >
-              <FileText className="w-3.5 h-3.5 text-[#22D3EE]" />
-              <span>Create Form</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => onQuickAction('create_landing_page')}
-              className="px-3 py-2 text-xs font-semibold text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <FileText className="w-3.5 h-3.5 text-[#22D3EE]" />
-              <span>Landing Page</span>
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Domain DNS</span>
             </button>
 
             <button
               type="button"
               onClick={() => onQuickAction('create_campaign')}
-              className="px-3 py-2 text-xs font-semibold text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+              className="px-3 py-2 text-xs font-medium text-white bg-slate-800 hover:bg-slate-700 border border-slate-700/80 rounded-lg transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
             >
-              <Send className="w-3.5 h-3.5 text-[#22D3EE]" />
-              <span>Create Campaign</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => onQuickAction('send_broadcast')}
-              className="px-3 py-2 text-xs font-bold text-slate-950 bg-[#22D3EE] hover:bg-cyan-300 rounded-xl transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <Send className="w-3.5 h-3.5 text-slate-950" />
-              <span>Send Broadcast</span>
+              <Send className="w-3.5 h-3.5 text-blue-400" />
+              <span>Campaign</span>
             </button>
 
             {onOpenDiagnostics && (
               <button
                 type="button"
                 onClick={onOpenDiagnostics}
-                className="px-3 py-2 text-xs font-bold text-emerald-950 bg-emerald-400 hover:bg-emerald-300 rounded-xl transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer shadow-xs"
+                className="px-3 py-2 text-xs font-medium text-slate-300 hover:text-white bg-slate-800/60 hover:bg-slate-700/60 border border-slate-700/60 rounded-lg transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
               >
-                <ShieldCheck className="w-3.5 h-3.5 text-emerald-950" />
-                <span>Diagnostics &amp; Kill Switch</span>
+                <span>Diagnostics</span>
               </button>
             )}
           </div>
         </div>
       </section>
 
-      {/* Semantic Status Mapping Telemetry Strip (Success Emerald · Warning Amber · Failure Ruby Red) */}
-      <section className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
-        <div className="p-3.5 rounded-xl bg-white border border-slate-200 flex items-center justify-between gap-3 shadow-2xs">
-          <div className="space-y-0.5 min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-[#10B981] shrink-0" />
-              <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-emerald-700">
-                Success State · Passing Workflows
-              </span>
-            </div>
-            <div className="text-xs text-slate-600 truncate">
-              {activeAutomations.length} active automation flows · All OAuth/API relays healthy
+      {/* System Status Indicators (Zero-Pill Architecture) */}
+      <section className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div className="p-3.5 rounded-xl bg-white dark:bg-[#0D1322] border border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3 shadow-xs">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="w-2 h-2 rounded-full bg-emerald-500 shrink-0" />
+            <div className="min-w-0">
+              <p className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate">Workflows Operational</p>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">{activeAutomations.length} active automations · APIs healthy</p>
             </div>
           </div>
-          <span className="px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold status-pill-success shrink-0">
-            200 OK
-          </span>
+          <span className="font-mono text-[11px] font-medium text-emerald-600 dark:text-emerald-400">200 OK</span>
         </div>
 
-        <div className="p-3.5 rounded-xl bg-white border border-slate-200 flex items-center justify-between gap-3 shadow-2xs">
-          <div className="space-y-0.5 min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-[#F59E0B] shrink-0" />
-              <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-amber-700">
-                Warning State · Paused / Queued
-              </span>
-            </div>
-            <div className="text-xs text-slate-600 truncate">
-              {pausedAutomationsCount} paused workflows · Rate-limit window nominal
+        <div className="p-3.5 rounded-xl bg-white dark:bg-[#0D1322] border border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3 shadow-xs">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="w-2 h-2 rounded-full bg-amber-500 shrink-0" />
+            <div className="min-w-0">
+              <p className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate">Queue Rate-Limits</p>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">{pausedAutomationsCount} paused flows · Nominal pacing</p>
             </div>
           </div>
-          <span className="px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold status-pill-warning shrink-0">
-            {pausedAutomationsCount} PAUSED
-          </span>
+          <span className="font-mono text-[11px] font-medium text-amber-600 dark:text-amber-400">Paced</span>
         </div>
 
-        <div className="p-3.5 rounded-xl bg-white border border-slate-200 flex items-center justify-between gap-3 shadow-2xs">
-          <div className="space-y-0.5 min-w-0">
-            <div className="flex items-center gap-2">
-              <span className="w-2.5 h-2.5 rounded-full bg-[#E11D48] shrink-0" />
-              <span className="font-mono text-[11px] font-bold uppercase tracking-wider text-rose-700">
-                Failure / Exception Monitor
-              </span>
-            </div>
-            <div className="text-xs text-slate-600 truncate">
-              0 broken paths · {highPriorityOpenTasks} high-priority compliance checks
+        <div className="p-3.5 rounded-xl bg-white dark:bg-[#0D1322] border border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3 shadow-xs">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <span className="w-2 h-2 rounded-full bg-blue-500 shrink-0" />
+            <div className="min-w-0">
+              <p className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate">Domain &amp; Delivery</p>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">passiveincome.work.gd · Verified</p>
             </div>
           </div>
-          <span className="px-2.5 py-1 rounded-lg text-[11px] font-mono font-bold status-pill-failure shrink-0">
-            0 TIMEOUTS
-          </span>
+          <span className="font-mono text-[11px] font-medium text-blue-600 dark:text-blue-400">Ready</span>
         </div>
       </section>
 
-      {/* Primary KPI Grid — 60-30-10 Enterprise Cobalt Blue, Cyan & Emerald */}
-      <section className="border border-slate-200 rounded-2xl bg-white overflow-hidden grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 divide-y sm:divide-y-0 sm:divide-x divide-slate-200 shadow-2xs">
-        <div className="p-4 sm:p-5 border-t-4 border-t-[#2563EB]">
-          <div className="flex items-center justify-between text-xs font-medium text-slate-600">
-            <span>Total Contacts &amp; Leads</span>
+      {/* Primary KPI Grid (Clean SaaS Cards) */}
+      <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="p-5 rounded-xl bg-white dark:bg-[#0D1322] border border-slate-200 dark:border-slate-800 shadow-xs hover:border-slate-300 dark:hover:border-slate-700 transition-colors">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-slate-500 dark:text-slate-400">Total Contacts</span>
             <button
               type="button"
               onClick={() => onNavigate('contacts')}
-              className="text-[#2563EB] font-semibold hover:underline inline-flex items-center gap-0.5 cursor-pointer"
+              className="text-xs text-[#2563EB] hover:text-[#1D4ED8] font-medium inline-flex items-center gap-0.5 cursor-pointer"
             >
-              <span>Directory</span>
+              <span>View</span>
               <ArrowUpRight className="w-3.5 h-3.5" />
             </button>
           </div>
-          <div className="font-mono text-2xl sm:text-3xl font-bold text-slate-950 mt-2 tabular-nums">
+          <div className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white mt-2 tabular-nums">
             {totalContacts.toLocaleString()}
           </div>
-          <div className="text-xs text-slate-600 mt-1.5 font-mono tabular-nums">
-            +{leadsToday} today · +{leadsWeek} wk · +{leadsMonth} mo
-          </div>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-2 flex items-center gap-1.5">
+            <span className="text-emerald-600 font-semibold font-mono">+{leadsToday}</span> today · {leadsWeek} this week
+          </p>
         </div>
 
-        <div className="p-4 sm:p-5 border-t-4 border-t-[#10B981]">
-          <div className="flex items-center justify-between text-xs font-medium text-slate-600">
-            <span>Customers &amp; Pipeline LTV</span>
-            <span className="text-emerald-700 font-semibold">Revenue</span>
+        <div className="p-5 rounded-xl bg-white dark:bg-[#0D1322] border border-slate-200 dark:border-slate-800 shadow-xs hover:border-slate-300 dark:hover:border-slate-700 transition-colors">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-slate-500 dark:text-slate-400">Customer Pipeline LTV</span>
+            <span className="text-xs text-emerald-600 font-semibold">Revenue</span>
           </div>
-          <div className="font-mono text-2xl sm:text-3xl font-bold text-slate-950 mt-2 tabular-nums">
-            {customersCount.toLocaleString()}{' '}
-            <span className="text-sm sm:text-base font-semibold text-[#047857]">
-              ({formatCurrency(totalLtv, workspace.currency)})
-            </span>
+          <div className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white mt-2 tabular-nums">
+            {formatCurrency(totalLtv, workspace.currency)}
           </div>
-          <div className="text-xs text-slate-600 mt-1.5 font-mono tabular-nums">
-            {optedInCount} opted-in · {qualifiedCount} qualified calls
-          </div>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-2">
+            {customersCount.toLocaleString()} paying customers · {optedInCount} opted-in
+          </p>
         </div>
 
-        <div className="p-4 sm:p-5 border-t-4 border-t-[#06B6D4]">
-          <div className="flex items-center justify-between text-xs font-medium text-slate-600">
-            <span>Lead-to-Customer Conversion</span>
-            <span className="text-[#0891B2] font-semibold">Funnel Yield</span>
+        <div className="p-5 rounded-xl bg-white dark:bg-[#0D1322] border border-slate-200 dark:border-slate-800 shadow-xs hover:border-slate-300 dark:hover:border-slate-700 transition-colors">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-slate-500 dark:text-slate-400">Conversion Rate</span>
+            <span className="text-xs text-blue-600 font-semibold">Funnel Yield</span>
           </div>
-          <div className="font-mono text-2xl sm:text-3xl font-bold text-slate-950 mt-2 tabular-nums">
+          <div className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white mt-2 tabular-nums">
             {conversionRate}%
           </div>
-          <div className="text-xs text-slate-600 mt-1.5 font-mono tabular-nums">
-            Landing Page Opt-in Rate: {funnelOptInRate}%
-          </div>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-2">
+            Landing Page Yield: {funnelOptInRate}%
+          </p>
         </div>
 
-        <div className="p-4 sm:p-5 border-t-4 border-t-[#2563EB]">
-          <div className="flex items-center justify-between text-xs font-medium text-slate-600">
-            <span>Active Automations</span>
+        <div className="p-5 rounded-xl bg-white dark:bg-[#0D1322] border border-slate-200 dark:border-slate-800 shadow-xs hover:border-slate-300 dark:hover:border-slate-700 transition-colors">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-slate-500 dark:text-slate-400">Active Automations</span>
             <button
               type="button"
               onClick={() => onNavigate('automations')}
-              className="text-[#2563EB] font-semibold hover:underline inline-flex items-center gap-0.5 cursor-pointer"
+              className="text-xs text-[#2563EB] hover:text-[#1D4ED8] font-medium inline-flex items-center gap-0.5 cursor-pointer"
             >
-              <span>Workflows</span>
+              <span>Flows</span>
               <ArrowUpRight className="w-3.5 h-3.5" />
             </button>
           </div>
-          <div className="font-mono text-2xl sm:text-3xl font-bold text-slate-950 mt-2 tabular-nums">
+          <div className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white mt-2 tabular-nums">
             {activeAutomations.length}{' '}
-            <span className="text-sm sm:text-base font-normal text-slate-500">
-              / {automations.length} total
-            </span>
+            <span className="text-sm font-normal text-slate-400">/ {automations.length}</span>
           </div>
-          <div className="text-xs text-slate-600 mt-1.5 font-mono tabular-nums">
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-2">
             {activeChatbotSessions.toLocaleString()} WhatsApp bot sessions
-          </div>
+          </p>
         </div>
       </section>
 

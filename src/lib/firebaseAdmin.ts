@@ -1,7 +1,7 @@
 import { initializeApp, getApps, cert, applicationDefault, App } from 'firebase-admin/app';
 import { getFirestore, Firestore } from 'firebase-admin/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
-import { db as clientDb } from '../firebase';
+import { db as clientDb } from '../firebase.js';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
 
 const targetDatabaseId =

@@ -828,55 +828,54 @@ export const ContactsCrmView: React.FC<ContactsCrmViewProps> = ({
     <div className="space-y-5">
       {/* Top CRM Executive Summary Strip — Two-Color Slate Ink & Emerald */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
-        <div className="bg-white border border-slate-200 border-t-4 border-t-[#047857] rounded-2xl p-4 sm:p-5 shadow-2xs">
-          <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+        <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 shadow-xs hover:border-slate-300 transition-colors">
+          <div className="text-xs font-medium text-slate-500">
             Total CRM Records
           </div>
-          <div className="font-display text-xl sm:text-2xl font-bold text-slate-900 mt-1">
-            {contacts.length}
+          <div className="font-display text-2xl font-bold tracking-tight text-slate-900 mt-1 tabular-nums">
+            {contacts.length.toLocaleString()}
           </div>
-          <div className="text-xs text-emerald-700 font-semibold mt-0.5">
-            {optedInCount} verified opt-in (
-            {contacts.length > 0 ? Math.round((optedInCount / contacts.length) * 100) : 0}%)
+          <div className="text-xs text-slate-500 font-medium mt-1 flex items-center gap-1.5">
+            <span className="text-emerald-600 font-semibold">{optedInCount} opted-in</span> · {contacts.length > 0 ? Math.round((optedInCount / contacts.length) * 100) : 0}% yield
           </div>
         </div>
 
-        <div className="bg-white border border-slate-200 border-t-4 border-t-[#0F172A] rounded-2xl p-4 sm:p-5 shadow-2xs">
-          <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-            Total Pipeline & Deal Value
+        <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 shadow-xs hover:border-slate-300 transition-colors">
+          <div className="text-xs font-medium text-slate-500">
+            Pipeline &amp; Deal Value
           </div>
-          <div className="font-display text-xl sm:text-2xl font-bold text-slate-900 mt-1">
+          <div className="font-display text-2xl font-bold tracking-tight text-slate-900 mt-1 tabular-nums">
             {formatCurrency(totalPipelineLtv, currency)}
           </div>
-          <div className="text-xs text-slate-600 font-semibold mt-0.5">
-            {hotLeadsCount} Hot high-intent deals active
+          <div className="text-xs text-slate-500 font-medium mt-1">
+            {hotLeadsCount} high-intent active leads
           </div>
         </div>
 
-        <div className="bg-white border border-slate-200 border-t-4 border-t-[#047857] rounded-2xl p-4 sm:p-5 shadow-2xs">
-          <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
-            Active Lists & Tags
+        <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 shadow-xs hover:border-slate-300 transition-colors">
+          <div className="text-xs font-medium text-slate-500">
+            Audience Segments
           </div>
-          <div className="font-display text-xl sm:text-2xl font-bold text-slate-900 mt-1">
+          <div className="font-display text-2xl font-bold tracking-tight text-slate-900 mt-1 tabular-nums">
             {uniqueLists.length} Lists · {uniqueTags.length} Tags
           </div>
-          <div className="text-xs text-emerald-700 font-semibold mt-0.5">
-            Dynamic behavioral segmentation ready
+          <div className="text-xs text-slate-500 font-medium mt-1">
+            Multi-channel targeting active
           </div>
         </div>
 
-        <div className="bg-white border border-slate-200 border-t-4 border-t-[#0F172A] rounded-2xl p-4 sm:p-5 shadow-2xs">
-          <div className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
+        <div className="bg-white border border-slate-200 rounded-xl p-4 sm:p-5 shadow-xs hover:border-slate-300 transition-colors">
+          <div className="text-xs font-medium text-slate-500">
             Duplicate Hygiene Scan
           </div>
-          <div className="font-display text-xl sm:text-2xl font-bold text-slate-900 mt-1">
+          <div className="font-display text-2xl font-bold tracking-tight text-slate-900 mt-1 tabular-nums">
             {duplicatePairs.length}{' '}
-            <span className="text-sm sm:text-base font-normal text-slate-500">Pairs</span>
+            <span className="text-sm font-normal text-slate-400">Pairs</span>
           </div>
           <button
             type="button"
             onClick={() => setSubView('duplicates')}
-            className="text-xs text-[#047857] hover:text-emerald-900 font-bold underline mt-0.5 cursor-pointer"
+            className="text-xs text-[#2563EB] hover:text-[#1D4ED8] font-semibold underline mt-1 cursor-pointer block"
           >
             {duplicatePairs.length > 0
               ? 'Review & merge duplicates →'
@@ -886,11 +885,11 @@ export const ContactsCrmView: React.FC<ContactsCrmViewProps> = ({
       </div>
 
       {/* Main CRM Command Bar & Sub-View Navigation */}
-      <div className="border border-slate-200 rounded-2xl bg-white p-4 sm:p-6 shadow-xs">
+      <div className="border border-slate-200 rounded-xl bg-white p-4 sm:p-6 shadow-xs">
         <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4 pb-4 sm:pb-5 border-b border-slate-200">
           <div>
-            <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-emerald-50 border border-emerald-200 text-emerald-900 text-[11px] font-bold uppercase tracking-wider mb-1.5">
-              360° Customer Relationship Management
+            <div className="text-[11px] font-bold uppercase tracking-wider text-[#2563EB] mb-1">
+              Audience Directory &amp; CRM
             </div>
             <h2 className="font-display text-lg sm:text-xl lg:text-2xl font-bold text-slate-900 tracking-tight">
               Audience CRM, Pipeline & Data Governance
