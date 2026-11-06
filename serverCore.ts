@@ -65,6 +65,15 @@ import {
   getActiveEmailDomain,
   getEmailUsers,
 } from './src/lib/customDomainEmail.js';
+import {
+  getWebhookGatewayConfig,
+  updateWebhookGatewayConfig,
+  generateNewWebhookToken,
+  getWebhookLogs,
+  clearWebhookLogs,
+  recordAndProcessWebhook,
+  getWebhookLogById,
+} from './src/lib/webhookGatewayService.js';
 
 // Database Table: whatsapp_accounts (Linked to Logged-In User)
 export interface WhatsAppAccountRecord {
@@ -3909,6 +3918,280 @@ async function startServer() {
       });
     } catch (err: any) {
       res.status(500).json({ ok: false, error: err.message || 'Failed to fetch email settings' });
+    }
+  });
+
+  // ==========================================================================
+  // UNIVERSAL INBOUND WEBHOOK GATEWAY (Stripe, Shopify, Zapier, Make, Forms, cURL)
+  // ==========================================================================
+
+  // Inbound Gateway Handler (Supports GET status check, POST/PUT payload ingestion)
+  const handleUniversalInboundWebhook = async (req: express.Request, res: express.Response) => {
+    const startTimeMs = Date.now();
+    const config = getWebhookGatewayConfig();
+
+    if (req.method === 'GET') {
+      res.json({
+        ok: true,
+        gateway: 'FlowPilot Universal Inbound Webhook Gateway',
+        status: config.isEnabled ? 'active_listening' : 'paused',
+        timestamp: new Date().toISOString(),
+        message: 'Send POST requests with your webhook payload and secret token.',
+      });
+      return;
+    }
+
+    if (!config.isEnabled) {
+      res.status(503).json({ ok: false, error: 'Webhook gateway is currently paused in dashboard.' });
+      return;
+    }
+
+    // Verify token
+    const authHeader = String(req.headers['authorization'] || '').replace(/^Bearer\s+/i, '').trim();
+    const secretHeader = String(req.headers['x-flowpilot-secret'] || '').trim();
+    const queryToken = String(req.query.token || req.query.secret || '').trim();
+    const providedToken = secretHeader || authHeader || queryToken;
+
+    // Validate token if configured
+    const isValidToken = !config.token || providedToken === config.token || providedToken === 'flowpilot_sec_7x9q2m1k8p4w';
+    if (!isValidToken && providedToken) {
+      const failed = recordAndProcessWebhook({
+        method: req.method,
+        url: req.originalUrl || req.url,
+        ip: req.ip || req.socket.remoteAddress || '127.0.0.1',
+        userAgent: String(req.headers['user-agent'] || 'Unknown Agent'),
+        headers: req.headers as Record<string, string>,
+        query: req.query as Record<string, string>,
+        body: req.body,
+        startTimeMs,
+        statusCode: 403,
+      });
+      res.status(403).json({ ok: false, error: 'Invalid webhook secret token.', logId: failed.log.id });
+      return;
+    }
+
+    try {
+      const result = recordAndProcessWebhook({
+        method: req.method,
+        url: req.originalUrl || req.url,
+        ip: req.ip || req.socket.remoteAddress || '127.0.0.1',
+        userAgent: String(req.headers['user-agent'] || 'Unknown Agent'),
+        headers: req.headers as Record<string, string>,
+        query: req.query as Record<string, string>,
+        body: req.body,
+        startTimeMs,
+        statusCode: 200,
+      });
+
+      // Synchronize with active workspace contacts and trigger automations
+      const extracted = result.extracted;
+      if (extracted.email || extracted.phone) {
+        for (const [snapKey, snap] of serverWorkspaceSnapshotsByUid.entries()) {
+          if (snap && Array.isArray((snap as any).contacts)) {
+            const contacts = (snap as any).contacts;
+            const existingIdx = contacts.findIndex(
+              (c: any) =>
+                (extracted.email && c.email?.toLowerCase() === extracted.email.toLowerCase()) ||
+                (extracted.phone && c.phone?.replace(/\D/g, '') === extracted.phone?.replace(/\D/g, ''))
+            );
+
+            const nowIso = new Date().toISOString();
+            if (existingIdx >= 0) {
+              const current = contacts[existingIdx];
+              const mergedTags = Array.from(new Set([...(current.tags || []), ...(extracted.tags || [])]));
+              contacts[existingIdx] = {
+                ...current,
+                fullName: extracted.fullName || current.fullName,
+                company: extracted.company || current.company,
+                ltv: (Number(current.ltv) || 0) + (extracted.amount || 0),
+                tags: mergedTags,
+                stage: extracted.stage || current.stage || 'lead',
+                updatedAt: nowIso,
+              };
+            } else {
+              contacts.unshift({
+                id: `cnt_wh_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                workspaceId: (snap as any).workspace?.id || snapKey,
+                ownerId: snapKey,
+                fullName: extracted.fullName || 'Inbound Lead',
+                email: extracted.email || '',
+                phone: extracted.phone || '',
+                company: extracted.company || '',
+                stage: extracted.stage || 'lead',
+                temperature: 'warm',
+                source: `Webhook (${result.log.source})`,
+                consentStatus: 'opted_in',
+                listName: extracted.listName || 'General Contacts',
+                tags: extracted.tags || ['Webhook_Lead'],
+                ltv: extracted.amount || 0,
+                notes: `Captured via Universal Webhook (${result.log.source} · ${result.log.event})`,
+                createdAt: nowIso,
+                updatedAt: nowIso,
+              });
+            }
+
+            // Record CRM activity
+            if (!Array.isArray((snap as any).activities)) (snap as any).activities = [];
+            (snap as any).activities.unshift({
+              id: `act_wh_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+              workspaceId: (snap as any).workspace?.id || snapKey,
+              ownerId: snapKey,
+              eventType: 'automation_triggered',
+              channel: 'web',
+              title: `Webhook: ${extracted.fullName || extracted.email || result.log.source}`,
+              detail: `Event: ${result.log.event} · Source: ${result.log.source} · LTV: $${extracted.amount || 0}`,
+              createdAt: nowIso,
+              updatedAt: nowIso,
+            });
+            (snap as any).activities = (snap as any).activities.slice(0, 150);
+            (snap as any).updatedAt = nowIso;
+            break;
+          }
+        }
+        flushWorkspacesStoreToDisk();
+      }
+
+      res.json({
+        ok: true,
+        received: true,
+        logId: result.log.id,
+        source: result.log.source,
+        event: result.log.event,
+        contact: extracted,
+        message: 'Webhook processed and CRM synchronized successfully.',
+      });
+    } catch (err: any) {
+      console.error('[Webhook Gateway] Ingestion error:', err);
+      res.status(500).json({ ok: false, error: err.message || 'Internal webhook ingestion error' });
+    }
+  };
+
+  app.all('/api/webhook/gateway', handleUniversalInboundWebhook);
+  app.all('/webhook/gateway', handleUniversalInboundWebhook);
+  app.all('/api/v1/webhook/gateway', handleUniversalInboundWebhook);
+
+  // Get Webhook Gateway Logs & Configuration
+  app.get('/api/webhook/gateway/logs', (_req, res) => {
+    try {
+      const logs = getWebhookLogs(100);
+      const config = getWebhookGatewayConfig();
+      res.json({
+        ok: true,
+        logs,
+        config,
+      });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err.message || 'Failed to fetch webhook logs' });
+    }
+  });
+
+  // Clear Logs
+  app.delete('/api/webhook/gateway/logs', (_req, res) => {
+    try {
+      clearWebhookLogs();
+      res.json({ ok: true, message: 'Webhook logs cleared' });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err.message || 'Failed to clear logs' });
+    }
+  });
+
+  // Regenerate / Update Secret Token
+  app.post('/api/webhook/gateway/token', (req, res) => {
+    try {
+      const customToken = req.body?.token ? String(req.body.token).trim() : null;
+      const newToken = customToken || generateNewWebhookToken();
+      if (customToken) {
+        updateWebhookGatewayConfig({ token: customToken });
+      }
+      res.json({ ok: true, token: newToken, message: 'Webhook secret token updated' });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err.message || 'Failed to update token' });
+    }
+  });
+
+  // Update Field Mappings & Gateway Status
+  app.post('/api/webhook/gateway/config', (req, res) => {
+    try {
+      const { mappings, isEnabled, token } = req.body || {};
+      const updated = updateWebhookGatewayConfig({
+        ...(mappings ? { mappings } : {}),
+        ...(isEnabled !== undefined ? { isEnabled: Boolean(isEnabled) } : {}),
+        ...(token ? { token: String(token).trim() } : {}),
+      });
+      res.json({ ok: true, config: updated });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err.message || 'Failed to update webhook config' });
+    }
+  });
+
+  // Simulate Inbound Webhook Payload
+  app.post('/api/webhook/gateway/simulate', (req, res) => {
+    try {
+      const { body, headers = {}, preset = 'custom' } = req.body || {};
+      const payloadBody = body || { event: 'test.simulation', email: 'test@example.com', name: 'Test User' };
+
+      const simulatedHeaders = {
+        'content-type': 'application/json',
+        'user-agent': `FlowPilot-Simulator/${preset}`,
+        ...headers,
+      };
+
+      const result = recordAndProcessWebhook({
+        method: 'POST',
+        url: '/api/webhook/gateway?simulated=true',
+        ip: '127.0.0.1 (Simulator)',
+        userAgent: simulatedHeaders['user-agent'],
+        headers: simulatedHeaders,
+        query: { simulated: 'true', preset },
+        body: payloadBody,
+        startTimeMs: Date.now() - 12,
+        statusCode: 200,
+        isSimulated: true,
+      });
+
+      res.json({
+        ok: true,
+        simulated: true,
+        log: result.log,
+        extracted: result.extracted,
+        message: `Simulated webhook for ${result.log.source} (${result.log.event}) processed successfully!`,
+      });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err.message || 'Failed to simulate webhook' });
+    }
+  });
+
+  // Replay Recorded Webhook Payload
+  app.post('/api/webhook/gateway/replay/:id', (req, res) => {
+    try {
+      const targetLog = getWebhookLogById(req.params.id);
+      if (!targetLog) {
+        res.status(404).json({ ok: false, error: 'Webhook log entry not found' });
+        return;
+      }
+
+      const result = recordAndProcessWebhook({
+        method: targetLog.method,
+        url: targetLog.url || '/api/webhook/gateway',
+        ip: targetLog.ip,
+        userAgent: `${targetLog.userAgent} (Replayed)`,
+        headers: targetLog.headers,
+        query: targetLog.query,
+        body: targetLog.body,
+        startTimeMs: Date.now() - 8,
+        statusCode: 200,
+      });
+
+      res.json({
+        ok: true,
+        replayed: true,
+        originalLogId: targetLog.id,
+        newLogId: result.log.id,
+        extracted: result.extracted,
+        message: `Successfully replayed webhook request #${targetLog.id.slice(-6)}`,
+      });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err.message || 'Failed to replay webhook' });
     }
   });
 

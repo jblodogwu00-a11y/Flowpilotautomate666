@@ -551,6 +551,7 @@ export type ActiveTab =
   | 'whatsapp_connect'
   | 'workflow_builder'
   | 'email_domain'
+  | 'webhooks'
   | 'settings';
 
 // Defensive payload sanitization helpers matching firebase-blueprint.json

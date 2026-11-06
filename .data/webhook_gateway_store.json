@@ -1,0 +1,63 @@
+{
+  "token": "flowpilot_sec_7x9q2m1k8p4w",
+  "isEnabled": true,
+  "mappings": {
+    "emailPath": "email",
+    "namePath": "name",
+    "phonePath": "phone",
+    "companyPath": "company",
+    "amountPath": "amount",
+    "tagsPath": "tags",
+    "targetList": "General Contacts"
+  },
+  "logs": [
+    {
+      "id": "whlog_1793996827621_warvxb",
+      "timestamp": "2026-11-06T20:27:07.621Z",
+      "url": "/api/webhook/gateway",
+      "source": "cURL / Terminal",
+      "event": "payment_intent.succeeded",
+      "status": 200,
+      "latencyMs": 1,
+      "method": "POST",
+      "ip": "127.0.0.1",
+      "userAgent": "curl/7.88.1",
+      "headers": {
+        "host": "localhost:3000",
+        "user-agent": "curl/7.88.1",
+        "accept": "*/*",
+        "content-type": "application/json",
+        "x-flowpilot-secret": "flowpilot_sec_7x9q2m1k8p4w",
+        "content-length": "187"
+      },
+      "query": {},
+      "body": {
+        "type": "payment_intent.succeeded",
+        "data": {
+          "object": {
+            "amount": 9900,
+            "currency": "usd",
+            "customer_details": {
+              "name": "Sarah Connor",
+              "email": "sarah.connor@skyline.org",
+              "phone": "+14155551984"
+            }
+          }
+        }
+      },
+      "parsedFields": {
+        "fullName": "Sarah Connor",
+        "email": "sarah.connor@skyline.org",
+        "phone": "+14155551984",
+        "amount": 99,
+        "tags": [
+          "payment_intent_succeeded"
+        ],
+        "listName": "General Contacts",
+        "stage": "customer"
+      },
+      "actionTaken": "Extracted contact Sarah Connor (payment_intent_succeeded)",
+      "isSimulated": false
+    }
+  ]
+}

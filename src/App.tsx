@@ -26,6 +26,7 @@ import {
   ChevronRight,
   Plus,
   Sparkles,
+  Radio,
 } from 'lucide-react';
 
 
@@ -95,6 +96,7 @@ import { AutomationWorkflowBuilder } from './components/AutomationWorkflowBuilde
 import { AutomationBuilderUI } from './components/AutomationBuilderUI';
 import { PrivacyPolicyPage } from './components/PrivacyPolicyPage';
 import { CustomDomainEmailSettings } from './components/CustomDomainEmailSettings';
+import { WebhookGatewayView } from './components/WebhookGatewayView';
 
 
 import { AuthModal, AuthModalMode } from './components/AuthModal';
@@ -1462,6 +1464,7 @@ export default function App() {
     { id: 'dashboard', label: 'Command Center', icon: LayoutDashboard },
     { id: 'workflow_builder', label: 'Workflow Builder', icon: Split },
     { id: 'email_domain', label: 'Domain & DNS', icon: Globe },
+    { id: 'webhooks', label: 'Webhook Gateway', icon: Radio },
     { id: 'whatsapp_connect', label: 'WhatsApp Connect', icon: Smartphone },
     { id: 'inbox', label: 'Omnichannel Inbox', icon: Inbox, badge: unreadCount > 0 ? unreadCount : undefined },
     { id: 'contacts', label: 'CRM & Audiences', icon: Users },
@@ -2009,6 +2012,16 @@ export default function App() {
               {activeTab === 'email_domain' && (
                 <div className="py-2">
                   <CustomDomainEmailSettings
+                    onBack={() => setActiveTab('dashboard')}
+                    onNavigateToAutomations={() => setActiveTab('workflow_builder')}
+                  />
+                </div>
+              )}
+
+              {activeTab === 'webhooks' && (
+                <div className="py-2">
+                  <WebhookGatewayView
+                    automations={snapshot.automations}
                     onBack={() => setActiveTab('dashboard')}
                     onNavigateToAutomations={() => setActiveTab('workflow_builder')}
                   />

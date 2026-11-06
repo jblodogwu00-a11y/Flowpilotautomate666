@@ -8,6 +8,7 @@ import {
   ArrowUpRight,
   ShieldCheck,
   TrendingUp,
+  Radio,
 } from 'lucide-react';
 import {
   Contact,
@@ -217,6 +218,15 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
             >
               <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
               <span>Domain DNS</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => onNavigate('webhooks')}
+              className="px-3 py-2 text-xs font-medium text-white bg-slate-800 hover:bg-slate-700 border border-slate-700/80 rounded-lg transition-colors inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Radio className="w-3.5 h-3.5 text-blue-400" />
+              <span>Webhooks</span>
             </button>
 
             <button
