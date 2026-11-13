@@ -346,7 +346,12 @@ export async function sendWhatsApp(params: {
         userId: params.userId || 'default_workspace',
       }),
     });
-    return await res.json();
+    const rawText = await res.text();
+    try {
+      return JSON.parse(rawText);
+    } catch {
+      return { ok: false, detail: rawText.slice(0, 140) || `HTTP ${res.status}` };
+    }
   } catch (err: any) {
     return { ok: false, detail: err.message || 'Network error sending WhatsApp message' };
   }
@@ -644,12 +649,13 @@ export async function deliverChannelMessage(
         }),
       });
       if (waRes.ok) {
-        const waData = await waRes.json();
+        const rawWaText = await waRes.text();
+        const waData = JSON.parse(rawWaText);
         const receipt: MessageDeliveryReceipt = {
           receiptId: waData.messageId || `rcpt_wa_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
           channel: 'whatsapp',
           status: 'delivered',
-          providerUsed: 'WhatsApp QR Connect (Baileys)',
+          providerUsed: waData.provider || 'Evolution API (v2.3.5)',
           fromIdentity: resolvedFrom,
           senderName,
           toRecipient: cleanRecipient,

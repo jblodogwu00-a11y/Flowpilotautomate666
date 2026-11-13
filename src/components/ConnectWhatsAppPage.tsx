@@ -45,6 +45,7 @@ interface ConnectWhatsAppPageProps {
 }
 
 interface EvolutionApiResponse {
+  success?: boolean;
   ok: boolean;
   instanceName: string;
   userId: string;
@@ -59,6 +60,31 @@ interface EvolutionApiResponse {
   detail: string;
   checkedAt: string;
   error?: string;
+}
+
+async function safeParseApiJson<T = any>(res: Response): Promise<T> {
+  const rawText = await res.text();
+  const trimmed = rawText.trim();
+  const contentType = res.headers.get('content-type') || '';
+
+  if (
+    !trimmed ||
+    trimmed.startsWith('<') ||
+    trimmed.toLowerCase().startsWith('the page') ||
+    (contentType.includes('text/html') && !trimmed.startsWith('{'))
+  ) {
+    const preview = trimmed.replace(/\s+/g, ' ').slice(0, 140);
+    throw new Error(
+      `API endpoint returned non-JSON response (HTTP ${res.status}): ${preview || 'Empty response'}`
+    );
+  }
+
+  try {
+    return JSON.parse(trimmed) as T;
+  } catch {
+    const preview = trimmed.replace(/\s+/g, ' ').slice(0, 140);
+    throw new Error(`Invalid JSON from server (HTTP ${res.status}): ${preview}`);
+  }
 }
 
 type FirestoreSyncState = 'idle' | 'saving' | 'synced' | 'local_only' | 'error';
@@ -255,8 +281,8 @@ export const ConnectWhatsAppPage: React.FC<ConnectWhatsAppPageProps> = ({
           }),
         });
 
-        const payload = (await res.json()) as EvolutionApiResponse;
-        if (!res.ok || !payload.ok) {
+        const payload = await safeParseApiJson<EvolutionApiResponse>(res);
+        if (!res.ok || (payload.success === false && !payload.ok) || (!payload.success && !payload.ok)) {
           throw new Error(
             payload.error || payload.detail || 'Failed to initialize WhatsApp connection.'
           );
@@ -290,8 +316,8 @@ export const ConnectWhatsAppPage: React.FC<ConnectWhatsAppPageProps> = ({
         safeUid
       )}&instanceName=${encodeURIComponent(instanceName)}`;
       const res = await fetch(url);
-      const payload = (await res.json()) as EvolutionApiResponse;
-      if (!res.ok || !payload.ok) {
+      const payload = await safeParseApiJson<EvolutionApiResponse>(res);
+      if (!res.ok || (!payload.success && !payload.ok)) {
         throw new Error(payload.error || payload.detail || 'Status check failed.');
       }
       setErrorMessage(null);
@@ -387,8 +413,8 @@ export const ConnectWhatsAppPage: React.FC<ConnectWhatsAppPageProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId: safeUid, instanceName }),
       });
-      const payload = await res.json();
-      if (!res.ok || !payload.ok) {
+      const payload = await safeParseApiJson<any>(res);
+      if (!res.ok || (!payload.success && !payload.ok)) {
         throw new Error(payload.error || 'Failed to disconnect WhatsApp session.');
       }
       notifiedConnectedRef.current = false;
@@ -445,8 +471,8 @@ export const ConnectWhatsAppPage: React.FC<ConnectWhatsAppPageProps> = ({
         }),
       });
 
-      const payload = await res.json();
-      if (!res.ok || !payload.ok) {
+      const payload = await safeParseApiJson<any>(res);
+      if (!res.ok || (!payload.success && !payload.ok)) {
         throw new Error(payload.error || payload.detail || 'Failed to dispatch test message.');
       }
 
@@ -679,7 +705,11 @@ export const ConnectWhatsAppPage: React.FC<ConnectWhatsAppPageProps> = ({
                       </div>
                     ) : qrCode ? (
                       <img
-                        src={qrCode}
+                        src={
+                          qrCode.startsWith('data:image/')
+                            ? qrCode
+                            : `data:image/png;base64,${qrCode}`
+                        }
                         alt="Scan with your WhatsApp"
                         className="w-full h-full object-contain"
                         referrerPolicy="no-referrer"

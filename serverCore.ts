@@ -2333,15 +2333,44 @@ async function startServer() {
     }
   });
 
-  app.get('/api/whatsapp/status', async (req, res) => {
+  const handleLegacyWhatsAppStatus = async (req: express.Request, res: express.Response) => {
     try {
       const userId = String(req.query.userId || req.headers['x-user-id'] || 'default_workspace').trim();
 
-      // Check Firestore session first
+      // Check Evolution connection first if user is signed in
+      if (userId && userId !== 'default_workspace') {
+        try {
+          const evoStatus = await getEvolutionConnectionStatus({ userId });
+          if (evoStatus.ok) {
+            const phone = evoStatus.ownerJid
+              ? evoStatus.ownerJid.split('@')[0].replace(/[^0-9+]/g, '')
+              : '';
+            res.json({
+              success: true,
+              ok: true,
+              connected: evoStatus.status === 'open',
+              status: evoStatus.status,
+              instanceName: evoStatus.instanceName,
+              phoneNumber: phone,
+              number: phone,
+              account: evoStatus.status === 'open'
+                ? { display_phone_number: phone, verified_name: evoStatus.profileName || '' }
+                : undefined,
+              updatedAt: evoStatus.checkedAt,
+            });
+            return;
+          }
+        } catch {
+          // Fallback to Firestore / local store below
+        }
+      }
+
+      // Check Firestore session
       const sessionDoc = await getFirestoreDoc('whatsapp_sessions', userId);
       if (sessionDoc) {
         const phone = sessionDoc.number || sessionDoc.phoneNumber || '';
         res.json({
+          success: true,
           connected: Boolean(sessionDoc.connected),
           phoneNumber: phone,
           number: phone,
@@ -2354,6 +2383,7 @@ async function startServer() {
       // Fallback to active in-memory socket / session state
       const status = getWhatsAppSessionStatus(userId);
       res.json({
+        success: true,
         connected: Boolean(status.connected),
         phoneNumber: status.number || '',
         number: status.number || '',
@@ -2361,9 +2391,11 @@ async function startServer() {
         reconnectAttempts: status.reconnectAttempts || 0,
       });
     } catch (err: any) {
-      res.status(500).json({ connected: false, phoneNumber: '', number: '', error: err.message });
+      res.status(500).json({ success: false, connected: false, phoneNumber: '', number: '', error: err.message });
     }
-  });
+  };
+  app.get('/api/whatsapp/status', handleLegacyWhatsAppStatus);
+  app.get('/api/auth/whatsapp/status', handleLegacyWhatsAppStatus);
 
   // WhatsApp QR Disconnect
   const handleWhatsAppDisconnect = async (req: express.Request, res: express.Response) => {
@@ -2461,6 +2493,7 @@ async function startServer() {
   });
 
   app.get('/api/whatsapp/evolution/status', async (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
     try {
       const userId = String(req.query.userId || req.headers['x-user-id'] || '').trim();
       const instanceName = String(req.query.instanceName || '').trim() || undefined;
@@ -2472,6 +2505,7 @@ async function startServer() {
 
       if (!derivedUid || derivedUid === 'default_workspace') {
         res.status(401).json({
+          success: false,
           ok: false,
           status: 'close',
           error: 'Authenticated userId or flowpilot instanceName is required.',
@@ -2485,13 +2519,20 @@ async function startServer() {
       });
 
       if (!result.ok) {
-        res.status(502).json(result);
+        res.status(502).json({
+          success: false,
+          ...result,
+        });
         return;
       }
 
-      res.json(result);
+      res.json({
+        success: true,
+        ...result,
+      });
     } catch (err: any) {
       res.status(500).json({
+        success: false,
         ok: false,
         status: 'close',
         error: err?.message || 'Failed to poll Evolution WhatsApp status.',
@@ -2500,10 +2541,11 @@ async function startServer() {
   });
 
   app.post('/api/whatsapp/evolution/restart', async (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
     try {
       const userId = String(req.body?.userId || req.headers['x-user-id'] || '').trim();
       if (!userId || userId === 'default_workspace') {
-        res.status(401).json({ ok: false, error: 'Authentication required.' });
+        res.status(401).json({ success: false, ok: false, error: 'Authentication required.' });
         return;
       }
 
@@ -2516,9 +2558,13 @@ async function startServer() {
         forceRestart: true,
       });
 
-      res.status(result.ok ? 200 : 502).json(result);
+      res.status(result.ok ? 200 : 502).json({
+        success: result.ok,
+        ...result,
+      });
     } catch (err: any) {
       res.status(500).json({
+        success: false,
         ok: false,
         status: 'close',
         error: err?.message || 'Failed to restart Evolution WhatsApp instance.',
@@ -2527,10 +2573,11 @@ async function startServer() {
   });
 
   app.post('/api/whatsapp/evolution/disconnect', async (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
     try {
       const userId = String(req.body?.userId || req.headers['x-user-id'] || '').trim();
       if (!userId || userId === 'default_workspace') {
-        res.status(401).json({ ok: false, error: 'Authentication required.' });
+        res.status(401).json({ success: false, ok: false, error: 'Authentication required.' });
         return;
       }
 
@@ -2542,9 +2589,13 @@ async function startServer() {
         instanceName,
       });
 
-      res.status(result.ok ? 200 : 502).json(result);
+      res.status(result.ok ? 200 : 502).json({
+        success: result.ok,
+        ...result,
+      });
     } catch (err: any) {
       res.status(500).json({
+        success: false,
         ok: false,
         status: 'close',
         error: err?.message || 'Failed to disconnect Evolution WhatsApp instance.',
@@ -2558,17 +2609,22 @@ async function startServer() {
 
   /**
    * TASK 1: POST /api/whatsapp/connect
+   * - Always returns JSON (never HTML) with { success, ok, qrCode, instanceName, ... }
    * - instanceName = flowpilot-{userId} (every user gets their own instance)
    * - Call Evolution: POST /instance/create with {instanceName, integration: WHATSAPP-BAILEYS}
    * - Call Evolution: GET /instance/connect/{instanceName}
-   * - Returns { ok, instanceName, status, qrCode (base64) }
    */
   const handleConnectWhatsApp = async (req: express.Request, res: express.Response) => {
+    res.setHeader('Content-Type', 'application/json');
     try {
-      const userId = String(req.body?.userId || req.headers['x-user-id'] || '').trim();
+      const userId = String(
+        req.body?.userId || req.query?.userId || req.headers['x-user-id'] || ''
+      ).trim();
       if (!userId || userId === 'default_workspace') {
         res.status(401).json({
+          success: false,
           ok: false,
+          status: 'close',
           error: 'Please sign in before connecting WhatsApp.',
         });
         return;
@@ -2594,22 +2650,32 @@ async function startServer() {
       });
 
       if (!result.ok) {
-        res.status(502).json(result);
+        res.status(502).json({
+          success: false,
+          ...result,
+        });
         return;
       }
 
       res.json({
+        success: true,
         ok: true,
         instanceName: result.instanceName,
         userId: result.userId,
         status: result.status,
         qrCode: result.qrCode, // base64 / dataUrl
         pairingCode: result.pairingCode,
+        qrPending: result.qrPending,
+        upstreamCount: result.upstreamCount,
+        ownerJid: result.ownerJid,
+        profileName: result.profileName,
+        disconnectionReasonCode: result.disconnectionReasonCode,
         detail: result.detail,
         checkedAt: result.checkedAt,
       });
     } catch (err: any) {
       res.status(500).json({
+        success: false,
         ok: false,
         status: 'close',
         error: err?.message || 'Failed to connect WhatsApp instance.',
@@ -2618,6 +2684,7 @@ async function startServer() {
   };
 
   app.post('/api/whatsapp/connect', handleConnectWhatsApp);
+  app.post('/api/whatsapp/connect/', handleConnectWhatsApp);
 
   /**
    * Helper: Find workspace snapshot or owner record for a given userId
@@ -4725,6 +4792,27 @@ async function startServer() {
     } catch (err: any) {
       res.status(500).json({ ok: false, error: err.message || 'Failed to replay webhook' });
     }
+  });
+
+  // Guarantee ALL unmatched /api/* routes and Express middleware errors return JSON (never HTML)
+  app.all('/api/*', (req, res) => {
+    res.status(404).json({
+      success: false,
+      ok: false,
+      error: `API route not found: ${req.method} ${req.originalUrl}`,
+    });
+  });
+
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (req.path.startsWith('/api')) {
+      res.status(err?.status || 500).json({
+        success: false,
+        ok: false,
+        error: err?.message || 'Internal server API error.',
+      });
+      return;
+    }
+    next(err);
   });
 
   // Bind port 3000 immediately so container health checks succeed without waiting on Vite warm-up
