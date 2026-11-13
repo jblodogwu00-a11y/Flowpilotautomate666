@@ -1413,6 +1413,53 @@
         "status",
         "createdAt"
       ]
+    },
+    "WhatsAppConnection": {
+      "title": "WhatsAppConnection",
+      "description": "Evolution API WhatsApp instance connection state linked to a logged-in user.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "UID of the logged-in user owning this WhatsApp connection.",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "instanceName": {
+          "type": "string",
+          "description": "Evolution API instance identifier formatted as flowpilot-<uid>.",
+          "maxLength": 160,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "status": {
+          "type": "string",
+          "description": "Current Evolution API WhatsApp session state.",
+          "enum": [
+            "open",
+            "close",
+            "connecting"
+          ]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when the connection record was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when the connection status was last updated."
+        }
+      },
+      "required": [
+        "userId",
+        "instanceName",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -1479,6 +1526,10 @@
     "/whatsapp_qr/{userId}": {
       "schema": "WhatsAppQr",
       "description": "Baileys WhatsApp QR code stored in Firestore doc userId."
+    },
+    "/whatsapp_connections/{connectionId}": {
+      "schema": "WhatsAppConnection",
+      "description": "Evolution API WhatsApp connection records keyed by user UID."
     }
   }
 }

@@ -1,5 +1,6 @@
 import { getWorkflowById, createFollowUpJob } from './db.js';
 import { WorkflowRecord, DelayUnit, FollowUpJobRecord } from './types.js';
+import { sendWhatsAppViaEvolution, buildEvolutionInstanceName } from '../evolutionApi.js';
 import { sendWhatsAppMessage } from '../../services/whatsappBaileysService.js';
 import { sendEmailAsUser } from '../customDomainEmail.js';
 
@@ -215,7 +216,11 @@ export async function executeWorkflow(
 
         let delivered = false;
         try {
-          if (options.sock && typeof options.sock.sendMessage === 'function') {
+          const instanceName = buildEvolutionInstanceName(targetUser);
+          const evoRes = await sendWhatsAppViaEvolution(instanceName, leadPhone, messageText);
+          if (evoRes.ok) {
+            delivered = true;
+          } else if (options.sock && typeof options.sock.sendMessage === 'function') {
             await options.sock.sendMessage(leadPhone, { text: messageText });
             delivered = true;
           } else {

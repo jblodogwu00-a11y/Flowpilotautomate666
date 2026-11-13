@@ -455,6 +455,21 @@ service cloud.firestore {
       data.updatedAt is timestamp;
     }
 
+    function isValidWhatsAppConnection(data) {
+      return data.keys().hasAll([
+        'userId', 'instanceName', 'status', 'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'userId', 'instanceName', 'status', 'createdAt', 'updatedAt'
+      ]) &&
+      data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 && data.userId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.userId == request.auth.uid &&
+      data.instanceName is string && data.instanceName.size() >= 1 && data.instanceName.size() <= 160 && data.instanceName.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.status is string && data.status.size() <= 20 && data.status in ['open', 'close', 'connecting'] &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
     // =========================================================================
     // 3. COLLECTION RULES
     // =========================================================================
@@ -990,11 +1005,46 @@ service cloud.firestore {
 
     // Custom Domain Email Automation (Free Resend Plan Compatible - Shared Domain for 2 Users)
     match /email_domains/{domain} {
-      allow read, write: if true;
+      allow get: if isAdmin();
+      allow list: if false;
+      allow create, update, delete: if isAdmin();
     }
 
     match /email_users/{userId} {
-      allow read, write: if true;
+      allow get: if isVerified() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+      allow list: if false;
+      allow create, update, delete: if isAdmin();
+    }
+
+    // Evolution API WhatsApp Connections (QR Connect State per Logged-In User)
+    match /whatsapp_connections/{connectionId} {
+      allow get: if isVerified() &&
+        isValidId(connectionId) &&
+        (connectionId == request.auth.uid || isAdmin());
+      allow list: if isVerified() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if isVerified() &&
+        isValidId(connectionId) &&
+        (connectionId == request.auth.uid || isAdmin()) &&
+        isValidWhatsAppConnection(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isVerified() &&
+        isValidId(connectionId) &&
+        isValidWhatsAppConnection(incoming()) &&
+        incoming().userId == existing().userId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() || (
+            existing().userId == request.auth.uid && (
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'instanceName', 'status', 'updatedAt'
+              ])
+            )
+          )
+        );
+      allow delete: if isVerified() &&
+        isValidId(connectionId) &&
+        (connectionId == request.auth.uid || existing().userId == request.auth.uid || isAdmin());
     }
   }
 }

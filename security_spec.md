@@ -8,7 +8,8 @@
 4. **Strict Key & Schema Invariant**: Every `create` and `update` must pass `isValid[Entity](incoming())`, enforcing `hasAll` and `hasOnly` on document keys, bounded string lengths, bounded list lengths, and valid enum values.
 5. **Temporal & Immutable Field Invariant**: `createdAt` and `updatedAt` must equal `request.time` on `create`. On `update`, `ownerId`, `workspaceId`, and `createdAt` are immutable, and `updatedAt` must equal `request.time`.
 6. **Terminal State Locking Invariant**: Once a `TaskItem` reaches `status == 'completed'`, or an `Automation` / `CaptureAsset` / `ChatbotFlow` reaches `status == 'archived'`, subsequent non-admin updates are rejected.
-7. **Zero-Cost List Query Invariant**: Every `allow list` rule enforces `resource.data.ownerId == request.auth.uid` without calling `get()` or `exists()`.
+7. **Zero-Cost List Query Invariant**: Every `allow list` rule enforces `resource.data.ownerId == request.auth.uid` (or `resource.data.userId == request.auth.uid` for user-scoped WhatsApp records) without calling `get()` or `exists()`.
+8. **WhatsApp Connection Identity Invariant**: Every document in `/whatsapp_connections/{connectionId}` must match `userId == request.auth.uid`, valid `instanceName` matching `^[a-zA-Z0-9_\\-]+$`, strict `status in ['open', 'close', 'connecting']`, and server-enforced timestamps (`createdAt`, `updatedAt`).
 
 ---
 
@@ -25,4 +26,6 @@
 9. **Payload 9 (Immortal Field Mutation)**: User updates a Contact changing `ownerId` or `createdAt` to a new value. -> **PERMISSION_DENIED**
 10. **Payload 10 (Terminal State Re-opening Bypass)**: Non-admin user attempts to update a TaskItem whose existing `status` is already `'completed'`. -> **PERMISSION_DENIED**
 11. **Payload 11 (Cross-Tenant PII Read)**: Authenticated user `uid_attacker` attempts `get` on `/users/uid_victim/private/default`. -> **PERMISSION_DENIED**
-12. **Payload 12 (Unfiltered Cross-Tenant List Scraping)**: Authenticated user `uid_attacker` runs an unfiltered `list` query across `/contacts` without filtering `ownerId == request.auth.uid`. -> **PERMISSION_DENIED**
+12. **Payload 12 (Unfiltered Cross-Tenant List Scraping)**: Authenticated user `uid_attacker` runs an unfiltered `list` query across `/contacts` or `/whatsapp_connections` without filtering ownership. -> **PERMISSION_DENIED**
+13. **Payload 13 (WhatsApp Connection Identity Spoofing & Status Poisoning)**: Authenticated user attempts to write `/whatsapp_connections/uid_victim` or set an invalid status (`status: "hacked"` or shadow field `isAdmin: true`). -> **PERMISSION_DENIED**
+

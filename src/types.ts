@@ -549,6 +549,7 @@ export type ActiveTab =
   | 'funnels'
   | 'chatbots'
   | 'whatsapp_connect'
+  | 'connect_whatsapp'
   | 'workflow_builder'
   | 'email_domain'
   | 'webhooks'

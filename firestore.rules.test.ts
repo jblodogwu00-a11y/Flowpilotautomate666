@@ -150,4 +150,30 @@ export const DIRTY_DOZEN_TESTS: DirtyDozenTestCase[] = [
     auth: { uid: 'uid_attacker', email: 'attacker@example.com', email_verified: true },
     expectedResult: 'PERMISSION_DENIED',
   },
+  {
+    id: 13,
+    name: 'Identity Spoofing on WhatsAppConnection Create',
+    operation: 'create',
+    path: '/whatsapp_connections/uid_victim',
+    auth: { uid: 'uid_attacker', email: 'attacker@example.com', email_verified: true },
+    payload: {
+      userId: 'uid_victim',
+      instanceName: 'flowpilot-uid_victim',
+      status: 'open',
+    },
+    expectedResult: 'PERMISSION_DENIED',
+  },
+  {
+    id: 14,
+    name: 'Status Poisoning & Shadow Field on WhatsAppConnection Update',
+    operation: 'update',
+    path: '/whatsapp_connections/uid_owner',
+    auth: { uid: 'uid_owner', email: 'owner@example.com', email_verified: true },
+    payload: {
+      instanceName: 'flowpilot-uid_owner',
+      status: 'hijacked',
+      bypassAuth: true,
+    },
+    expectedResult: 'PERMISSION_DENIED',
+  },
 ];

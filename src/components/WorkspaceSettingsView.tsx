@@ -1635,20 +1635,20 @@ export const WorkspaceSettingsView: React.FC<WorkspaceSettingsViewProps> = ({
                   />
                 </div>
 
-                {/* WhatsApp QR Connect (Serlzo Style) */}
+                {/* WhatsApp QR Connect (Evolution API Engine) */}
                 <div className="p-4 rounded-xl bg-gradient-to-r from-emerald-50 to-white border-2 border-emerald-500/30 space-y-3 shadow-2xs">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-xs font-bold uppercase tracking-wider text-emerald-800 flex items-center gap-1.5">
                       <Smartphone className="w-4 h-4 text-emerald-600" />
-                      <span>WhatsApp QR Connect (Serlzo Style)</span>
+                      <span>WhatsApp Engine (Evolution API v2.3.5)</span>
                     </span>
                     <span className="text-[11px] font-bold px-2 py-0.5 rounded-md bg-emerald-100 text-emerald-800">
-                      Native QR Socket
+                      Isolated Instance / User
                     </span>
                   </div>
 
                   <p className="text-xs text-slate-600 leading-relaxed">
-                    Link any normal or business WhatsApp account by scanning a QR code with your phone. Zero Meta developer apps, zero tokens, zero phone IDs.
+                    Link your personal or business WhatsApp by scanning the real-time QR code. Every user gets an isolated Baileys socket instance (<code className="font-mono text-emerald-700 bg-emerald-100/60 px-1 py-0.5 rounded">flowpilot-{'{userId}'}</code>) with auto-reconnect and direct webhook processing.
                   </p>
 
                   <button
@@ -1663,7 +1663,7 @@ export const WorkspaceSettingsView: React.FC<WorkspaceSettingsViewProps> = ({
                     className="w-full py-2.5 px-4 text-xs sm:text-sm font-bold text-white bg-[#047857] hover:bg-[#036246] rounded-xl cursor-pointer shadow-xs inline-flex items-center justify-center gap-2 transition-colors"
                   >
                     <Smartphone className="w-4 h-4" />
-                    <span>Open WhatsApp QR Connect (Normal Business)</span>
+                    <span>Open Connect WhatsApp (Live QR Code & Test Message)</span>
                   </button>
                 </div>
 

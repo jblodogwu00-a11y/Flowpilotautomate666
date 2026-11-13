@@ -27,6 +27,7 @@ import {
   Plus,
   Sparkles,
   Radio,
+  QrCode,
 } from 'lucide-react';
 
 
@@ -91,6 +92,7 @@ import { ChatbotsView } from './components/ChatbotsView';
 import { WorkspaceSettingsView } from './components/WorkspaceSettingsView';
 import { WhatsAppEmbeddedSignupPage } from './components/WhatsAppEmbeddedSignupPage';
 import { WhatsAppConnectView } from './components/WhatsAppConnectView';
+import { ConnectWhatsAppPage } from './components/ConnectWhatsAppPage';
 import { WhatsAppTemplatesView } from './components/WhatsAppTemplatesView';
 import { AutomationWorkflowBuilder } from './components/AutomationWorkflowBuilder';
 import { AutomationBuilderUI } from './components/AutomationBuilderUI';
@@ -128,8 +130,23 @@ export default function App() {
     applyThemeModeToDocument(next);
   };
 
+  // Deep link detection for /connect-whatsapp
+  const isDirectConnectWhatsAppRoute =
+    typeof window !== 'undefined' &&
+    (() => {
+      const p = window.location.pathname.toLowerCase();
+      const s = new URLSearchParams(window.location.search);
+      return (
+        p === '/connect-whatsapp' ||
+        p === '/connect-whatsapp/' ||
+        s.get('page') === 'connect-whatsapp' ||
+        s.get('tab') === 'connect_whatsapp'
+      );
+    })();
+
   // View state: Public Landing Page vs In-App Workspace
   const [isPublicLanding, setIsPublicLanding] = useState<boolean>(() => {
+    if (isDirectConnectWhatsAppRoute) return false;
     return !user;
   });
 
@@ -270,7 +287,9 @@ export default function App() {
   }, [user, isPublicLanding]);
 
   // Active Workspace Navigation Tab
-  const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
+  const [activeTab, setActiveTab] = useState<ActiveTab>(() =>
+    isDirectConnectWhatsAppRoute ? 'connect_whatsapp' : 'dashboard'
+  );
 
   // Modals state
   const [authModalOpen, setAuthModalOpen] = useState(false);
@@ -1465,6 +1484,7 @@ export default function App() {
     { id: 'workflow_builder', label: 'Workflow Builder', icon: Split },
     { id: 'email_domain', label: 'Domain & DNS', icon: Globe },
     { id: 'webhooks', label: 'Webhook Gateway', icon: Radio },
+    { id: 'connect_whatsapp', label: 'Connect WhatsApp', icon: QrCode },
     { id: 'whatsapp_connect', label: 'WhatsApp Connect', icon: Smartphone },
     { id: 'inbox', label: 'Omnichannel Inbox', icon: Inbox, badge: unreadCount > 0 ? unreadCount : undefined },
     { id: 'contacts', label: 'CRM & Audiences', icon: Users },
@@ -2166,6 +2186,52 @@ export default function App() {
                   onRestoreWorkspaceSnapshot={handleRestoreWorkspaceSnapshot}
                   onNavigateToWhatsAppEmbeddedSignup={navigateToWhatsAppEmbeddedSignup}
                   onNavigateToEmailSettings={navigateToEmailSettings}
+                />
+              )}
+
+              {activeTab === 'connect_whatsapp' && (
+                <ConnectWhatsAppPage
+                  onBackToDashboard={() => setActiveTab('dashboard')}
+                  onNavigateToPhonePairing={() => setActiveTab('whatsapp_connect')}
+                  onOpenAuth={() => {
+                    setAuthModalMode('signin');
+                    setAuthModalOpen(true);
+                  }}
+                  onAccountConnected={(details) => {
+                    const phoneFromJid = details.ownerJid
+                      ? details.ownerJid.split('@')[0].replace(/[^0-9+]/g, '')
+                      : undefined;
+                    updateSnapshot((prev) => ({
+                      ...prev,
+                      workspace: {
+                        ...prev.workspace,
+                        whatsappConnected: true,
+                      },
+                      privateProfile: prev.privateProfile
+                        ? {
+                            ...prev.privateProfile,
+                            whatsappConnected: true,
+                            whatsappBusinessNumber:
+                              phoneFromJid || prev.privateProfile.whatsappBusinessNumber,
+                          }
+                        : prev.privateProfile,
+                    }));
+                  }}
+                  onAccountDisconnected={() => {
+                    updateSnapshot((prev) => ({
+                      ...prev,
+                      workspace: {
+                        ...prev.workspace,
+                        whatsappConnected: false,
+                      },
+                      privateProfile: prev.privateProfile
+                        ? {
+                            ...prev.privateProfile,
+                            whatsappConnected: false,
+                          }
+                        : prev.privateProfile,
+                    }));
+                  }}
                 />
               )}
 

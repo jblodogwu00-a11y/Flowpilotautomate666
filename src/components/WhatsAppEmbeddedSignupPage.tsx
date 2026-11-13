@@ -1,26 +1,34 @@
 import React from 'react';
-import { WhatsAppConnectView, WhatsAppConnectedStatus } from './WhatsAppConnectView';
+import { ConnectWhatsAppPage, EvolutionConnectionStatus } from './ConnectWhatsAppPage';
 
 interface WhatsAppEmbeddedSignupPageProps {
   userId?: string;
   userEmail?: string;
   onBackToDashboard?: () => void;
-  onAccountConnected?: (account: WhatsAppConnectedStatus) => void;
+  onAccountConnected?: (account: { instanceName?: string; number?: string; status?: EvolutionConnectionStatus }) => void;
+  onOpenAuth?: () => void;
 }
 
 export const WhatsAppEmbeddedSignupPage: React.FC<WhatsAppEmbeddedSignupPageProps> = ({
-  userId = 'default_workspace',
-  userEmail = 'operator@flowpilot.app',
   onBackToDashboard,
   onAccountConnected,
+  onOpenAuth,
 }) => {
   return (
-    <div className="min-h-screen bg-[#F8FAFC] dark:bg-[#090D16] py-8 px-4 sm:px-6 lg:px-8">
-      <WhatsAppConnectView
-        userId={userId}
-        userEmail={userEmail}
+    <div className="min-h-screen bg-[#F8FAFC] dark:bg-[#090D16]">
+      <ConnectWhatsAppPage
         onBackToDashboard={onBackToDashboard}
-        onAccountConnected={onAccountConnected}
+        onOpenAuth={onOpenAuth}
+        onAccountConnected={(details) => {
+          const number = details.ownerJid
+            ? details.ownerJid.split('@')[0].replace(/[^0-9+]/g, '')
+            : undefined;
+          onAccountConnected?.({
+            instanceName: details.instanceName,
+            status: details.status,
+            number,
+          });
+        }}
       />
     </div>
   );

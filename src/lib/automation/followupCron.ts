@@ -1,4 +1,5 @@
 import { getPendingFollowUpJobs, updateJobStatus } from './db.js';
+import { sendWhatsAppViaEvolution, buildEvolutionInstanceName } from '../evolutionApi.js';
 import { sendWhatsAppMessage, activeSockets } from '../../services/whatsappBaileysService.js';
 import { FollowUpJobRecord } from './types.js';
 
@@ -44,18 +45,23 @@ export async function runFollowUpCron(): Promise<FollowUpCronSummary> {
       const cleanPhone = job.leadPhone;
       const messageText = job.message;
 
-      // 1. Try sending via active socket directly if available
-      const sock = activeSockets.get(targetUser) || activeSockets.get('default_workspace');
-      let delivered = false;
+      // 1. Try sending via Evolution API for this user's instance
+      const instanceName = buildEvolutionInstanceName(targetUser);
+      const evoRes = await sendWhatsAppViaEvolution(instanceName, cleanPhone, messageText);
+      let delivered = Boolean(evoRes.ok);
 
-      if (sock && typeof sock.sendMessage === 'function') {
-        const jid = cleanPhone.includes('@') ? cleanPhone : `${cleanPhone.replace(/[^0-9]/g, '')}@s.whatsapp.net`;
-        await sock.sendMessage(jid, { text: messageText });
-        delivered = true;
-      } else {
-        // Fallback to sendWhatsAppMessage service
-        const res = await sendWhatsAppMessage(targetUser, cleanPhone, messageText);
-        delivered = Boolean(res.ok);
+      if (!delivered) {
+        // Fallback to socket if active
+        const sock = activeSockets.get(targetUser) || activeSockets.get('default_workspace');
+        if (sock && typeof sock.sendMessage === 'function') {
+          const jid = cleanPhone.includes('@') ? cleanPhone : `${cleanPhone.replace(/[^0-9]/g, '')}@s.whatsapp.net`;
+          await sock.sendMessage(jid, { text: messageText });
+          delivered = true;
+        } else {
+          // Fallback to sendWhatsAppMessage service
+          const res = await sendWhatsAppMessage(targetUser, cleanPhone, messageText);
+          delivered = Boolean(res.ok);
+        }
       }
 
       await updateJobStatus(job.id, 'sent');

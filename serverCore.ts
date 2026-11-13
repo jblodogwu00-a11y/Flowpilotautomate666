@@ -52,6 +52,7 @@ import {
   deleteWorkflow,
   getWorkflowById,
   getAllFollowUpJobs,
+  createFollowUpJob,
 } from './src/lib/automation/db.js';
 import { executeWorkflow } from './src/lib/automation/runner.js';
 import {
@@ -74,6 +75,13 @@ import {
   recordAndProcessWebhook,
   getWebhookLogById,
 } from './src/lib/webhookGatewayService.js';
+import {
+  initializeEvolutionConnection,
+  getEvolutionConnectionStatus,
+  disconnectEvolutionConnection,
+  sendWhatsAppViaEvolution,
+  buildEvolutionInstanceName,
+} from './src/lib/evolutionApi.js';
 
 // Database Table: whatsapp_accounts (Linked to Logged-In User)
 export interface WhatsAppAccountRecord {
@@ -731,7 +739,8 @@ export interface RuntimeEmailConnector {
 }
 
 // ============================================================================
-// DEDICATED sendWhatsApp FUNCTION (Powered by Baileys WhatsApp QR Socket)
+// DEDICATED sendWhatsApp FUNCTION (TASK 3: Powered by Evolution API v2.3.5)
+// Calls POST /message/sendText/{instanceName} with {number: leadPhone, text}
 // ============================================================================
 export async function sendWhatsApp(params: {
   to: string;
@@ -739,26 +748,48 @@ export async function sendWhatsApp(params: {
   from?: string;
   senderName?: string;
   userId?: string;
+  instanceName?: string;
   whatsappConnector?: RuntimeWhatsAppConnector;
   templateName?: string;
   templateLanguage?: string;
 }): Promise<{ deliveredViaApi: boolean; provider: string; detail: string; messageId?: string }> {
+  const targetUser = params.userId || 'default_workspace';
+  const instance = params.instanceName || buildEvolutionInstanceName(targetUser);
+
   try {
-    const targetUser = params.userId || 'default_workspace';
-    const result = await sendWhatsAppMessage(targetUser, params.to, params.body);
-    return {
-      deliveredViaApi: true,
-      provider: 'WhatsApp QR Connect (Baileys)',
-      detail: result.detail,
-      messageId: result.messageId,
-    };
+    const evoResult = await sendWhatsAppViaEvolution(instance, params.to, params.body);
+    if (evoResult.ok) {
+      return {
+        deliveredViaApi: true,
+        provider: 'Evolution API (v2.3.5)',
+        detail: evoResult.detail,
+        messageId: evoResult.messageId,
+      };
+    }
+
+    // Secondary fallback to active Baileys socket if available
+    try {
+      const fallbackResult = await sendWhatsAppMessage(targetUser, params.to, params.body);
+      return {
+        deliveredViaApi: true,
+        provider: 'WhatsApp QR (Fallback Socket)',
+        detail: fallbackResult.detail,
+        messageId: fallbackResult.messageId,
+      };
+    } catch {
+      return {
+        deliveredViaApi: false,
+        provider: 'Evolution API (v2.3.5)',
+        detail: evoResult.error || evoResult.detail,
+      };
+    }
   } catch (err: any) {
-    console.warn('[sendWhatsApp] Baileys socket error:', err.message);
+    console.warn('[sendWhatsApp] Evolution API send error:', err?.message || err);
     const formatted = formatWhatsAppNumber(params.to);
     return {
       deliveredViaApi: false,
-      provider: 'WhatsApp QR Connect',
-      detail: err.message || `Dispatched to linked WhatsApp device (+${formatted})`,
+      provider: 'Evolution API (v2.3.5)',
+      detail: err?.message || `Dispatched to WhatsApp (+${formatted})`,
     };
   }
 }
@@ -2347,28 +2378,529 @@ async function startServer() {
   app.post('/api/whatsapp/disconnect', handleWhatsAppDisconnect);
   app.post('/api/auth/whatsapp/disconnect', handleWhatsAppDisconnect);
 
-  // WhatsApp QR Send
+  // WhatsApp Send (Dispatches directly via Evolution API POST /message/sendText/{instanceName})
   const handleWhatsAppSend = async (req: express.Request, res: express.Response) => {
     try {
-      const { to, message, text, body, userId } = req.body || {};
+      const { to, message, text, body, userId, instanceName: reqInstance } = req.body || {};
       const targetPhone = String(to || '').trim();
       const content = String(message || text || body || '').trim();
       const targetUser = String(userId || req.headers['x-user-id'] || 'default_workspace').trim();
+      const instanceName = String(reqInstance || buildEvolutionInstanceName(targetUser)).trim();
 
       if (!targetPhone || !content) {
         res.status(400).json({ ok: false, error: 'Recipient number (to) and message text are required.' });
         return;
       }
 
-      const result = await sendWhatsAppMessage(targetUser, targetPhone, content);
-      res.json({ ...result });
+      const evoResult = await sendWhatsAppViaEvolution(instanceName, targetPhone, content);
+      if (evoResult.ok) {
+        res.json({
+          ok: true,
+          deliveredViaApi: true,
+          provider: 'Evolution API (v2.3.5)',
+          messageId: evoResult.messageId,
+          detail: evoResult.detail,
+        });
+        return;
+      }
+
+      // If Evolution returned an error or instance was disconnected
+      res.status(400).json({
+        ok: false,
+        provider: 'Evolution API (v2.3.5)',
+        error: evoResult.error || evoResult.detail || 'Evolution WhatsApp instance is disconnected or returned an error.',
+        detail: evoResult.detail,
+      });
     } catch (err: any) {
-      res.status(500).json({ ok: false, error: err.message || 'Failed to send WhatsApp message via Baileys socket' });
+      res.status(500).json({ ok: false, error: err.message || 'Failed to send WhatsApp message via Evolution API' });
     }
   };
   app.post('/api/whatsapp/send', handleWhatsAppSend);
   app.post('/api/whatsapp/test', handleWhatsAppSend);
+  app.post('/api/whatsapp/send-test', handleWhatsAppSend);
   app.post('/api/auth/whatsapp/test', handleWhatsAppSend);
+
+  // ==========================================================================
+  // EVOLUTION API WHATSAPP QR CONNECT PROXY (/api/whatsapp/evolution/*)
+  // ==========================================================================
+  app.post('/api/whatsapp/evolution/init', async (req, res) => {
+    try {
+      const userId = String(req.body?.userId || req.headers['x-user-id'] || '').trim();
+      if (!userId || userId === 'default_workspace') {
+        res.status(401).json({
+          ok: false,
+          error: 'Please sign in before initializing a WhatsApp connection.',
+        });
+        return;
+      }
+
+      const instanceName = req.body?.instanceName
+        ? String(req.body.instanceName).trim()
+        : undefined;
+      const forceRestart = Boolean(req.body?.forceRestart);
+
+      const result = await initializeEvolutionConnection({
+        userId,
+        instanceName,
+        forceRestart,
+      });
+
+      if (!result.ok) {
+        res.status(502).json(result);
+        return;
+      }
+
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({
+        ok: false,
+        status: 'close',
+        error: err?.message || 'Failed to initialize Evolution WhatsApp connection.',
+      });
+    }
+  });
+
+  app.get('/api/whatsapp/evolution/status', async (req, res) => {
+    try {
+      const userId = String(req.query.userId || req.headers['x-user-id'] || '').trim();
+      const instanceName = String(req.query.instanceName || '').trim() || undefined;
+      const derivedUid =
+        userId ||
+        (instanceName && instanceName.startsWith('flowpilot-')
+          ? instanceName.slice('flowpilot-'.length)
+          : '');
+
+      if (!derivedUid || derivedUid === 'default_workspace') {
+        res.status(401).json({
+          ok: false,
+          status: 'close',
+          error: 'Authenticated userId or flowpilot instanceName is required.',
+        });
+        return;
+      }
+
+      const result = await getEvolutionConnectionStatus({
+        userId: derivedUid,
+        instanceName,
+      });
+
+      if (!result.ok) {
+        res.status(502).json(result);
+        return;
+      }
+
+      res.json(result);
+    } catch (err: any) {
+      res.status(500).json({
+        ok: false,
+        status: 'close',
+        error: err?.message || 'Failed to poll Evolution WhatsApp status.',
+      });
+    }
+  });
+
+  app.post('/api/whatsapp/evolution/restart', async (req, res) => {
+    try {
+      const userId = String(req.body?.userId || req.headers['x-user-id'] || '').trim();
+      if (!userId || userId === 'default_workspace') {
+        res.status(401).json({ ok: false, error: 'Authentication required.' });
+        return;
+      }
+
+      const instanceName = req.body?.instanceName
+        ? String(req.body.instanceName).trim()
+        : undefined;
+      const result = await initializeEvolutionConnection({
+        userId,
+        instanceName,
+        forceRestart: true,
+      });
+
+      res.status(result.ok ? 200 : 502).json(result);
+    } catch (err: any) {
+      res.status(500).json({
+        ok: false,
+        status: 'close',
+        error: err?.message || 'Failed to restart Evolution WhatsApp instance.',
+      });
+    }
+  });
+
+  app.post('/api/whatsapp/evolution/disconnect', async (req, res) => {
+    try {
+      const userId = String(req.body?.userId || req.headers['x-user-id'] || '').trim();
+      if (!userId || userId === 'default_workspace') {
+        res.status(401).json({ ok: false, error: 'Authentication required.' });
+        return;
+      }
+
+      const instanceName = req.body?.instanceName
+        ? String(req.body.instanceName).trim()
+        : undefined;
+      const result = await disconnectEvolutionConnection({
+        userId,
+        instanceName,
+      });
+
+      res.status(result.ok ? 200 : 502).json(result);
+    } catch (err: any) {
+      res.status(500).json({
+        ok: false,
+        status: 'close',
+        error: err?.message || 'Failed to disconnect Evolution WhatsApp instance.',
+      });
+    }
+  });
+
+  // ==========================================================================
+  // TASK 1 & TASK 2: EVOLUTION WHATSAPP CONNECT & EVOLUTION WEBHOOK
+  // ==========================================================================
+
+  /**
+   * TASK 1: POST /api/whatsapp/connect
+   * - instanceName = flowpilot-{userId} (every user gets their own instance)
+   * - Call Evolution: POST /instance/create with {instanceName, integration: WHATSAPP-BAILEYS}
+   * - Call Evolution: GET /instance/connect/{instanceName}
+   * - Returns { ok, instanceName, status, qrCode (base64) }
+   */
+  const handleConnectWhatsApp = async (req: express.Request, res: express.Response) => {
+    try {
+      const userId = String(req.body?.userId || req.headers['x-user-id'] || '').trim();
+      if (!userId || userId === 'default_workspace') {
+        res.status(401).json({
+          ok: false,
+          error: 'Please sign in before connecting WhatsApp.',
+        });
+        return;
+      }
+
+      const instanceName = req.body?.instanceName
+        ? String(req.body.instanceName).trim()
+        : `flowpilot-${userId}`.slice(0, 160);
+
+      const forceRestart = Boolean(req.body?.forceRestart || req.body?.reconnect);
+      const forwardedHost = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
+      const forwardedProto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim();
+      const isLocalHost = !forwardedHost || forwardedHost.startsWith('localhost') || forwardedHost.startsWith('127.0.0.1');
+      const webhookUrl = !isLocalHost
+        ? `${forwardedProto}://${forwardedHost}/api/whatsapp/evolution-webhook`
+        : undefined;
+
+      const result = await initializeEvolutionConnection({
+        userId,
+        instanceName,
+        forceRestart,
+        webhookUrl,
+      });
+
+      if (!result.ok) {
+        res.status(502).json(result);
+        return;
+      }
+
+      res.json({
+        ok: true,
+        instanceName: result.instanceName,
+        userId: result.userId,
+        status: result.status,
+        qrCode: result.qrCode, // base64 / dataUrl
+        pairingCode: result.pairingCode,
+        detail: result.detail,
+        checkedAt: result.checkedAt,
+      });
+    } catch (err: any) {
+      res.status(500).json({
+        ok: false,
+        status: 'close',
+        error: err?.message || 'Failed to connect WhatsApp instance.',
+      });
+    }
+  };
+
+  app.post('/api/whatsapp/connect', handleConnectWhatsApp);
+
+  /**
+   * Helper: Find workspace snapshot or owner record for a given userId
+   */
+  const getWorkspaceSnapshotForUser = (userId: string) => {
+    const cleanId = String(userId || '').trim();
+    if (!cleanId) return null;
+    return (
+      serverWorkspaceSnapshotsByUid.get(cleanId) ||
+      Array.from(serverWorkspaceSnapshotsByUid.values()).find(
+        (snap: any) =>
+          snap?.workspace?.id === cleanId ||
+          snap?.workspace?.ownerId === cleanId ||
+          snap?.privateProfile?.email?.toLowerCase() === cleanId.toLowerCase()
+      ) ||
+      null
+    );
+  };
+
+  /**
+   * Helper: Execute automations for incoming WhatsApp message:
+   * 1. Call visual automation workflows (executeWorkflow)
+   * 2. Auto Responder checks:
+   *    - If text contains keyword, send reply
+   *    - If first message, send welcome
+   *    - If no reply after 1 day, schedule follow-up job
+   */
+  const runAutomation = async (userId: string, leadPhone: string, text: string) => {
+    const cleanPhone = String(leadPhone || '').replace(/[^0-9]/g, '');
+    const cleanText = String(text || '').trim();
+    const lowerText = cleanText.toLowerCase();
+    const instanceName = buildEvolutionInstanceName(userId);
+
+    console.log(`[runAutomation] User: ${userId} | Lead: +${cleanPhone} | Text: "${cleanText}"`);
+
+    const results = {
+      workflowsTriggered: 0,
+      autoRepliesSent: 0,
+      followUpScheduled: false,
+    };
+
+    // 1. Existing visual automation workflows (executeWorkflow)
+    try {
+      const userWorkflows = await getWorkflowsForUser(userId);
+      const activeWorkflows = userWorkflows.filter((w) => w.enabled);
+
+      for (const wf of activeWorkflows) {
+        let shouldTrigger = false;
+        try {
+          const nodes = JSON.parse(wf.nodesJson || '[]');
+          for (const node of nodes) {
+            const type = node.data?.nodeType || node.type || '';
+            if (type === 'trigger_whatsapp_reply') {
+              shouldTrigger = true;
+              break;
+            }
+            if (type === 'trigger_keyword') {
+              const kw = String(node.data?.triggerKeyword || node.data?.keyword || '').toLowerCase().trim();
+              if (kw && lowerText.includes(kw)) {
+                shouldTrigger = true;
+                break;
+              }
+            }
+            if (type === 'condition_message_contains') {
+              const kw = String(node.data?.keyword || '').toLowerCase().trim();
+              if (kw && lowerText.includes(kw)) {
+                shouldTrigger = true;
+                break;
+              }
+            }
+          }
+        } catch {
+          // Ignore JSON parse error
+        }
+
+        if (shouldTrigger) {
+          console.log(`[runAutomation] Triggering visual workflow "${wf.name}" (${wf.id})`);
+          await executeWorkflow(wf.id, cleanPhone, cleanText, { userId, workflowOverride: wf });
+          results.workflowsTriggered++;
+        }
+      }
+    } catch (err: any) {
+      console.warn(`[runAutomation] Visual workflow runner error:`, err?.message || err);
+    }
+
+    // 2. FlowPilot AutoResponder rules (from workspace snapshot)
+    try {
+      const snapshot: any = getWorkspaceSnapshotForUser(userId);
+      const autoResponders: any[] = Array.isArray(snapshot?.autoResponders)
+        ? snapshot.autoResponders.filter((a: any) => a.status !== 'paused')
+        : [];
+
+      let keywordMatched = false;
+
+      // Rule A: If text contains keyword, send reply
+      for (const ar of autoResponders) {
+        const kw = String(ar.triggerMessage || ar.keyword || '').toLowerCase().trim();
+        const reply = String(ar.responseMessage || ar.replyMessage || '').trim();
+        const matchType = ar.matchType || 'contains';
+
+        if (!kw || !reply) continue;
+
+        let matched = false;
+        if (matchType === 'exact') matched = lowerText === kw;
+        else if (matchType === 'startsWith') matched = lowerText.startsWith(kw);
+        else matched = lowerText.includes(kw);
+
+        if (matched) {
+          keywordMatched = true;
+          console.log(`[runAutomation] AutoResponder Keyword match: "${kw}" -> Replying to +${cleanPhone}`);
+          await sendWhatsAppViaEvolution(instanceName, cleanPhone, reply);
+          results.autoRepliesSent++;
+          ar.sentCount = (ar.sentCount || 0) + 1;
+          ar.triggeredCount = (ar.triggeredCount || 0) + 1;
+          break; // Send primary matched response
+        }
+      }
+
+      // Check lead history in inbox / contacts
+      const inboxThreads: any[] = Array.isArray(snapshot?.inboxThreads) ? snapshot.inboxThreads : [];
+      const existingThread = inboxThreads.find(
+        (t) => t.leadPhone && t.leadPhone.replace(/[^0-9]/g, '') === cleanPhone
+      );
+      const isFirstMessage = !existingThread;
+
+      // Rule B: If first message, send welcome
+      if (isFirstMessage && !keywordMatched) {
+        const welcomeResponder = autoResponders.find(
+          (ar: any) =>
+            ar.triggerMessage?.toLowerCase().includes('welcome') ||
+            ar.targetList?.toLowerCase().includes('welcome') ||
+            ar.name?.toLowerCase().includes('welcome')
+        );
+
+        const welcomeText =
+          welcomeResponder?.responseMessage ||
+          welcomeResponder?.replyMessage ||
+          snapshot?.workspace?.welcomeMessage ||
+          'Hello! Thank you for reaching out. How can we help you today?';
+
+        console.log(`[runAutomation] First message from +${cleanPhone} -> Sending welcome reply`);
+        await sendWhatsAppViaEvolution(instanceName, cleanPhone, welcomeText);
+        results.autoRepliesSent++;
+      }
+
+      // Rule C: If no reply after 1 day, send follow-up
+      // Schedules a drip job into followUpJobs table (processed automatically by followUpCron daemon)
+      try {
+        const followUpMessage =
+          snapshot?.workspace?.followUpMessage ||
+          'Hi again! Just following up to see if you had any questions on our previous message.';
+
+        const nextActionAt = Date.now() + 24 * 60 * 60 * 1000; // 1 day from now
+        await createFollowUpJob({
+          workflowId: 'evolution_autoresponder_1day',
+          userId,
+          leadPhone: cleanPhone,
+          delayValue: 1,
+          delayUnit: 'Days',
+          message: followUpMessage,
+          actionType: 'action_send_whatsapp',
+        });
+        results.followUpScheduled = true;
+        console.log(`[runAutomation] Scheduled 1-day follow-up for +${cleanPhone}`);
+      } catch (fErr: any) {
+        console.warn(`[runAutomation] Could not schedule 1-day follow-up job:`, fErr?.message || fErr);
+      }
+
+      // Record activity in CRM
+      recordServerActivity(userId, {
+        eventType: 'whatsapp_replied',
+        title: `WhatsApp from +${cleanPhone}`,
+        detail: `Lead: "${cleanText.slice(0, 80)}" · Auto-replies: ${results.autoRepliesSent}`,
+        channel: 'whatsapp',
+      });
+    } catch (err: any) {
+      console.warn(`[runAutomation] AutoResponder evaluation error:`, err?.message || err);
+    }
+
+    return results;
+  };
+
+  /**
+   * TASK 2: POST /api/whatsapp/evolution-webhook
+   * - Evolution sends messages.upsert event here
+   * - If message is fromMe, ignore it
+   * - Get leadPhone from data.key.remoteJid, text from data.message.conversation or extendedTextMessage.text
+   * - Find owner userId from instanceName: flowpilot-{userId}
+   * - Call runAutomation(userId, leadPhone, text)
+   */
+  const handleEvolutionWebhook = async (req: express.Request, res: express.Response) => {
+    const body = req.body || {};
+    const event = String(body.event || body.type || '').toUpperCase();
+    const instance = String(body.instance || body.instanceName || '').trim();
+
+    console.log(`[Evolution Webhook] Inbound event "${event}" on instance "${instance}"`);
+
+    // Acknowledge immediately to Evolution API so requests don't time out
+    res.status(200).json({ ok: true, received: true });
+
+    try {
+      // We only process message upsert events
+      if (event && !event.includes('MESSAGES_UPSERT') && !event.includes('MESSAGES.UPSERT')) {
+        return;
+      }
+
+      const data = body.data || body;
+      const key = data.key || data.message?.key || {};
+
+      // If message is fromMe, ignore it
+      if (key.fromMe === true) {
+        return;
+      }
+
+      const remoteJid = String(key.remoteJid || '').trim();
+      if (!remoteJid || remoteJid === 'status@broadcast' || remoteJid.endsWith('@g.us')) {
+        return;
+      }
+
+      // Extract lead phone number
+      const leadPhone = remoteJid.split('@')[0].replace(/[^0-9]/g, '');
+      if (!leadPhone) {
+        return;
+      }
+
+      // Extract text from data.message.conversation or extendedTextMessage.text (plus other standard wrappers)
+      const messageObj = data.message || {};
+      let text = '';
+
+      if (typeof messageObj.conversation === 'string') {
+        text = messageObj.conversation;
+      } else if (typeof messageObj.extendedTextMessage?.text === 'string') {
+        text = messageObj.extendedTextMessage.text;
+      } else if (typeof messageObj.imageMessage?.caption === 'string') {
+        text = messageObj.imageMessage.caption;
+      } else if (typeof messageObj.videoMessage?.caption === 'string') {
+        text = messageObj.videoMessage.caption;
+      } else if (typeof messageObj.buttonsResponseMessage?.selectedButtonId === 'string') {
+        text = messageObj.buttonsResponseMessage.selectedDisplayText || messageObj.buttonsResponseMessage.selectedButtonId;
+      } else if (typeof messageObj.listResponseMessage?.title === 'string') {
+        text = messageObj.listResponseMessage.title;
+      }
+
+      text = String(text || '').trim();
+      if (!text) {
+        return;
+      }
+
+      // Find owner userId from instanceName: flowpilot-{userId}
+      let userId = 'default_workspace';
+      if (instance.startsWith('flowpilot-')) {
+        userId = instance.slice('flowpilot-'.length);
+      } else if (instance) {
+        userId = instance;
+      }
+
+      console.log(`[Evolution Webhook] Process lead message: Instance "${instance}" -> User "${userId}" | Phone: +${leadPhone} | Text: "${text}"`);
+
+      // Add to inbound inbox queue so it shows in the CRM & Omnichannel Inbox
+      inboundWebhookQueue.unshift({
+        id: `inb_wa_evo_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        channel: 'whatsapp',
+        leadName: data.pushName || `WhatsApp +${leadPhone}`,
+        leadEmail: '',
+        leadPhone,
+        message: text,
+        subject: `Inbound WhatsApp (${instance})`,
+        listName: 'General Contacts',
+        receivedAt: new Date().toISOString(),
+      });
+
+      // Call automation function
+      await runAutomation(userId, leadPhone, text);
+    } catch (err: any) {
+      console.error(`[Evolution Webhook] Error processing message:`, err?.message || err);
+    }
+  };
+
+  app.post('/api/whatsapp/evolution-webhook', handleEvolutionWebhook);
+  app.post('/webhook/evolution', handleEvolutionWebhook);
+  app.get('/api/whatsapp/evolution-webhook', (_req, res) => {
+    res.json({ ok: true, service: 'FlowPilot Evolution WhatsApp Webhook Listener', status: 'ready' });
+  });
 
 
   // ==========================================================================
