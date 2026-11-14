@@ -29,7 +29,19 @@ import {
   OperationType,
 } from '../firebase';
 
-export type EvolutionConnectionStatus = 'open' | 'close' | 'connecting';
+import {
+  EVOLUTION_URL,
+  EvolutionConnectionStatus,
+  EvolutionClientSessionResult,
+  buildEvolutionInstanceName,
+  sanitizeEvolutionId,
+  createAndConnectEvolutionInstance,
+  checkEvolutionConnectionState,
+  disconnectEvolutionInstance,
+  sendEvolutionTextMessage,
+} from '../lib/evolutionClient';
+
+export type { EvolutionConnectionStatus };
 
 interface ConnectWhatsAppPageProps {
   onBackToDashboard?: () => void;
@@ -44,58 +56,10 @@ interface ConnectWhatsAppPageProps {
   onAccountDisconnected?: () => void;
 }
 
-interface EvolutionApiResponse {
-  success?: boolean;
-  ok: boolean;
-  instanceName: string;
-  userId: string;
-  status: EvolutionConnectionStatus;
-  qrCode: string | null;
-  pairingCode: string | null;
-  qrPending: boolean;
-  upstreamCount: number | null;
-  ownerJid: string | null;
-  profileName: string | null;
-  disconnectionReasonCode: number | null;
-  detail: string;
-  checkedAt: string;
-  error?: string;
-}
-
-async function safeParseApiJson<T = any>(res: Response): Promise<T> {
-  const rawText = await res.text();
-  const trimmed = rawText.trim();
-  const contentType = res.headers.get('content-type') || '';
-
-  if (
-    !trimmed ||
-    trimmed.startsWith('<') ||
-    trimmed.toLowerCase().startsWith('the page') ||
-    (contentType.includes('text/html') && !trimmed.startsWith('{'))
-  ) {
-    const preview = trimmed.replace(/\s+/g, ' ').slice(0, 140);
-    throw new Error(
-      `API endpoint returned non-JSON response (HTTP ${res.status}): ${preview || 'Empty response'}`
-    );
-  }
-
-  try {
-    return JSON.parse(trimmed) as T;
-  } catch {
-    const preview = trimmed.replace(/\s+/g, ' ').slice(0, 140);
-    throw new Error(`Invalid JSON from server (HTTP ${res.status}): ${preview}`);
-  }
-}
-
 type FirestoreSyncState = 'idle' | 'saving' | 'synced' | 'local_only' | 'error';
 
 function sanitizeIdForFirestore(raw: string): string {
-  const cleaned = String(raw || '')
-    .trim()
-    .replace(/[^a-zA-Z0-9_\-]/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '');
-  return (cleaned || 'user').slice(0, 128);
+  return sanitizeEvolutionId(raw, 'user');
 }
 
 export const ConnectWhatsAppPage: React.FC<ConnectWhatsAppPageProps> = ({
@@ -108,7 +72,7 @@ export const ConnectWhatsAppPage: React.FC<ConnectWhatsAppPageProps> = ({
   const { user, loading: authLoading } = useAuth();
 
   const safeUid = user?.uid ? sanitizeIdForFirestore(user.uid) : '';
-  const instanceName = safeUid ? `flowpilot-${safeUid}`.slice(0, 160) : '';
+  const instanceName = safeUid ? buildEvolutionInstanceName(safeUid) : '';
 
   const [status, setStatus] = useState<EvolutionConnectionStatus>('close');
   const [qrCode, setQrCode] = useState<string | null>(null);
@@ -230,7 +194,7 @@ export const ConnectWhatsAppPage: React.FC<ConnectWhatsAppPageProps> = ({
   );
 
   const applyEvolutionResponse = useCallback(
-    async (data: EvolutionApiResponse) => {
+    async (data: EvolutionClientSessionResult) => {
       setStatus(data.status);
       setQrCode(data.qrCode || null);
       setPairingCode(data.pairingCode || null);
@@ -259,9 +223,8 @@ export const ConnectWhatsAppPage: React.FC<ConnectWhatsAppPageProps> = ({
   );
 
   /**
-   * TASK 1: Connect WhatsApp
-   * Calls POST /api/whatsapp/connect
-   * Backend initializes instanceName = flowpilot-{userId} on Evolution, calls create & connect, returns QR (base64)
+   * Direct Browser -> Evolution API Connect Flow (NO /api routes)
+   * Calls POST ${EVOLUTION_URL}/instance/create and GET ${EVOLUTION_URL}/instance/connect/${instanceName}
    */
   const handleConnectWhatsApp = useCallback(
     async (forceRestart = false) => {
@@ -271,24 +234,14 @@ export const ConnectWhatsAppPage: React.FC<ConnectWhatsAppPageProps> = ({
       setErrorMessage(null);
 
       try {
-        const res = await fetch('/api/whatsapp/connect', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            userId: safeUid,
-            instanceName,
-            forceRestart,
-          }),
-        });
-
-        const payload = await safeParseApiJson<EvolutionApiResponse>(res);
-        if (!res.ok || (payload.success === false && !payload.ok) || (!payload.success && !payload.ok)) {
+        const result = await createAndConnectEvolutionInstance(safeUid, forceRestart);
+        if (!result.ok) {
           throw new Error(
-            payload.error || payload.detail || 'Failed to initialize WhatsApp connection.'
+            result.error || result.detail || 'Failed to initialize WhatsApp connection.'
           );
         }
 
-        await applyEvolutionResponse(payload);
+        await applyEvolutionResponse(result);
         setPollCountdown(5);
       } catch (err) {
         setErrorMessage(
@@ -304,7 +257,7 @@ export const ConnectWhatsAppPage: React.FC<ConnectWhatsAppPageProps> = ({
   );
 
   /**
-   * Poll status every 5 seconds until open
+   * Poll GET ${EVOLUTION_URL}/instance/connectionState/${instanceName} every 5 seconds until open
    */
   const pollStatus = useCallback(async () => {
     if (!safeUid || !instanceName || pollInFlightRef.current) return;
@@ -312,16 +265,12 @@ export const ConnectWhatsAppPage: React.FC<ConnectWhatsAppPageProps> = ({
     setIsPolling(true);
 
     try {
-      const url = `/api/whatsapp/evolution/status?userId=${encodeURIComponent(
-        safeUid
-      )}&instanceName=${encodeURIComponent(instanceName)}`;
-      const res = await fetch(url);
-      const payload = await safeParseApiJson<EvolutionApiResponse>(res);
-      if (!res.ok || (!payload.success && !payload.ok)) {
-        throw new Error(payload.error || payload.detail || 'Status check failed.');
+      const result = await checkEvolutionConnectionState(safeUid, true);
+      if (!result.ok) {
+        throw new Error(result.error || result.detail || 'Status check failed.');
       }
       setErrorMessage(null);
-      await applyEvolutionResponse(payload);
+      await applyEvolutionResponse(result);
     } catch (err) {
       setErrorMessage(
         err instanceof Error ? err.message : 'Unable to reach Evolution status endpoint.'
@@ -408,14 +357,9 @@ export const ConnectWhatsAppPage: React.FC<ConnectWhatsAppPageProps> = ({
     setIsDisconnecting(true);
     setErrorMessage(null);
     try {
-      const res = await fetch('/api/whatsapp/evolution/disconnect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: safeUid, instanceName }),
-      });
-      const payload = await safeParseApiJson<any>(res);
-      if (!res.ok || (!payload.success && !payload.ok)) {
-        throw new Error(payload.error || 'Failed to disconnect WhatsApp session.');
+      const result = await disconnectEvolutionInstance(safeUid);
+      if (!result.ok) {
+        throw new Error(result.error || 'Failed to disconnect WhatsApp session.');
       }
       notifiedConnectedRef.current = false;
       setStatus('close');
@@ -435,7 +379,7 @@ export const ConnectWhatsAppPage: React.FC<ConnectWhatsAppPageProps> = ({
   };
 
   /**
-   * Test Message Sender: Sends live WhatsApp test message via Evolution API
+   * Test Message Sender: Sends live WhatsApp test message directly via Evolution API
    */
   const handleSendTestMessage = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -460,25 +404,20 @@ export const ConnectWhatsAppPage: React.FC<ConnectWhatsAppPageProps> = ({
     setTestResultNotice(null);
 
     try {
-      const res = await fetch('/api/whatsapp/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: safeUid,
-          instanceName,
-          to: cleanPhone,
-          body: testMessageText.trim(),
-        }),
+      const result = await sendEvolutionTextMessage({
+        userId: safeUid,
+        instanceName,
+        to: cleanPhone,
+        text: testMessageText.trim(),
       });
 
-      const payload = await safeParseApiJson<any>(res);
-      if (!res.ok || (!payload.success && !payload.ok)) {
-        throw new Error(payload.error || payload.detail || 'Failed to dispatch test message.');
+      if (!result.ok) {
+        throw new Error(result.error || result.detail || 'Failed to dispatch test message.');
       }
 
       setTestResultNotice({
         type: 'success',
-        message: `✓ Test message sent to +${cleanPhone} via ${payload.provider || 'Evolution API'}! (ID: ${payload.messageId || 'ok'})`,
+        message: `✓ Test message sent to +${cleanPhone} via ${result.provider}! (ID: ${result.messageId || 'ok'})`,
       });
     } catch (err: any) {
       setTestResultNotice({
@@ -891,7 +830,7 @@ export const ConnectWhatsAppPage: React.FC<ConnectWhatsAppPageProps> = ({
               <div className="py-2.5 flex items-center justify-between gap-3">
                 <dt className="text-slate-500 dark:text-slate-400">Evolution Server</dt>
                 <dd className="font-mono font-medium text-slate-900 dark:text-slate-100 truncate max-w-[200px]">
-                  http://16.170.252.105:8080
+                  {EVOLUTION_URL}
                 </dd>
               </div>
               <div className="py-2.5 flex items-center justify-between gap-3">
@@ -915,9 +854,9 @@ export const ConnectWhatsAppPage: React.FC<ConnectWhatsAppPageProps> = ({
                 </dd>
               </div>
               <div className="py-2.5 flex items-center justify-between gap-3">
-                <dt className="text-slate-500 dark:text-slate-400">Webhook Target</dt>
+                <dt className="text-slate-500 dark:text-slate-400">Connection Mode</dt>
                 <dd className="font-mono text-slate-900 dark:text-slate-100 truncate max-w-[200px]">
-                  /api/whatsapp/evolution-webhook
+                  Direct Browser -&gt; Evolution API
                 </dd>
               </div>
               <div className="py-2.5 flex items-center justify-between gap-3">

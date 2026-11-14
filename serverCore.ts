@@ -2334,13 +2334,15 @@ async function startServer() {
   });
 
   const handleLegacyWhatsAppStatus = async (req: express.Request, res: express.Response) => {
+    res.setHeader('Content-Type', 'application/json');
     try {
       const userId = String(req.query.userId || req.headers['x-user-id'] || 'default_workspace').trim();
+      const instanceName = String(req.query.instanceName || '').trim() || undefined;
 
       // Check Evolution connection first if user is signed in
       if (userId && userId !== 'default_workspace') {
         try {
-          const evoStatus = await getEvolutionConnectionStatus({ userId });
+          const evoStatus = await getEvolutionConnectionStatus({ userId, instanceName });
           if (evoStatus.ok) {
             const phone = evoStatus.ownerJid
               ? evoStatus.ownerJid.split('@')[0].replace(/[^0-9+]/g, '')
@@ -2351,6 +2353,16 @@ async function startServer() {
               connected: evoStatus.status === 'open',
               status: evoStatus.status,
               instanceName: evoStatus.instanceName,
+              userId: evoStatus.userId,
+              qrCode: evoStatus.qrCode,
+              pairingCode: evoStatus.pairingCode,
+              qrPending: evoStatus.qrPending,
+              upstreamCount: evoStatus.upstreamCount,
+              ownerJid: evoStatus.ownerJid,
+              profileName: evoStatus.profileName,
+              disconnectionReasonCode: evoStatus.disconnectionReasonCode,
+              detail: evoStatus.detail,
+              checkedAt: evoStatus.checkedAt,
               phoneNumber: phone,
               number: phone,
               account: evoStatus.status === 'open'
@@ -2371,6 +2383,7 @@ async function startServer() {
         const phone = sessionDoc.number || sessionDoc.phoneNumber || '';
         res.json({
           success: true,
+          ok: true,
           connected: Boolean(sessionDoc.connected),
           phoneNumber: phone,
           number: phone,
@@ -2384,6 +2397,7 @@ async function startServer() {
       const status = getWhatsAppSessionStatus(userId);
       res.json({
         success: true,
+        ok: true,
         connected: Boolean(status.connected),
         phoneNumber: status.number || '',
         number: status.number || '',
@@ -2391,7 +2405,7 @@ async function startServer() {
         reconnectAttempts: status.reconnectAttempts || 0,
       });
     } catch (err: any) {
-      res.status(500).json({ success: false, connected: false, phoneNumber: '', number: '', error: err.message });
+      res.status(500).json({ success: false, ok: false, connected: false, phoneNumber: '', number: '', error: err.message });
     }
   };
   app.get('/api/whatsapp/status', handleLegacyWhatsAppStatus);
@@ -2399,12 +2413,33 @@ async function startServer() {
 
   // WhatsApp QR Disconnect
   const handleWhatsAppDisconnect = async (req: express.Request, res: express.Response) => {
+    res.setHeader('Content-Type', 'application/json');
     try {
       const userId = String(req.body?.userId || req.headers['x-user-id'] || 'default_workspace').trim();
+      const instanceName = req.body?.instanceName ? String(req.body.instanceName).trim() : undefined;
+
+      if (userId && userId !== 'default_workspace') {
+        const evoRes = await disconnectEvolutionConnection({ userId, instanceName });
+        try {
+          disconnectWhatsAppSession(userId);
+        } catch {
+          // Non-fatal fallback cleanup
+        }
+        res.json({
+          success: evoRes.ok,
+          ok: evoRes.ok,
+          instanceName: evoRes.instanceName,
+          status: 'close',
+          message: evoRes.ok ? 'WhatsApp session disconnected and logged out successfully' : evoRes.error,
+          error: evoRes.error,
+        });
+        return;
+      }
+
       await disconnectWhatsAppSession(userId);
-      res.json({ ok: true, message: 'WhatsApp session disconnected and logged out successfully' });
+      res.json({ success: true, ok: true, status: 'close', message: 'WhatsApp session disconnected and logged out successfully' });
     } catch (err: any) {
-      res.status(500).json({ ok: false, error: err.message || 'Failed to disconnect WhatsApp session' });
+      res.status(500).json({ success: false, ok: false, error: err.message || 'Failed to disconnect WhatsApp session' });
     }
   };
   app.post('/api/whatsapp/disconnect', handleWhatsAppDisconnect);

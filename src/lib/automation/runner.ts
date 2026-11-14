@@ -1,7 +1,6 @@
 import { getWorkflowById, createFollowUpJob } from './db.js';
 import { WorkflowRecord, DelayUnit, FollowUpJobRecord } from './types.js';
 import { sendWhatsAppViaEvolution, buildEvolutionInstanceName } from '../evolutionApi.js';
-import { sendWhatsAppMessage } from '../../services/whatsappBaileysService.js';
 import { sendEmailAsUser } from '../customDomainEmail.js';
 
 export interface WorkflowExecutionResult {
@@ -220,16 +219,12 @@ export async function executeWorkflow(
           const evoRes = await sendWhatsAppViaEvolution(instanceName, leadPhone, messageText);
           if (evoRes.ok) {
             delivered = true;
-          } else if (options.sock && typeof options.sock.sendMessage === 'function') {
-            await options.sock.sendMessage(leadPhone, { text: messageText });
-            delivered = true;
+            console.log(`[Workflow Runner] Auto responded to ${leadPhone} via Evolution (${instanceName}) · Workflow "${workflow.name}" (Node: ${currentId})`);
           } else {
-            const sendRes = await sendWhatsAppMessage(targetUser, leadPhone, messageText);
-            delivered = Boolean(sendRes.ok);
+            console.warn(`[Workflow Runner] Could not send WhatsApp to ${leadPhone} (${instanceName}): ${evoRes.error || evoRes.detail}`);
           }
-          console.log(`[Workflow Runner] Auto responded to ${leadPhone} via Workflow "${workflow.name}" (Node: ${currentId})`);
         } catch (sendErr: any) {
-          console.error(`[Workflow Runner] Error sending message to ${leadPhone}:`, sendErr.message);
+          console.warn(`[Workflow Runner] WhatsApp dispatch notice for ${leadPhone}:`, sendErr?.message || sendErr);
         }
 
         result.immediateActionsDispatched.push({

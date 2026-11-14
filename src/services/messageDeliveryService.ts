@@ -5,6 +5,7 @@ import {
   resolveWorkspaceSenderIdentities,
 } from '../types';
 import { getGmailAccessToken, getConnectedGmailAddress } from '../firebase';
+import { sendEvolutionTextMessage } from '../lib/evolutionClient';
 
 export interface MessageDeliveryPayload {
   channel: ChannelType;
@@ -336,25 +337,16 @@ export async function sendWhatsApp(params: {
   message: string;
   userId?: string;
 }): Promise<{ ok: boolean; messageId?: string; detail: string }> {
-  try {
-    const res = await fetch('/api/whatsapp/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        to: params.to,
-        message: params.message,
-        userId: params.userId || 'default_workspace',
-      }),
-    });
-    const rawText = await res.text();
-    try {
-      return JSON.parse(rawText);
-    } catch {
-      return { ok: false, detail: rawText.slice(0, 140) || `HTTP ${res.status}` };
-    }
-  } catch (err: any) {
-    return { ok: false, detail: err.message || 'Network error sending WhatsApp message' };
-  }
+  const result = await sendEvolutionTextMessage({
+    userId: params.userId || 'default_workspace',
+    to: params.to,
+    text: params.message,
+  });
+  return {
+    ok: result.ok,
+    messageId: result.messageId,
+    detail: result.detail,
+  };
 }
 
 
@@ -636,26 +628,20 @@ export async function deliverChannelMessage(
   const cleanRecipient = (payload.to || '').trim() || defaultRecipient;
   const webhookUrl = getStoredOutboundWebhookUrl();
 
-  // DIRECT BAILEYS QR WHATSAPP SENDER DISPATCH
+  // DIRECT EVOLUTION API WHATSAPP SENDER DISPATCH (NO BACKEND /api CALLS)
   if (payload.channel === 'whatsapp') {
     try {
-      const waRes = await fetch('/api/whatsapp/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          to: cleanRecipient,
-          message: payload.body,
-          userId: payload.workspace?.ownerId || 'default_workspace',
-        }),
+      const waResult = await sendEvolutionTextMessage({
+        userId: payload.workspace?.ownerId || 'default_workspace',
+        to: cleanRecipient,
+        text: payload.body,
       });
-      if (waRes.ok) {
-        const rawWaText = await waRes.text();
-        const waData = JSON.parse(rawWaText);
+      if (waResult.ok) {
         const receipt: MessageDeliveryReceipt = {
-          receiptId: waData.messageId || `rcpt_wa_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          receiptId: waResult.messageId || `rcpt_wa_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
           channel: 'whatsapp',
           status: 'delivered',
-          providerUsed: waData.provider || 'Evolution API (v2.3.5)',
+          providerUsed: waResult.provider || 'Evolution API v2.3.5 (Direct)',
           fromIdentity: resolvedFrom,
           senderName,
           toRecipient: cleanRecipient,
@@ -665,13 +651,13 @@ export async function deliverChannelMessage(
           listName: payload.listName || 'General Contacts',
           directLaunchUrl: `https://wa.me/${cleanRecipient.replace(/[^0-9]/g, '')}?text=${encodeURIComponent(payload.body)}`,
           timestamp: new Date().toISOString(),
-          detailMessage: waData.detail || `Delivered via Baileys WhatsApp QR to ${cleanRecipient}`,
+          detailMessage: waResult.detail || `Delivered via Evolution API to ${cleanRecipient}`,
         };
         saveReceiptToLocalHistory(receipt);
         return receipt;
       }
     } catch (waErr: any) {
-      console.warn('[deliverChannelMessage] /api/whatsapp/send notice:', waErr);
+      console.warn('[deliverChannelMessage] Evolution direct send notice:', waErr);
     }
   }
 

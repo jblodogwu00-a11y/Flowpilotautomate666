@@ -24,7 +24,7 @@ export const OFFICIAL_WHATSAPP_PROVIDERS: OfficialWhatsAppProviderSpec[] = [
     id: 'whatsapp_qr_connect',
     name: 'WhatsApp QR Connect (Baileys Native Socket)',
     badge: 'Direct Device Link',
-    apiEndpoint: '/api/whatsapp/send',
+    apiEndpoint: 'http://16.170.252.105:8080/message/sendText/{instanceName}',
     supportsReadReceipts: true,
     supportsTemplateSync: true,
     supportsInteractiveButtons: true,

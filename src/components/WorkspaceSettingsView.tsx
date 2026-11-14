@@ -21,6 +21,7 @@ import {
   Ban,
   Play,
 } from 'lucide-react';
+import { checkEvolutionConnectionState } from '../lib/evolutionClient';
 import {
   Workspace,
   UserPrivateProfile,
@@ -460,14 +461,19 @@ export const WorkspaceSettingsView: React.FC<WorkspaceSettingsViewProps> = ({
     setDeliveryReceipts(getStoredDeliveryReceipts());
 
     const targetUid = currentUserUid || workspace.ownerId || 'default_workspace';
-    fetch(`/api/auth/whatsapp/status?userId=${encodeURIComponent(targetUid)}`)
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        if (data?.connected && data?.account) {
-          setWaAccount(data.account);
+    checkEvolutionConnectionState(targetUid, false)
+      .then((evoStatus) => {
+        if (evoStatus.ok && evoStatus.status === 'open') {
+          const cleanPhone = evoStatus.ownerJid
+            ? evoStatus.ownerJid.split('@')[0].replace(/[^0-9]/g, '')
+            : '';
+          setWaAccount({
+            display_phone_number: cleanPhone ? `+${cleanPhone}` : evoStatus.instanceName,
+            verified_name: evoStatus.profileName || evoStatus.instanceName,
+          });
           setWhatsappConnected(true);
-          if (data.account.display_phone_number && !whatsappBusinessNumber) {
-            setWhatsappBusinessNumber(data.account.display_phone_number);
+          if (cleanPhone && !whatsappBusinessNumber) {
+            setWhatsappBusinessNumber(`+${cleanPhone}`);
           }
         }
       })

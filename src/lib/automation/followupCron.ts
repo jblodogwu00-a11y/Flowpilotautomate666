@@ -1,6 +1,5 @@
 import { getPendingFollowUpJobs, updateJobStatus } from './db.js';
 import { sendWhatsAppViaEvolution, buildEvolutionInstanceName } from '../evolutionApi.js';
-import { sendWhatsAppMessage, activeSockets } from '../../services/whatsappBaileysService.js';
 import { FollowUpJobRecord } from './types.js';
 
 export interface FollowUpCronSummary {
@@ -20,8 +19,8 @@ export interface FollowUpCronSummary {
 /**
  * Runs the follow-up drip job processor:
  * - Finds all followUpJobs where nextActionAt <= now and status == 'pending'
- * - Sends WhatsApp message using Baileys sock.sendMessage or sendWhatsAppMessage
- * - Updates status to 'sent'
+ * - Sends WhatsApp message exclusively via Evolution API (sendWhatsAppViaEvolution)
+ * - Updates job status to 'sent' or 'failed' cleanly
  */
 export async function runFollowUpCron(): Promise<FollowUpCronSummary> {
   const pendingJobs = await getPendingFollowUpJobs();
@@ -45,45 +44,44 @@ export async function runFollowUpCron(): Promise<FollowUpCronSummary> {
       const cleanPhone = job.leadPhone;
       const messageText = job.message;
 
-      // 1. Try sending via Evolution API for this user's instance
+      // Dispatch exclusively via Evolution API for this user's instance
       const instanceName = buildEvolutionInstanceName(targetUser);
       const evoRes = await sendWhatsAppViaEvolution(instanceName, cleanPhone, messageText);
-      let delivered = Boolean(evoRes.ok);
 
-      if (!delivered) {
-        // Fallback to socket if active
-        const sock = activeSockets.get(targetUser) || activeSockets.get('default_workspace');
-        if (sock && typeof sock.sendMessage === 'function') {
-          const jid = cleanPhone.includes('@') ? cleanPhone : `${cleanPhone.replace(/[^0-9]/g, '')}@s.whatsapp.net`;
-          await sock.sendMessage(jid, { text: messageText });
-          delivered = true;
-        } else {
-          // Fallback to sendWhatsAppMessage service
-          const res = await sendWhatsAppMessage(targetUser, cleanPhone, messageText);
-          delivered = Boolean(res.ok);
-        }
+      if (evoRes.ok) {
+        await updateJobStatus(job.id, 'sent');
+        summary.sentCount++;
+        summary.jobsProcessed.push({
+          jobId: job.id,
+          leadPhone: job.leadPhone,
+          status: 'sent',
+          messagePreview: messageText.slice(0, 80),
+        });
+        console.log(`[FollowUp Cron] ✓ Sent drip follow-up to ${cleanPhone} via ${instanceName} (Job ID: ${job.id})`);
+      } else {
+        const reason = evoRes.error || evoRes.detail || `Instance ${instanceName} is disconnected.`;
+        console.warn(`[FollowUp Cron] Notice for job ${job.id} (${cleanPhone}): ${reason}`);
+        await updateJobStatus(job.id, 'failed', reason);
+        summary.failedCount++;
+        summary.jobsProcessed.push({
+          jobId: job.id,
+          leadPhone: job.leadPhone,
+          status: 'failed',
+          messagePreview: messageText.slice(0, 80),
+          error: reason,
+        });
       }
-
-      await updateJobStatus(job.id, 'sent');
-      summary.sentCount++;
-      summary.jobsProcessed.push({
-        jobId: job.id,
-        leadPhone: job.leadPhone,
-        status: 'sent',
-        messagePreview: messageText.slice(0, 80),
-      });
-
-      console.log(`[FollowUp Cron] ✓ Sent drip follow-up to ${cleanPhone} (Job ID: ${job.id})`);
     } catch (err: any) {
-      console.error(`[FollowUp Cron] ✗ Error sending job ${job.id} to ${job.leadPhone}:`, err.message);
-      await updateJobStatus(job.id, 'failed', err.message);
+      const reason = err?.message || 'Unexpected follow-up dispatch failure';
+      console.warn(`[FollowUp Cron] Notice sending job ${job.id} to ${job.leadPhone}: ${reason}`);
+      await updateJobStatus(job.id, 'failed', reason);
       summary.failedCount++;
       summary.jobsProcessed.push({
         jobId: job.id,
         leadPhone: job.leadPhone,
         status: 'failed',
         messagePreview: job.message.slice(0, 80),
-        error: err.message,
+        error: reason,
       });
     }
   }

@@ -14,6 +14,12 @@ import {
   Sparkles,
   Copy,
 } from 'lucide-react';
+import {
+  checkEvolutionConnectionState,
+  disconnectEvolutionInstance,
+  requestEvolutionPairingCode,
+  sendEvolutionTextMessage,
+} from '../lib/evolutionClient';
 
 export interface WhatsAppConnectedStatus {
   connected: boolean;
@@ -64,31 +70,31 @@ export const WhatsAppConnectView: React.FC<WhatsAppConnectViewProps> = ({
   // Polling ref for connection status
   const pollingRef = useRef<NodeJS.Timeout | null>(null);
 
-  // 1. Fetch connection status from backend
+  // 1. Fetch connection status directly from Evolution API
   const checkStatus = async () => {
     try {
-      const res = await fetch(`/api/whatsapp/status?userId=${encodeURIComponent(userId)}`);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.connected && !status.connected) {
-          const newStatus = {
-            connected: true,
-            number: data.phoneNumber || data.number || phoneNumber,
-            connectedAt: data.updatedAt || new Date().toISOString(),
-          };
-          setStatus(newStatus);
-          setPairingCode('');
-          setTimerActive(false);
-          setErrorNotice(null);
-          if (onAccountConnected) {
-            onAccountConnected(newStatus);
-          }
-        } else if (!data.connected && status.connected) {
-          setStatus({
-            connected: false,
-            number: '',
-          });
+      const result = await checkEvolutionConnectionState(userId, false);
+      if (result.ok && result.status === 'open' && !status.connected) {
+        const cleanNum = result.ownerJid
+          ? result.ownerJid.split('@')[0].replace(/[^0-9]/g, '')
+          : phoneNumber;
+        const newStatus = {
+          connected: true,
+          number: cleanNum || phoneNumber,
+          connectedAt: result.checkedAt || new Date().toISOString(),
+        };
+        setStatus(newStatus);
+        setPairingCode('');
+        setTimerActive(false);
+        setErrorNotice(null);
+        if (onAccountConnected) {
+          onAccountConnected(newStatus);
         }
+      } else if (result.ok && result.status !== 'open' && status.connected) {
+        setStatus({
+          connected: false,
+          number: '',
+        });
       }
     } catch {
       // background poll silently
@@ -97,7 +103,7 @@ export const WhatsAppConnectView: React.FC<WhatsAppConnectViewProps> = ({
 
   useEffect(() => {
     checkStatus();
-    pollingRef.current = setInterval(checkStatus, 3000);
+    pollingRef.current = setInterval(checkStatus, 5000);
     return () => {
       if (pollingRef.current) clearInterval(pollingRef.current);
     };
@@ -119,7 +125,7 @@ export const WhatsAppConnectView: React.FC<WhatsAppConnectViewProps> = ({
     return () => clearInterval(timer);
   }, [timerActive, secondsRemaining]);
 
-  // Request 8-digit pairing code from Baileys
+  // Request 8-digit pairing code directly from Evolution API
   const handleGetPairingCode = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
 
@@ -134,17 +140,8 @@ export const WhatsAppConnectView: React.FC<WhatsAppConnectViewProps> = ({
     setCopied(false);
 
     try {
-      const res = await fetch('/api/whatsapp/pairing-code', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId,
-          phoneNumber: clean,
-        }),
-      });
-
-      const data = await res.json();
-      if (!res.ok || !data.ok) {
+      const data = await requestEvolutionPairingCode(userId, clean);
+      if (!data.ok) {
         throw new Error(data.error || 'Failed to request pairing code.');
       }
 
@@ -160,7 +157,7 @@ export const WhatsAppConnectView: React.FC<WhatsAppConnectViewProps> = ({
         return;
       }
 
-      setPairingCode(data.pairingCode);
+      setPairingCode(data.pairingCode || '');
       setSecondsRemaining(60);
       setTimerActive(true);
     } catch (err: any) {
@@ -181,19 +178,15 @@ export const WhatsAppConnectView: React.FC<WhatsAppConnectViewProps> = ({
     }
   };
 
-  // Disconnect handler
+  // Disconnect handler directly via Evolution API
   const handleDisconnect = async () => {
     if (!window.confirm('Are you sure you want to disconnect this WhatsApp account? Automated workflows will be paused.')) {
       return;
     }
     setDisconnecting(true);
     try {
-      const res = await fetch('/api/whatsapp/disconnect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId }),
-      });
-      if (res.ok) {
+      const result = await disconnectEvolutionInstance(userId);
+      if (result.ok) {
         setStatus({
           connected: false,
           number: '',
@@ -203,6 +196,8 @@ export const WhatsAppConnectView: React.FC<WhatsAppConnectViewProps> = ({
         if (onAccountDisconnected) {
           onAccountDisconnected();
         }
+      } else {
+        setErrorNotice(result.error || 'Failed to disconnect session.');
       }
     } catch (err: any) {
       setErrorNotice(err.message || 'Failed to disconnect session.');
@@ -211,7 +206,7 @@ export const WhatsAppConnectView: React.FC<WhatsAppConnectViewProps> = ({
     }
   };
 
-  // Send Test Message
+  // Send Test Message directly via Evolution API
   const handleSendTestMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!testNumber.trim() || !testMessage.trim()) {
@@ -224,25 +219,20 @@ export const WhatsAppConnectView: React.FC<WhatsAppConnectViewProps> = ({
     setTestErrorNotice(null);
 
     try {
-      const res = await fetch('/api/whatsapp/send', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId,
-          to: testNumber.trim(),
-          message: testMessage.trim(),
-        }),
+      const result = await sendEvolutionTextMessage({
+        userId,
+        to: testNumber.trim(),
+        text: testMessage.trim(),
       });
 
-      const data = await res.json();
-      if (res.ok && data.ok) {
-        setTestSuccessNotice(`Message sent successfully to +${data.to}! (ID: ${data.messageId})`);
+      if (result.ok) {
+        setTestSuccessNotice(`Message sent successfully to +${result.to}! (ID: ${result.messageId})`);
         setTestErrorNotice(null);
       } else {
-        setTestErrorNotice(data.error || 'Failed to send test message.');
+        setTestErrorNotice(result.error || result.detail || 'Failed to send test message.');
       }
     } catch (err: any) {
-      setTestErrorNotice(err.message || 'Network error connecting to Baileys send endpoint.');
+      setTestErrorNotice(err.message || 'Network error connecting to Evolution API.');
     } finally {
       setIsSendingTest(false);
     }
