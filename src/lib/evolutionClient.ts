@@ -1,7 +1,8 @@
 import QRCode from 'qrcode';
 
-export const EVOLUTION_URL = 'http://16.170.252.105:8080';
-export const EVOLUTION_API_KEY = 'stakecut-secret-12345';
+export const EVOLUTION_URL = 'https://incomestream.duckdns.org';
+export const API_KEY = 'stakecut-secret-12345';
+export const EVOLUTION_API_KEY = API_KEY;
 
 export type EvolutionConnectionStatus = 'open' | 'close' | 'connecting';
 
@@ -65,17 +66,6 @@ export function normalizeEvolutionStatus(raw: unknown): EvolutionConnectionStatu
 
 function formatBrowserFetchError(err: unknown, endpoint: string): string {
   const rawMessage = err instanceof Error ? err.message : String(err || 'Network error');
-  const isHttpsPage =
-    typeof window !== 'undefined' && window.location?.protocol === 'https:';
-  const isMixedOrNetworkError =
-    rawMessage.toLowerCase().includes('failed to fetch') ||
-    rawMessage.toLowerCase().includes('networkerror') ||
-    rawMessage.toLowerCase().includes('load failed');
-
-  if (isHttpsPage && isMixedOrNetworkError && EVOLUTION_URL.startsWith('http://')) {
-    return `Browser blocked or failed direct request to ${EVOLUTION_URL}${endpoint} (${rawMessage}). Since this app is loaded over HTTPS while Evolution API uses HTTP, allow "Insecure content" in your browser Site Settings for this site or serve Evolution API over HTTPS.`;
-  }
-
   return `${rawMessage} (${EVOLUTION_URL}${endpoint})`;
 }
 
@@ -292,6 +282,8 @@ export async function createAndConnectEvolutionInstance(
         });
         const restartData = await parseEvolutionResponse(restartRes);
         console.log(`[Evolution] POST ${restartEndpoint} (${restartRes.status}):`, restartData);
+        qrCode = null;
+        pairingCode = null;
         await new Promise((r) => setTimeout(r, 600));
       } catch (restartErr) {
         console.warn('[Evolution] instance restart notice:', restartErr);
@@ -303,6 +295,7 @@ export async function createAndConnectEvolutionInstance(
     let status = normalizeEvolutionStatus(meta.stateRaw);
 
     // 3. Call GET /instance/connect/${instanceName} directly to get base64 QR
+    let connectErrorMessage: string | null = null;
     if (status !== 'open' && !qrCode) {
       const connectEndpoint = `/instance/connect/${encodeURIComponent(instanceName)}`;
       const connectRes = await fetch(`${EVOLUTION_URL}${connectEndpoint}`, {
@@ -311,6 +304,15 @@ export async function createAndConnectEvolutionInstance(
       });
       const connectData = await parseEvolutionResponse(connectRes);
       console.log(`[Evolution] GET ${connectEndpoint} (${connectRes.status}):`, connectData);
+
+      if (!connectRes.ok) {
+        connectErrorMessage =
+          connectData?.response?.message?.[0] ||
+          connectData?.message ||
+          connectData?.error ||
+          `Evolution /instance/connect returned HTTP ${connectRes.status}`;
+        console.error(`[Evolution] GET ${connectEndpoint} error:`, connectRes.status, connectData);
+      }
 
       if (typeof connectData?.count === 'number') {
         upstreamCount = connectData.count;
@@ -321,7 +323,7 @@ export async function createAndConnectEvolutionInstance(
       pairingCode = extracted.pairingCode || pairingCode;
 
       // Retry once if Baileys is still warming up count: 0 without base64 yet
-      if (!qrCode && (connectData?.count === 0 || !connectData?.base64)) {
+      if (connectRes.ok && !qrCode && (connectData?.count === 0 || !connectData?.base64)) {
         await new Promise((r) => setTimeout(r, 850));
         const retryRes = await fetch(`${EVOLUTION_URL}${connectEndpoint}`, {
           method: 'GET',
@@ -329,6 +331,15 @@ export async function createAndConnectEvolutionInstance(
         });
         const retryData = await parseEvolutionResponse(retryRes);
         console.log(`[Evolution] GET ${connectEndpoint} retry (${retryRes.status}):`, retryData);
+
+        if (!retryRes.ok) {
+          connectErrorMessage =
+            retryData?.response?.message?.[0] ||
+            retryData?.message ||
+            retryData?.error ||
+            `Evolution /instance/connect retry returned HTTP ${retryRes.status}`;
+          console.error(`[Evolution] GET ${connectEndpoint} retry error:`, retryRes.status, retryData);
+        }
 
         if (typeof retryData?.count === 'number') {
           upstreamCount = retryData.count;
@@ -340,6 +351,24 @@ export async function createAndConnectEvolutionInstance(
 
       meta = await fetchInstanceMetadata(instanceName);
       status = normalizeEvolutionStatus(meta.stateRaw);
+    }
+
+    if (status !== 'open' && !qrCode && connectErrorMessage) {
+      return {
+        ok: false,
+        instanceName,
+        userId: cleanUid,
+        status,
+        qrCode: null,
+        pairingCode,
+        upstreamCount,
+        ownerJid: meta.ownerJid,
+        profileName: meta.profileName,
+        disconnectionReasonCode: meta.disconnectionReasonCode,
+        detail: String(connectErrorMessage),
+        error: String(connectErrorMessage),
+        checkedAt: new Date().toISOString(),
+      };
     }
 
     const detail =

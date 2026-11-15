@@ -69,7 +69,7 @@ export function getEvolutionConfig(): EvolutionConfig {
   const rawUrl =
     readEnvFallback('EVOLUTION_URL') ||
     readEnvFallback('EVOLUTION_API_URL') ||
-    'http://16.170.252.105:8080';
+    'https://incomestream.duckdns.org';
   const baseUrl = rawUrl
     .replace(/\/manager\/?$/i, '')
     .replace(/\/+$/, '');

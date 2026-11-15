@@ -4,7 +4,7 @@ export function getEvolutionEnv() {
   const rawUrl =
     process.env.EVOLUTION_URL ||
     process.env.EVOLUTION_API_URL ||
-    'http://16.170.252.105:8080';
+    'https://incomestream.duckdns.org';
   const baseUrl = String(rawUrl)
     .trim()
     .replace(/\/manager\/?$/i, '')
