@@ -350,7 +350,7 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
             <span className="text-xs font-medium text-slate-500 dark:text-slate-400">Active Automations</span>
             <button
               type="button"
-              onClick={() => onNavigate('automations')}
+              onClick={() => onNavigate('workflow_builder')}
               className="text-xs text-[#2563EB] hover:text-[#1D4ED8] font-medium inline-flex items-center gap-0.5 cursor-pointer"
             >
               <span>Flows</span>
@@ -507,10 +507,10 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
             </p>
             <button
               type="button"
-              onClick={() => onNavigate('automations')}
+              onClick={() => onNavigate('workflow_builder')}
               className="pt-1 text-xs sm:text-sm font-bold text-emerald-400 hover:text-emerald-300 inline-flex items-center gap-1.5 cursor-pointer"
             >
-              <span>Open Visual Flow Studio</span>
+              <span>Open Workflow Builder</span>
               <ArrowUpRight className="w-4 h-4" />
             </button>
           </div>

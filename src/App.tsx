@@ -4,7 +4,6 @@ import {
   Inbox,
   Users,
   Layers,
-  GitBranch,
   Zap,
   Send,
   FileText,
@@ -83,7 +82,6 @@ import { DashboardOverview } from './components/DashboardOverview';
 import { InboxView } from './components/InboxView';
 import { ContactsCrmView } from './components/ContactsCrmView';
 import { ListsView } from './components/ListsView';
-import { AutomationsView } from './components/AutomationsView';
 import { AutoRespondersView } from './components/AutoRespondersView';
 import { CampaignsView } from './components/CampaignsView';
 import { CaptureAssetsView, AssetLeadSubmissionExtra } from './components/CaptureAssetsView';
@@ -94,7 +92,6 @@ import { WhatsAppEmbeddedSignupPage } from './components/WhatsAppEmbeddedSignupP
 import { WhatsAppConnectView } from './components/WhatsAppConnectView';
 import { ConnectWhatsAppPage } from './components/ConnectWhatsAppPage';
 import { WhatsAppTemplatesView } from './components/WhatsAppTemplatesView';
-import { AutomationWorkflowBuilder } from './components/AutomationWorkflowBuilder';
 import { AutomationBuilderUI } from './components/AutomationBuilderUI';
 import { PrivacyPolicyPage } from './components/PrivacyPolicyPage';
 import { CustomDomainEmailSettings } from './components/CustomDomainEmailSettings';
@@ -869,60 +866,6 @@ export default function App() {
     [updateSnapshot]
   );
 
-  const handleForwardToInboxFromAutomation = useCallback(
-    async (payload: {
-      leadName: string;
-      leadEmail: string;
-      leadPhone: string;
-      listName: string;
-      channel: ChannelType;
-      workflowName: string;
-      stepTitle: string;
-      subjectOrTemplate?: string;
-      messageSent: string;
-    }) => {
-      const threadId = generateSafeId('thr');
-      const now = new Date().toISOString();
-      const initialMessage = {
-        id: generateSafeId('msg'),
-        sender: 'system' as const,
-        senderIdentity: 'FlowPilot Workflow Gateway',
-        recipient: payload.leadEmail || payload.leadPhone || payload.leadName,
-        channel: payload.channel,
-        subject: payload.subjectOrTemplate || payload.workflowName || 'Automated Outreach',
-        body: payload.messageSent,
-        timestamp: now,
-        status: 'delivered' as const,
-      };
-
-      const newThread: InboxThread = {
-        id: threadId,
-        workspaceId: snapshot.workspace.id,
-        ownerId: activeUid,
-        leadName: payload.leadName,
-        leadEmail: payload.leadEmail,
-        leadPhone: payload.leadPhone,
-        listName: payload.listName,
-        channel: payload.channel,
-        subjectOrContext: payload.subjectOrTemplate || `Outreach: ${payload.workflowName}`,
-        lastLeadMessage: '',
-        lastMessagePreview: payload.messageSent.slice(0, 100),
-        lastSender: 'operator',
-        status: 'replied',
-        unreadCount: 0,
-        messagesJson: JSON.stringify([initialMessage]),
-        createdAt: now,
-        updatedAt: now,
-      };
-
-      updateSnapshot((prev) => ({
-        ...prev,
-        inboxThreads: [newThread, ...prev.inboxThreads],
-      }));
-    },
-    [activeUid, snapshot.workspace.id, updateSnapshot]
-  );
-
   const handleForwardToInboxFromChatbot = useCallback(
     async (payload: {
       leadName: string;
@@ -1450,7 +1393,7 @@ export default function App() {
           setContactModalOpenOnMount(true);
           break;
         case 'create_automation':
-          setActiveTab('automations');
+          setActiveTab('workflow_builder');
           setAutomationModalOpenOnMount(true);
           break;
         case 'create_form':
@@ -1489,7 +1432,6 @@ export default function App() {
     { id: 'inbox', label: 'Omnichannel Inbox', icon: Inbox, badge: unreadCount > 0 ? unreadCount : undefined },
     { id: 'contacts', label: 'CRM & Audiences', icon: Users },
     { id: 'lists', label: 'Segments & Lists', icon: Layers },
-    { id: 'automations', label: 'Workflows & Logic', icon: GitBranch },
     { id: 'autoresponders', label: 'Auto-Responders', icon: Zap },
     { id: 'campaigns', label: 'Campaigns & Broadcasts', icon: Send },
     { id: 'assets', label: 'Lead Gen & Forms', icon: FileText },
@@ -1601,7 +1543,7 @@ export default function App() {
           }}
           onBackToWorkflow={() => {
             setIsFormRoute(false);
-            setActiveTab('automations');
+            setActiveTab('workflow_builder');
           }}
         />
       </ErrorBoundary>
@@ -1670,8 +1612,11 @@ export default function App() {
           <div className="flex items-center gap-2">
             {!isPublicLanding && (
               <button
-                onClick={() => setActiveTab('workflow_builder')}
-                className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-xs font-semibold shadow-xs shadow-blue-500/20 transition-colors"
+                onClick={() => {
+                  setActiveTab('workflow_builder');
+                  setAutomationModalOpenOnMount(true);
+                }}
+                className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-xs font-semibold shadow-xs shadow-blue-500/20 transition-colors cursor-pointer"
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>New Workflow</span>
@@ -1971,7 +1916,7 @@ export default function App() {
                   onBulkImportContacts={handleBulkImportContacts}
                   onCreateAutomationForList={(listName) => {
                     setPreselectedListName(listName);
-                    setActiveTab('automations');
+                    setActiveTab('workflow_builder');
                   }}
                   onCreateAutoResponderForList={(listName) => {
                     setPreselectedListName(listName);
@@ -1989,42 +1934,23 @@ export default function App() {
                 />
               )}
 
-              {activeTab === 'automations' && (
-                <AutomationsView
-                  automations={snapshot.automations}
-                  contacts={snapshot.contacts}
-                  lists={snapshot.lists}
-                  workspace={snapshot.workspace}
-                  privateProfile={snapshot.privateProfile}
-                  onNavigateToSettings={() => setActiveTab('settings')}
-                  preselectedListName={preselectedListName}
-                  onClearPreselectedList={() => setPreselectedListName(null)}
-                  openModalOnMount={automationModalOpenOnMount}
-                  onClearModalMount={() => setAutomationModalOpenOnMount(false)}
-                  onCreateAutomation={handleCreateAutomation}
-                  onUpdateAutomation={handleUpdateAutomation}
-                  onDeleteAutomation={handleDeleteAutomation}
-                  onSimulateRun={handleSimulateAutomationRun}
-                  onUpdateContact={handleUpdateContact}
-                  onCreateTask={handleCreateTask}
-                  onLogActivity={handleLogActivity}
-                  onCreateList={handleCreateList}
-                  onNavigateToLists={() => setActiveTab('lists')}
-                  onCreateFormForList={(listName) => {
-                    setPreselectedListName(listName);
-                    setActiveTab('assets');
-                  }}
-                  onNavigateToInbox={() => setActiveTab('inbox')}
-                  onNavigateToBuilder={() => setActiveTab('workflow_builder')}
-                  onForwardToInbox={handleForwardToInboxFromAutomation}
-                />
-              )}
-
               {activeTab === 'workflow_builder' && (
                 <div className="-mx-4 sm:-mx-6 lg:-mx-8 -my-6">
                   <AutomationBuilderUI
                     userId={activeUid}
-                    onBackToDashboard={() => setActiveTab('automations')}
+                    automations={snapshot.automations}
+                    lists={snapshot.lists}
+                    contacts={snapshot.contacts}
+                    preselectedListName={preselectedListName}
+                    onClearPreselectedList={() => setPreselectedListName(null)}
+                    openCreateModalOnMount={automationModalOpenOnMount}
+                    onClearCreateModalMount={() => setAutomationModalOpenOnMount(false)}
+                    onCreateAutomation={handleCreateAutomation}
+                    onUpdateAutomation={handleUpdateAutomation}
+                    onDeleteAutomation={handleDeleteAutomation}
+                    onCreateList={handleCreateList}
+                    onNavigateToLists={() => setActiveTab('lists')}
+                    onBackToDashboard={() => setActiveTab('dashboard')}
                   />
                 </div>
               )}
@@ -2113,7 +2039,7 @@ export default function App() {
                   onNavigateToLists={() => setActiveTab('lists')}
                   onCreateAutomationForList={(listName) => {
                     setPreselectedListName(listName);
-                    setActiveTab('automations');
+                    setActiveTab('workflow_builder');
                   }}
                 />
               )}
@@ -2131,7 +2057,7 @@ export default function App() {
                   onCreateList={handleCreateList}
                   onLogActivity={handleLogActivity}
                   onNavigateToLists={() => setActiveTab('lists')}
-                  onNavigateToAutomations={() => setActiveTab('automations')}
+                  onNavigateToAutomations={() => setActiveTab('workflow_builder')}
                 />
               )}
 

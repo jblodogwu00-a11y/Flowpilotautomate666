@@ -221,9 +221,8 @@ export const ListsView: React.FC<ListsViewProps> = ({
     setListModalOpen(true);
   };
 
-  const handleSaveListSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!listName.trim()) return;
+  const saveListForm = async (): Promise<string | null> => {
+    if (!listName.trim()) return null;
     setSavingList(true);
     try {
       const parsedKillSwitchTags = sanitizeStringArray(
@@ -231,11 +230,12 @@ export const ListsView: React.FC<ListsViewProps> = ({
         10,
         32
       );
+      const cleanListName = sanitizeString(listName, 100, 'New Audience List');
       const payload: Omit<
         AudienceList,
         'id' | 'workspaceId' | 'ownerId' | 'createdAt' | 'updatedAt'
       > = {
-        name: sanitizeString(listName, 100, 'New Audience List'),
+        name: cleanListName,
         description: sanitizeString(
           listDescription,
           300,
@@ -256,8 +256,21 @@ export const ListsView: React.FC<ListsViewProps> = ({
         await onCreateList(payload);
       }
       setListModalOpen(false);
+      return cleanListName;
     } finally {
       setSavingList(false);
+    }
+  };
+
+  const handleSaveListSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await saveListForm();
+  };
+
+  const handleSaveAndCreateAutomation = async () => {
+    const savedName = await saveListForm();
+    if (savedName && onCreateAutomationForList) {
+      onCreateAutomationForList(savedName);
     }
   };
 
@@ -602,11 +615,21 @@ export const ListsView: React.FC<ListsViewProps> = ({
                   {formatCurrency(listTotalLtv, currency)}
                 </div>
               </div>
+              {onCreateAutomationForList && (
+                <button
+                  type="button"
+                  onClick={() => onCreateAutomationForList(activeList.name)}
+                  className="px-3.5 py-2.5 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl cursor-pointer inline-flex items-center gap-1.5 shadow-xs whitespace-nowrap shrink-0"
+                >
+                  <GitBranch className="w-3.5 h-3.5" />
+                  Create Automation Workflow
+                </button>
+              )}
               {onSendBroadcastToList && (
                 <button
                   type="button"
                   onClick={() => onSendBroadcastToList(activeList.name)}
-                  className="px-3.5 py-2.5 text-xs font-bold text-white bg-[#047857] hover:bg-[#065F46] rounded-xl cursor-pointer inline-flex items-center gap-1.5 shadow-xs"
+                  className="px-3.5 py-2.5 text-xs font-bold text-white bg-[#047857] hover:bg-[#065F46] rounded-xl cursor-pointer inline-flex items-center gap-1.5 shadow-xs whitespace-nowrap shrink-0"
                 >
                   <Send className="w-3.5 h-3.5" />
                   Send Campaign / Broadcast
@@ -615,7 +638,7 @@ export const ListsView: React.FC<ListsViewProps> = ({
               <button
                 type="button"
                 onClick={() => handleExportListCsv(activeList)}
-                className="px-3.5 py-2.5 text-xs font-bold text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl cursor-pointer inline-flex items-center gap-1.5 shadow-xs"
+                className="px-3.5 py-2.5 text-xs font-bold text-white bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-xl cursor-pointer inline-flex items-center gap-1.5 shadow-xs whitespace-nowrap shrink-0"
               >
                 <Download className="w-3.5 h-3.5" />
                 Export CSV
@@ -1719,18 +1742,29 @@ export const ListsView: React.FC<ListsViewProps> = ({
                 </div>
               </div>
 
-              <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-200">
+              <div className="flex flex-wrap items-center justify-end gap-2.5 pt-4 border-t border-slate-200">
                 <button
                   type="button"
                   onClick={() => setListModalOpen(false)}
-                  className="px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-xl hover:bg-slate-50 cursor-pointer"
+                  className="px-4 py-2 text-sm font-medium text-slate-700 bg-white border border-slate-300 rounded-xl hover:bg-slate-50 cursor-pointer whitespace-nowrap shrink-0"
                 >
                   Cancel
                 </button>
+                {!editingList && onCreateAutomationForList && (
+                  <button
+                    type="button"
+                    disabled={savingList || !listName.trim()}
+                    onClick={handleSaveAndCreateAutomation}
+                    className="px-4 py-2 text-sm font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl cursor-pointer disabled:opacity-50 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                  >
+                    <GitBranch className="w-4 h-4" />
+                    <span>{savingList ? 'Saving...' : 'Save & Create Automation Workflow'}</span>
+                  </button>
+                )}
                 <button
                   type="submit"
                   disabled={savingList}
-                  className="px-5 py-2 text-sm font-bold text-white bg-[#047857] hover:bg-[#065F46] rounded-xl cursor-pointer disabled:opacity-50"
+                  className="px-5 py-2 text-sm font-bold text-white bg-[#047857] hover:bg-[#065F46] rounded-xl cursor-pointer disabled:opacity-50 whitespace-nowrap shrink-0"
                 >
                   {savingList
                     ? 'Saving List...'

@@ -542,7 +542,6 @@ export type ActiveTab =
   | 'inbox'
   | 'contacts'
   | 'lists'
-  | 'automations'
   | 'autoresponders'
   | 'campaigns'
   | 'assets'

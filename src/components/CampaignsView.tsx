@@ -2578,7 +2578,7 @@ export const CampaignsView: React.FC<CampaignsViewProps> = ({
                   onClick={onNavigateToAutomations}
                   className="font-bold text-[#047857] underline ml-3 cursor-pointer"
                 >
-                  View in Automations →
+                  Open in Workflow Builder →
                 </button>
               )}
             </div>
