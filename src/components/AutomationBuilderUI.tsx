@@ -43,12 +43,20 @@ import {
   Pause,
   FolderPlus,
   ArrowRight,
+  FileText,
+  UserPlus,
+  Tag,
+  ShoppingBag,
+  MousePointerClick,
+  Calendar,
+  Webhook,
 } from 'lucide-react';
 import { DelayUnit, WorkflowNodeType } from '../lib/automation/types';
 import {
   AudienceList,
   Automation,
   AutomationStatus,
+  CaptureAsset,
   ConsentStatus,
   Contact,
   ListCategory,
@@ -59,14 +67,174 @@ import {
 import { EmailEditor } from './EmailEditor';
 
 // ============================================================================
+// TRIGGER METADATA CATALOG
+// ============================================================================
+
+interface TriggerCatalogItem {
+  nodeType: WorkflowNodeType;
+  firestoreTriggerType: TriggerType;
+  title: string;
+  shortLabel: string;
+  subtitle: string;
+  defaultLabel: string;
+}
+
+const TRIGGER_CATALOG: TriggerCatalogItem[] = [
+  {
+    nodeType: 'trigger_form_submission',
+    firestoreTriggerType: 'form_submission',
+    title: 'Form Submitted',
+    shortLabel: 'Form Submitted (After Lead Fills Form)',
+    subtitle: 'Starts actions immediately after lead submits a form',
+    defaultLabel: 'Lead Fills Out a Form',
+  },
+  {
+    nodeType: 'trigger_list_joined',
+    firestoreTriggerType: 'list_joined',
+    title: 'Contact Joins List',
+    shortLabel: 'Contact Joins List',
+    subtitle: 'Fires when a contact is added to the list',
+    defaultLabel: 'Contact Joins List',
+  },
+  {
+    nodeType: 'trigger_contact_added',
+    firestoreTriggerType: 'contact_added',
+    title: 'Contact Added to CRM',
+    shortLabel: 'Contact Added to CRM',
+    subtitle: 'New contact created manually or imported',
+    defaultLabel: 'New Contact Added',
+  },
+  {
+    nodeType: 'trigger_tag_added',
+    firestoreTriggerType: 'tag_added',
+    title: 'Tag Added',
+    shortLabel: 'Tag Added to Contact',
+    subtitle: 'Starts when a segment tag is applied',
+    defaultLabel: 'Tag Added to Contact',
+  },
+  {
+    nodeType: 'trigger_tag_removed',
+    firestoreTriggerType: 'tag_removed',
+    title: 'Tag Removed',
+    shortLabel: 'Tag Removed from Contact',
+    subtitle: 'Starts when a tag is removed from contact',
+    defaultLabel: 'Tag Removed from Contact',
+  },
+  {
+    nodeType: 'trigger_purchase_completed',
+    firestoreTriggerType: 'purchase_completed',
+    title: 'Purchase Completed',
+    shortLabel: 'Purchase Completed',
+    subtitle: 'Checkout or payment confirmation event',
+    defaultLabel: 'Purchase Completed',
+  },
+  {
+    nodeType: 'trigger_link_clicked',
+    firestoreTriggerType: 'link_clicked',
+    title: 'Link Clicked',
+    shortLabel: 'Link Clicked',
+    subtitle: 'Lead clicks a tracked campaign or SMS link',
+    defaultLabel: 'Tracked Link Clicked',
+  },
+  {
+    nodeType: 'trigger_email_opened',
+    firestoreTriggerType: 'email_opened',
+    title: 'Email Opened',
+    shortLabel: 'Email Opened',
+    subtitle: 'Lead opens a broadcast or drip email',
+    defaultLabel: 'Campaign Email Opened',
+  },
+  {
+    nodeType: 'trigger_keyword',
+    firestoreTriggerType: 'whatsapp_keyword',
+    title: 'WhatsApp Keyword',
+    shortLabel: 'WhatsApp Inbound Keyword',
+    subtitle: 'e.g. "price", "start", "info"',
+    defaultLabel: 'WhatsApp Keyword Match',
+  },
+  {
+    nodeType: 'trigger_whatsapp_reply',
+    firestoreTriggerType: 'list_joined',
+    title: 'WhatsApp Inbound / List',
+    shortLabel: 'WhatsApp Reply / List Event',
+    subtitle: 'When lead enters list or replies on WhatsApp',
+    defaultLabel: 'List / WhatsApp Event',
+  },
+  {
+    nodeType: 'trigger_email_reply',
+    firestoreTriggerType: 'email_opened',
+    title: 'Email Reply',
+    shortLabel: 'Email Inbound Message',
+    subtitle: 'When an inbound email reply arrives',
+    defaultLabel: 'Email Inbound Message',
+  },
+  {
+    nodeType: 'trigger_webhook_received',
+    firestoreTriggerType: 'webhook_received',
+    title: 'Webhook Received',
+    shortLabel: 'Webhook Received (API / Zapier)',
+    subtitle: 'External app POST event trigger',
+    defaultLabel: 'External Webhook Event',
+  },
+  {
+    nodeType: 'trigger_specific_datetime',
+    firestoreTriggerType: 'specific_datetime',
+    title: 'Specific Date & Time',
+    shortLabel: 'Specific Date & Time',
+    subtitle: 'Runs sequence at scheduled date & time',
+    defaultLabel: 'Scheduled Date & Time',
+  },
+];
+
+const getTriggerMeta = (nodeType?: string): TriggerCatalogItem => {
+  return (
+    TRIGGER_CATALOG.find((item) => item.nodeType === nodeType) ||
+    TRIGGER_CATALOG.find((item) => item.nodeType === 'trigger_whatsapp_reply')!
+  );
+};
+
+const renderTriggerIcon = (nodeType?: string, className = 'w-4 h-4') => {
+  switch (nodeType) {
+    case 'trigger_form_submission':
+      return <FileText className={className} />;
+    case 'trigger_list_joined':
+      return <Layers className={className} />;
+    case 'trigger_contact_added':
+      return <UserPlus className={className} />;
+    case 'trigger_tag_added':
+    case 'trigger_tag_removed':
+      return <Tag className={className} />;
+    case 'trigger_purchase_completed':
+      return <ShoppingBag className={className} />;
+    case 'trigger_link_clicked':
+      return <MousePointerClick className={className} />;
+    case 'trigger_email_opened':
+    case 'trigger_email_reply':
+      return <Mail className={className} />;
+    case 'trigger_webhook_received':
+      return <Webhook className={className} />;
+    case 'trigger_specific_datetime':
+      return <Calendar className={className} />;
+    case 'trigger_keyword':
+      return <Zap className={className} />;
+    default:
+      return <MessageSquare className={className} />;
+  }
+};
+
+// ============================================================================
 // CUSTOM REACT FLOW NODE COMPONENTS
 // ============================================================================
 
 export type FlowCustomNode = Node<Record<string, any>>;
 
 const TriggerNodeComponent = ({ data, selected }: NodeProps<FlowCustomNode>) => {
-  const isEmail = data.nodeType === 'trigger_email_reply';
-  const isKeyword = data.nodeType === 'trigger_keyword';
+  const nodeType = (data.nodeType as string) || 'trigger_whatsapp_reply';
+  const meta = getTriggerMeta(nodeType);
+  const isForm = nodeType === 'trigger_form_submission';
+  const isKeyword = nodeType === 'trigger_keyword';
+  const isTag = nodeType === 'trigger_tag_added' || nodeType === 'trigger_tag_removed';
+  const isScheduled = nodeType === 'trigger_specific_datetime';
 
   return (
     <div
@@ -87,23 +255,50 @@ const TriggerNodeComponent = ({ data, selected }: NodeProps<FlowCustomNode>) => 
       <div className="p-4 space-y-2">
         <div className="flex items-center gap-2.5">
           <div className="w-8 h-8 rounded-xl bg-emerald-100/70 text-emerald-700 flex items-center justify-center shrink-0">
-            {isEmail ? <Mail className="w-4 h-4" /> : <MessageSquare className="w-4 h-4" />}
+            {renderTriggerIcon(nodeType, 'w-4 h-4')}
           </div>
           <div className="min-w-0">
             <h4 className="text-xs font-bold text-slate-900 truncate">
-              {data.label || 'List Join / Inbound Trigger'}
+              {data.label || meta.defaultLabel}
             </h4>
-            <p className="text-[11px] text-slate-500 truncate">
-              {isEmail ? 'Inbound email event' : 'List & WhatsApp Event'}
-            </p>
+            <p className="text-[11px] text-slate-500 truncate">{meta.subtitle}</p>
           </div>
         </div>
+
+        {isForm && (
+          <div className="mt-1 px-2.5 py-1.5 rounded-lg bg-emerald-50/60 border border-emerald-200/70 text-[11px] flex items-center justify-between gap-2">
+            <span className="text-slate-600 shrink-0">Target:</span>
+            <span className="font-semibold text-emerald-800 truncate">
+              {data.formScope === 'specific_form' && data.targetFormTitle
+                ? data.targetFormTitle
+                : 'All list capture forms'}
+            </span>
+          </div>
+        )}
 
         {isKeyword && (
           <div className="mt-1 px-2.5 py-1.5 rounded-lg bg-slate-50 border border-slate-200/80 text-[11px] flex items-center justify-between">
             <span className="text-slate-500">Keyword:</span>
             <span className="font-mono font-bold text-emerald-700">
               "{data.triggerKeyword || 'start'}"
+            </span>
+          </div>
+        )}
+
+        {isTag && (
+          <div className="mt-1 px-2.5 py-1.5 rounded-lg bg-slate-50 border border-slate-200/80 text-[11px] flex items-center justify-between gap-2">
+            <span className="text-slate-500 shrink-0">Tag:</span>
+            <span className="font-mono font-bold text-emerald-700 truncate">
+              {data.tagName || 'VIP_Lead'}
+            </span>
+          </div>
+        )}
+
+        {isScheduled && (
+          <div className="mt-1 px-2.5 py-1.5 rounded-lg bg-slate-50 border border-slate-200/80 text-[11px] flex items-center justify-between gap-2">
+            <span className="text-slate-500 shrink-0">Schedule:</span>
+            <span className="font-mono font-bold text-emerald-700 truncate tabular-nums">
+              {data.scheduledAt ? data.scheduledAt.replace('T', ' ') : 'Next Schedule'}
             </span>
           </div>
         )}
@@ -447,6 +642,52 @@ const WORKFLOW_BLUEPRINTS = [
       { id: 'e3', source: 'c1', target: 'a_no', sourceHandle: 'false', animated: true },
     ],
   },
+  {
+    id: 'form_submitted_instant',
+    title: 'Form Submitted → Instant Welcome & Follow-Up',
+    description: 'Starts right after a lead fills out a form, sends WhatsApp welcome, waits 2 hours, then emails guide.',
+    nodes: [
+      {
+        id: 't_form',
+        type: 'trigger',
+        position: { x: 250, y: 50 },
+        data: {
+          nodeType: 'trigger_form_submission',
+          label: 'Lead Fills Out a Form',
+          formScope: 'all_list_forms',
+        },
+      },
+      {
+        id: 'a_wa',
+        type: 'action',
+        position: { x: 250, y: 230 },
+        data: {
+          nodeType: 'action_send_whatsapp',
+          message: 'Hi {{first_name}}! Thanks for submitting the form. Here is your requested access link!',
+        },
+      },
+      {
+        id: 'd_wait',
+        type: 'delay',
+        position: { x: 250, y: 410 },
+        data: { delayValue: 2, delayUnit: 'Hours' },
+      },
+      {
+        id: 'a_email',
+        type: 'action',
+        position: { x: 250, y: 580 },
+        data: {
+          nodeType: 'action_send_email',
+          message: 'Quick follow-up on your form submission — reply anytime if you want help getting started.',
+        },
+      },
+    ],
+    edges: [
+      { id: 'ef1', source: 't_form', target: 'a_wa', animated: true },
+      { id: 'ef2', source: 'a_wa', target: 'd_wait', animated: true },
+      { id: 'ef3', source: 'd_wait', target: 'a_email', animated: true },
+    ],
+  },
 ];
 
 function buildStarterGraphForList(listName: string): {
@@ -540,19 +781,31 @@ function rehydrateAutomationToCanvas(auto: Automation): {
           const id = ln.id || `legacy_${idx}`;
 
           if (cat === 'trigger') {
+            const legacySubToNodeType: Record<string, WorkflowNodeType> = {
+              form_submission: 'trigger_form_submission',
+              list_joined: 'trigger_list_joined',
+              contact_added: 'trigger_contact_added',
+              tag_added: 'trigger_tag_added',
+              tag_removed: 'trigger_tag_removed',
+              purchase_completed: 'trigger_purchase_completed',
+              link_clicked: 'trigger_link_clicked',
+              email_opened: 'trigger_email_opened',
+              webhook_received: 'trigger_webhook_received',
+              specific_datetime: 'trigger_specific_datetime',
+              whatsapp_keyword: 'trigger_keyword',
+            };
+            const mappedNodeType = legacySubToNodeType[ln.subType] || 'trigger_whatsapp_reply';
             rfNodes.push({
               id,
               type: 'trigger',
               position: { x, y },
               data: {
-                nodeType:
-                  ln.subType === 'whatsapp_keyword'
-                    ? 'trigger_keyword'
-                    : ln.subType === 'email_opened'
-                    ? 'trigger_email_reply'
-                    : 'trigger_whatsapp_reply',
+                nodeType: mappedNodeType,
                 label: ln.title || auto.triggerDetail || 'Workflow Trigger',
                 triggerKeyword: ln.config?.conditionValue || 'start',
+                ...(mappedNodeType === 'trigger_form_submission'
+                  ? { formScope: 'all_list_forms' }
+                  : {}),
               },
             });
           } else if (cat === 'delay') {
@@ -623,17 +876,32 @@ function rehydrateAutomationToCanvas(auto: Automation): {
   }
 
   // Fallback synthesis from Automation summary fields
+  const triggerTypeToNodeMap: Record<string, WorkflowNodeType> = {
+    form_submission: 'trigger_form_submission',
+    list_joined: 'trigger_list_joined',
+    contact_added: 'trigger_contact_added',
+    tag_added: 'trigger_tag_added',
+    tag_removed: 'trigger_tag_removed',
+    purchase_completed: 'trigger_purchase_completed',
+    link_clicked: 'trigger_link_clicked',
+    email_opened: 'trigger_email_opened',
+    webhook_received: 'trigger_webhook_received',
+    specific_datetime: 'trigger_specific_datetime',
+    whatsapp_keyword: 'trigger_keyword',
+  };
+  const fallbackNodeType = triggerTypeToNodeMap[auto.triggerType] || 'trigger_whatsapp_reply';
+
   const synthNodes: FlowCustomNode[] = [
     {
       id: 'node-trigger-1',
       type: 'trigger',
       position: { x: 300, y: 40 },
       data: {
-        nodeType:
-          auto.triggerType === 'whatsapp_keyword'
-            ? 'trigger_keyword'
-            : 'trigger_whatsapp_reply',
+        nodeType: fallbackNodeType,
         label: auto.triggerDetail || `List: ${auto.targetList || 'General Contacts'}`,
+        ...(fallbackNodeType === 'trigger_form_submission'
+          ? { formScope: 'all_list_forms' }
+          : {}),
       },
     },
   ];
@@ -716,6 +984,7 @@ export interface AutomationBuilderUIProps {
   automations: Automation[];
   lists: AudienceList[];
   contacts: Contact[];
+  assets?: CaptureAsset[];
   preselectedListName?: string | null;
   onClearPreselectedList?: () => void;
   openCreateModalOnMount?: boolean;
@@ -739,6 +1008,7 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
   automations = [],
   lists = [],
   contacts = [],
+  assets = [],
   preselectedListName,
   onClearPreselectedList,
   openCreateModalOnMount,
@@ -1057,8 +1327,15 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
 
       if (nodeType.startsWith('trigger')) {
         category = 'trigger';
-        data.label = label || 'New Inbound Trigger';
+        const meta = getTriggerMeta(nodeType);
+        data.label = label || meta.defaultLabel;
         if (nodeType === 'trigger_keyword') data.triggerKeyword = 'price';
+        if (nodeType === 'trigger_form_submission') {
+          data.formScope = 'all_list_forms';
+        }
+        if (nodeType === 'trigger_tag_added' || nodeType === 'trigger_tag_removed') {
+          data.tagName = 'VIP_Lead';
+        }
       } else if (nodeType.startsWith('condition')) {
         category = 'condition';
         data.keyword = 'price';
@@ -1101,8 +1378,8 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
     [setNodes, setEdges, targetList]
   );
 
-  const handleUpdateNodeData = useCallback(
-    (field: string, val: any) => {
+  const handleUpdateNodeFields = useCallback(
+    (patch: Record<string, any>) => {
       if (!selectedNode) return;
       setNodes((nds) =>
         nds.map((n) => {
@@ -1111,7 +1388,7 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
               ...n,
               data: {
                 ...n.data,
-                [field]: val,
+                ...patch,
               },
             };
             setSelectedNode(updated as FlowCustomNode);
@@ -1122,6 +1399,13 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
       );
     },
     [selectedNode, setNodes]
+  );
+
+  const handleUpdateNodeData = useCallback(
+    (field: string, val: any) => {
+      handleUpdateNodeFields({ [field]: val });
+    },
+    [handleUpdateNodeFields]
   );
 
   const handleDeleteNode = useCallback(
@@ -1143,32 +1427,39 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
     try {
       const cleanName = sanitizeString(workflowName, 120, 'Untitled Workflow');
       const cleanList = sanitizeString(targetList, 80, 'General Contacts');
-      const triggerNode = nodes.find((n) => n.type === 'trigger');
-      const triggerNodeType = triggerNode?.data?.nodeType;
+      // Prefer connected trigger node or form submission trigger if present
+      const triggerNode =
+        nodes.find((n) => n.type === 'trigger' && edges.some((e) => e.source === n.id)) ||
+        nodes.find((n) => n.type === 'trigger');
+      const triggerNodeType = (triggerNode?.data?.nodeType as WorkflowNodeType) || 'trigger_list_joined';
+      const triggerMeta = getTriggerMeta(triggerNodeType);
+      const triggerType: TriggerType = triggerMeta.firestoreTriggerType;
 
-      const triggerType: TriggerType =
-        triggerNodeType === 'trigger_keyword'
-          ? 'whatsapp_keyword'
-          : triggerNodeType === 'trigger_email_reply'
-          ? 'email_opened'
-          : 'list_joined';
+      let rawTriggerDetail = `List: ${cleanList}`;
+      if (triggerNodeType === 'trigger_form_submission') {
+        if (triggerNode?.data?.formScope === 'specific_form' && triggerNode?.data?.targetFormTitle) {
+          rawTriggerDetail = `Form: ${triggerNode.data.targetFormTitle} · List: ${cleanList}`;
+        } else {
+          rawTriggerDetail = `Any Form on "${cleanList}"`;
+        }
+      } else if (triggerNodeType === 'trigger_keyword' && triggerNode?.data?.triggerKeyword) {
+        rawTriggerDetail = `List: ${cleanList} · Keyword "${triggerNode.data.triggerKeyword}"`;
+      } else if (
+        (triggerNodeType === 'trigger_tag_added' || triggerNodeType === 'trigger_tag_removed') &&
+        triggerNode?.data?.tagName
+      ) {
+        rawTriggerDetail = `${triggerMeta.title}: "${triggerNode.data.tagName}" · List: ${cleanList}`;
+      } else if (triggerNode?.data?.label) {
+        rawTriggerDetail = `List: ${cleanList} · ${triggerNode.data.label}`;
+      }
 
-      const triggerDetail = sanitizeString(
-        `List: ${cleanList}${
-          triggerNode?.data?.triggerKeyword
-            ? ` · Keyword "${triggerNode.data.triggerKeyword}"`
-            : triggerNode?.data?.label
-            ? ` · ${triggerNode.data.label}`
-            : ''
-        }`,
-        120,
-        `List: ${cleanList}`
-      );
+      const triggerDetail = sanitizeString(rawTriggerDetail, 120, `List: ${cleanList}`);
 
       const derivedSteps = nodes.map((n) => {
         if (n.type === 'trigger') {
+          const m = getTriggerMeta(n.data?.nodeType);
           return sanitizeString(
-            `Trigger: ${n.data?.label || 'List Join Event'}`,
+            `Trigger: ${n.data?.label || m.defaultLabel}`,
             200,
             'Trigger'
           );
@@ -1212,7 +1503,11 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
 
       const channelSet = new Set<string>();
       nodes.forEach((n) => {
-        if (n.data?.nodeType === 'action_send_email' || n.data?.nodeType === 'trigger_email_reply') {
+        if (
+          n.data?.nodeType === 'action_send_email' ||
+          n.data?.nodeType === 'trigger_email_reply' ||
+          n.data?.nodeType === 'trigger_email_opened'
+        ) {
           channelSet.add('email');
         } else if (
           n.data?.nodeType === 'action_send_whatsapp' ||
@@ -1910,7 +2205,7 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
   // VIEW 2: VISUAL DRAG-AND-DROP WORKFLOW CANVAS
   // ============================================================================
   return (
-    <div className="flex flex-col h-[calc(100vh-116px)] min-h-[640px] bg-[#f8fafc] text-slate-900 font-sans antialiased overflow-hidden">
+    <div className="flex flex-col h-[calc(100vh-64px)] min-h-[640px] bg-[#f8fafc] text-slate-900 font-sans antialiased overflow-hidden">
       {/* TOP BAR */}
       <header className="h-16 bg-white border-b border-slate-200 px-4 sm:px-6 flex items-center justify-between gap-3 z-20 shrink-0 shadow-2xs">
         <div className="flex items-center gap-2.5 min-w-0">
@@ -2077,69 +2372,47 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
                 <>
                   <div className="space-y-2">
                     <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">
-                      1. Inbound Triggers
+                      1. Entry Triggers
                     </span>
                     <div className="space-y-1.5">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          handleAddNode('trigger_whatsapp_reply', `Contact Joins "${targetList}"`)
-                        }
-                        className="w-full p-2.5 rounded-xl border border-slate-200 hover:border-emerald-500 bg-white hover:bg-emerald-50/40 text-left transition-all flex items-center justify-between cursor-pointer group"
-                      >
-                        <div className="flex items-center gap-2.5 min-w-0">
-                          <div className="w-7 h-7 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0">
-                            <MessageSquare className="w-3.5 h-3.5" />
-                          </div>
-                          <div className="truncate">
-                            <div className="text-xs font-bold text-slate-900 group-hover:text-emerald-700">
-                              List / WhatsApp Event
+                      {TRIGGER_CATALOG.map((trig) => {
+                        const isPrimaryForm = trig.nodeType === 'trigger_form_submission';
+                        return (
+                          <button
+                            key={trig.nodeType}
+                            type="button"
+                            onClick={() =>
+                              handleAddNode(
+                                trig.nodeType,
+                                trig.nodeType === 'trigger_list_joined' ||
+                                  trig.nodeType === 'trigger_whatsapp_reply'
+                                  ? `Contact Joins "${targetList}"`
+                                  : trig.defaultLabel
+                              )
+                            }
+                            className={`w-full p-2.5 rounded-xl border text-left transition-all flex items-center justify-between cursor-pointer group ${
+                              isPrimaryForm
+                                ? 'border-emerald-300 bg-emerald-50/40 hover:border-emerald-500 hover:bg-emerald-50'
+                                : 'border-slate-200 hover:border-emerald-500 bg-white hover:bg-emerald-50/40'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <div className="w-7 h-7 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0">
+                                {renderTriggerIcon(trig.nodeType, 'w-3.5 h-3.5')}
+                              </div>
+                              <div className="min-w-0">
+                                <div className="text-xs font-bold text-slate-900 group-hover:text-emerald-700 truncate">
+                                  {trig.title}
+                                </div>
+                                <div className="text-[10px] text-slate-500 truncate">
+                                  {trig.subtitle}
+                                </div>
+                              </div>
                             </div>
-                            <div className="text-[10px] text-slate-500">When lead enters or replies</div>
-                          </div>
-                        </div>
-                        <Plus className="w-4 h-4 text-slate-300 group-hover:text-emerald-600" />
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() =>
-                          handleAddNode('trigger_email_reply', 'Email Inbound Message')
-                        }
-                        className="w-full p-2.5 rounded-xl border border-slate-200 hover:border-emerald-500 bg-white hover:bg-emerald-50/40 text-left transition-all flex items-center justify-between cursor-pointer group"
-                      >
-                        <div className="flex items-center gap-2.5 min-w-0">
-                          <div className="w-7 h-7 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0">
-                            <Mail className="w-3.5 h-3.5" />
-                          </div>
-                          <div className="truncate">
-                            <div className="text-xs font-bold text-slate-900 group-hover:text-emerald-700">
-                              Email Reply
-                            </div>
-                            <div className="text-[10px] text-slate-500">When email arrives</div>
-                          </div>
-                        </div>
-                        <Plus className="w-4 h-4 text-slate-300 group-hover:text-emerald-600" />
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => handleAddNode('trigger_keyword', 'Keyword Trigger')}
-                        className="w-full p-2.5 rounded-xl border border-slate-200 hover:border-emerald-500 bg-white hover:bg-emerald-50/40 text-left transition-all flex items-center justify-between cursor-pointer group"
-                      >
-                        <div className="flex items-center gap-2.5 min-w-0">
-                          <div className="w-7 h-7 rounded-lg bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0">
-                            <Zap className="w-3.5 h-3.5" />
-                          </div>
-                          <div className="truncate">
-                            <div className="text-xs font-bold text-slate-900 group-hover:text-emerald-700">
-                              Keyword Trigger
-                            </div>
-                            <div className="text-[10px] text-slate-500">e.g. "price", "start"</div>
-                          </div>
-                        </div>
-                        <Plus className="w-4 h-4 text-slate-300 group-hover:text-emerald-600" />
-                      </button>
+                            <Plus className="w-4 h-4 text-slate-300 group-hover:text-emerald-600 shrink-0" />
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
 
@@ -2571,16 +2844,155 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
                     </label>
                     <select
                       value={selectedNode.data.nodeType}
-                      onChange={(e) => handleUpdateNodeData('nodeType', e.target.value)}
+                      onChange={(e) => {
+                        const nextType = e.target.value as WorkflowNodeType;
+                        const meta = getTriggerMeta(nextType);
+                        const patch: Record<string, any> = {
+                          nodeType: nextType,
+                          label: meta.defaultLabel,
+                        };
+                        if (nextType === 'trigger_form_submission' && !selectedNode.data.formScope) {
+                          patch.formScope = 'all_list_forms';
+                        }
+                        if (nextType === 'trigger_keyword' && !selectedNode.data.triggerKeyword) {
+                          patch.triggerKeyword = 'price';
+                        }
+                        if (
+                          (nextType === 'trigger_tag_added' || nextType === 'trigger_tag_removed') &&
+                          !selectedNode.data.tagName
+                        ) {
+                          patch.tagName = 'VIP_Lead';
+                        }
+                        handleUpdateNodeFields(patch);
+                      }}
                       className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl font-semibold"
                     >
-                      <option value="trigger_whatsapp_reply">
-                        List Join / WhatsApp Inbound
-                      </option>
-                      <option value="trigger_email_reply">Email Inbound Message</option>
-                      <option value="trigger_keyword">Specific Inbound Keyword</option>
+                      {TRIGGER_CATALOG.map((trig) => (
+                        <option key={trig.nodeType} value={trig.nodeType}>
+                          {trig.shortLabel}
+                        </option>
+                      ))}
                     </select>
                   </div>
+
+                  {selectedNode.data.nodeType === 'trigger_form_submission' && (
+                    <div className="p-3.5 bg-emerald-50/70 rounded-xl border border-emerald-200 space-y-3">
+                      <div>
+                        <label className="block text-xs font-bold text-emerald-950 mb-1">
+                          Form Matching Scope
+                        </label>
+                        <p className="text-[11px] text-emerald-800/80">
+                          Choose whether any form for <strong>{targetList}</strong> starts this workflow, or pick one specific capture form.
+                        </p>
+                      </div>
+
+                      <div className="grid grid-cols-1 gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleUpdateNodeFields({
+                              formScope: 'all_list_forms',
+                              targetFormId: '',
+                              targetFormTitle: '',
+                            })
+                          }
+                          className={`px-3 py-2 rounded-lg text-left text-xs font-semibold border transition-colors cursor-pointer ${
+                            selectedNode.data.formScope !== 'specific_form'
+                              ? 'bg-white border-emerald-500 text-emerald-900 shadow-2xs'
+                              : 'bg-emerald-50/40 border-emerald-200 text-slate-600 hover:bg-white'
+                          }`}
+                        >
+                          All forms targeting "{targetList}"
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const firstForm =
+                              assets.find(
+                                (a) =>
+                                  (a.targetList || '').trim().toLowerCase() ===
+                                  targetList.trim().toLowerCase()
+                              ) || assets[0];
+                            handleUpdateNodeFields({
+                              formScope: 'specific_form',
+                              targetFormId: firstForm?.id || '',
+                              targetFormTitle: firstForm?.title || '',
+                            });
+                          }}
+                          className={`px-3 py-2 rounded-lg text-left text-xs font-semibold border transition-colors cursor-pointer ${
+                            selectedNode.data.formScope === 'specific_form'
+                              ? 'bg-white border-emerald-500 text-emerald-900 shadow-2xs'
+                              : 'bg-emerald-50/40 border-emerald-200 text-slate-600 hover:bg-white'
+                          }`}
+                        >
+                          Pick one specific capture form
+                        </button>
+                      </div>
+
+                      {selectedNode.data.formScope === 'specific_form' && (
+                        <div>
+                          <label className="block text-[11px] font-bold text-emerald-950 mb-1">
+                            Select Capture Form *
+                          </label>
+                          {assets.length === 0 ? (
+                            <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-2">
+                              No capture forms created yet. Create a form in Lead Gen &amp; Forms, or keep matching all list forms.
+                            </p>
+                          ) : (
+                            <select
+                              value={selectedNode.data.targetFormId || ''}
+                              onChange={(e) => {
+                                const picked = assets.find((a) => a.id === e.target.value);
+                                handleUpdateNodeFields({
+                                  formScope: 'specific_form',
+                                  targetFormId: picked?.id || '',
+                                  targetFormTitle: picked?.title || '',
+                                });
+                              }}
+                              className="w-full px-3 py-2 bg-white border border-emerald-300 rounded-lg text-xs font-semibold text-slate-900"
+                            >
+                              <option value="">-- Choose a capture form --</option>
+                              {assets.map((asset) => (
+                                <option key={asset.id} value={asset.id}>
+                                  {asset.title} ({asset.targetList || 'General'})
+                                </option>
+                              ))}
+                            </select>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {(selectedNode.data.nodeType === 'trigger_tag_added' ||
+                    selectedNode.data.nodeType === 'trigger_tag_removed') && (
+                    <div>
+                      <label className="block font-bold text-slate-700 mb-1.5">
+                        Segment Tag Name *
+                      </label>
+                      <input
+                        type="text"
+                        value={selectedNode.data.tagName || ''}
+                        onChange={(e) => handleUpdateNodeData('tagName', e.target.value)}
+                        placeholder="e.g. VIP_Buyer, Purchased_Course"
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl font-mono font-bold"
+                      />
+                    </div>
+                  )}
+
+                  {selectedNode.data.nodeType === 'trigger_specific_datetime' && (
+                    <div>
+                      <label className="block font-bold text-slate-700 mb-1.5">
+                        Scheduled Date &amp; Time *
+                      </label>
+                      <input
+                        type="datetime-local"
+                        value={selectedNode.data.scheduledAt || ''}
+                        onChange={(e) => handleUpdateNodeData('scheduledAt', e.target.value)}
+                        className="w-full px-3 py-2 bg-white border border-slate-300 rounded-xl font-semibold"
+                      />
+                    </div>
+                  )}
 
                   {selectedNode.data.nodeType === 'trigger_keyword' && (
                     <div>

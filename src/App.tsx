@@ -75,6 +75,10 @@ import {
 } from './services/accountPersistenceService';
 import { db, auth, handleFirestoreError, OperationType } from './firebase';
 import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
+import {
+  deliverChannelMessage,
+  personalizeAutomationMessage,
+} from './services/messageDeliveryService';
 
 import { FlowPilotLogo } from './components/FlowPilotLogo';
 import { LandingPage } from './components/LandingPage';
@@ -300,7 +304,16 @@ export default function App() {
   const [automationModalOpenOnMount, setAutomationModalOpenOnMount] = useState(false);
   const [campaignModalOpenOnMount, setCampaignModalOpenOnMount] = useState(false);
   const [assetModalMode, setAssetModalMode] = useState<'landing_page' | 'inline_form' | null>(null);
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [navDrawerOpen, setNavDrawerOpen] = useState(false);
+
+  useEffect(() => {
+    if (!navDrawerOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setNavDrawerOpen(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [navDrawerOpen]);
 
   // Active User UID for multi-tenant isolation
   const activeUid = user?.uid || 'default_workspace';
@@ -1083,6 +1096,49 @@ export default function App() {
         updatedAt: now,
       };
 
+      const submittedListNormalized = (asset.targetList || 'General').trim().toLowerCase();
+      const submittedFormTitleNormalized = (asset.title || '').trim().toLowerCase();
+
+      // Match active automations configured for form submission or joining this target list
+      const matchedAutomations = (snapshot.automations || []).filter((auto) => {
+        if (auto.status !== 'active') return false;
+        if (auto.triggerType !== 'form_submission' && auto.triggerType !== 'list_joined') {
+          return false;
+        }
+        let triggerData: Record<string, any> | undefined;
+        if (auto.flowGraphJson) {
+          try {
+            const parsed = JSON.parse(auto.flowGraphJson);
+            if (Array.isArray(parsed?.nodes)) {
+              const trig = parsed.nodes.find((n: any) => n.type === 'trigger');
+              triggerData = trig?.data;
+            }
+          } catch {
+            // Ignore malformed JSON
+          }
+        }
+
+        if (triggerData?.formScope === 'specific_form') {
+          const matchesId = !!triggerData.targetFormId && triggerData.targetFormId === asset.id;
+          const matchesTitle =
+            !!triggerData.targetFormTitle &&
+            triggerData.targetFormTitle.trim().toLowerCase() === submittedFormTitleNormalized;
+          return matchesId || matchesTitle;
+        }
+
+        const autoListNormalized = (auto.targetList || auto.targetListName || '').trim().toLowerCase();
+        if (!autoListNormalized || autoListNormalized === 'general' || autoListNormalized === 'general contacts') {
+          return (
+            auto.triggerType === 'form_submission' ||
+            submittedListNormalized === 'general' ||
+            submittedListNormalized === 'general contacts'
+          );
+        }
+        return autoListNormalized === submittedListNormalized;
+      });
+
+      const matchedIds = new Set(matchedAutomations.map((m) => m.id));
+
       updateSnapshot((prev) => ({
         ...prev,
         contacts: [newContact, ...prev.contacts],
@@ -1096,6 +1152,19 @@ export default function App() {
               }
             : a
         ),
+        automations:
+          matchedIds.size > 0
+            ? prev.automations.map((auto) =>
+                matchedIds.has(auto.id)
+                  ? {
+                      ...auto,
+                      enrolledCount: (auto.enrolledCount || 0) + 1,
+                      completedCount: (auto.completedCount || 0) + 1,
+                      updatedAt: now,
+                    }
+                  : auto
+              )
+            : prev.automations,
       }));
 
       await handleLogActivity(
@@ -1105,7 +1174,83 @@ export default function App() {
         'web'
       );
 
-      // Persist lead to server public capture endpoint so incognito submissions trigger server automations
+      // Evaluate immediate opening workflow actions after form submission
+      for (const auto of matchedAutomations) {
+        await handleLogActivity(
+          'automation_triggered',
+          `Workflow started after form submission: ${auto.name}`,
+          `Lead ${lead.fullName} matched trigger (${auto.triggerDetail || auto.triggerType})`,
+          'system'
+        );
+
+        if (auto.flowGraphJson) {
+          try {
+            const parsed = JSON.parse(auto.flowGraphJson);
+            const gNodes: any[] = Array.isArray(parsed?.nodes) ? parsed.nodes : [];
+            const gEdges: any[] = Array.isArray(parsed?.edges) ? parsed.edges : [];
+            const visited = new Set<string>();
+            let cursor = gNodes.find((n) => n.type === 'trigger');
+            let stepsWalked = 0;
+
+            while (cursor && !visited.has(cursor.id) && stepsWalked < 5) {
+              visited.add(cursor.id);
+              stepsWalked += 1;
+
+              if (cursor.type === 'delay') {
+                // Stop immediate execution at first wait timer
+                break;
+              }
+
+              if (cursor.type === 'action') {
+                const rawMsg =
+                  cursor.data?.message ||
+                  `Hi {{first_name}}! Thanks for submitting ${asset.title}.`;
+                const personalizedBody = personalizeAutomationMessage(rawMsg, {
+                  fullName: lead.fullName,
+                  email: lead.email,
+                  phone: lead.phone,
+                  company: extra?.company,
+                  listName: asset.targetList || 'General',
+                  senderName: snapshot.workspace.senderName,
+                  automationId: auto.id,
+                });
+
+                if (cursor.data?.nodeType === 'action_send_whatsapp' && lead.phone) {
+                  deliverChannelMessage({
+                    channel: 'whatsapp',
+                    to: lead.phone,
+                    leadName: lead.fullName,
+                    body: personalizedBody,
+                    listName: asset.targetList || 'General',
+                    source: 'automation_workflow',
+                    workspace: snapshot.workspace,
+                    privateProfile: snapshot.privateProfile,
+                  }).catch(() => {});
+                } else if (cursor.data?.nodeType === 'action_send_email' && lead.email) {
+                  deliverChannelMessage({
+                    channel: 'email',
+                    to: lead.email,
+                    leadName: lead.fullName,
+                    subject: cursor.data?.emailSubject || auto.name,
+                    body: personalizedBody,
+                    listName: asset.targetList || 'General',
+                    source: 'automation_workflow',
+                    workspace: snapshot.workspace,
+                    privateProfile: snapshot.privateProfile,
+                  }).catch(() => {});
+                }
+              }
+
+              const nextEdge = gEdges.find((e) => e.source === cursor.id);
+              cursor = nextEdge ? gNodes.find((n) => n.id === nextEdge.target) : undefined;
+            }
+          } catch {
+            // Safe guard against non-canvas legacy graphs
+          }
+        }
+      }
+
+      // Best-effort optional webhook capture sync (never blocks static frontend workflows)
       fetch('/api/leads/capture', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1122,7 +1267,14 @@ export default function App() {
         }),
       }).catch(() => {});
     },
-    [activeUid, handleLogActivity, snapshot.workspace.id, updateSnapshot]
+    [
+      activeUid,
+      handleLogActivity,
+      snapshot.automations,
+      snapshot.privateProfile,
+      snapshot.workspace,
+      updateSnapshot,
+    ]
   );
 
   // --------------------------------------------------------------------------
@@ -1553,14 +1705,28 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#F8FAFC] dark:bg-[#090D16] text-[#0F172A] dark:text-[#F1F5F9] font-sans antialiased flex flex-col selection:bg-blue-600 selection:text-white transition-colors duration-200">
       {/* ------------------------------------------------------------------ */}
-      {/* GLOBAL HEADER / NAVIGATION BAR                                     */}
+      {/* GLOBAL HEADER BAR (HAMBURGER DRAWER TRIGGER ACROSS ALL VIEWPORTS)  */}
       {/* ------------------------------------------------------------------ */}
       <header className="sticky top-0 z-40 bg-white/95 dark:bg-[#0D1322]/95 backdrop-blur-md border-b border-slate-200/80 dark:border-slate-800/80 shadow-xs">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-3">
-          {/* Brand Logo & Breadcrumb Navigation */}
-          <div className="flex items-center gap-3">
+          {/* Left: Hamburger Trigger, Brand Logo & Breadcrumb */}
+          <div className="flex items-center gap-3 min-w-0">
+            {!isPublicLanding && (
+              <button
+                type="button"
+                onClick={() => setNavDrawerOpen((prev) => !prev)}
+                className="inline-flex items-center justify-center p-2 rounded-lg border border-slate-200 dark:border-slate-800 text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer shrink-0"
+                aria-label="Open workspace navigation menu"
+                aria-expanded={navDrawerOpen}
+                title="Open Workspace Navigation"
+              >
+                {navDrawerOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+              </button>
+            )}
+
             <button
               onClick={() => {
+                setNavDrawerOpen(false);
                 if (isPublicLanding) {
                   setIsPublicLanding(false);
                   setActiveTab('dashboard');
@@ -1568,7 +1734,7 @@ export default function App() {
                   setActiveTab('dashboard');
                 }
               }}
-              className="flex items-center gap-2.5 focus:outline-hidden group"
+              className="flex items-center gap-2.5 focus:outline-hidden group shrink-0 cursor-pointer"
               title="Return to FlowPilot Dashboard"
             >
               <FlowPilotLogo variant={themeMode === 'dark' ? 'dark' : 'light'} size="sm" />
@@ -1576,30 +1742,27 @@ export default function App() {
 
             {/* Breadcrumb Hierarchy */}
             {!isPublicLanding && (
-              <div className="hidden md:flex items-center gap-1.5 pl-3 border-l border-slate-200 dark:border-slate-700 text-xs text-slate-500 dark:text-slate-400">
-                <span className="font-medium text-slate-600 dark:text-slate-300">
+              <div className="hidden md:flex items-center gap-1.5 pl-3 border-l border-slate-200 dark:border-slate-700 text-xs text-slate-500 dark:text-slate-400 min-w-0">
+                <span className="font-medium text-slate-600 dark:text-slate-300 truncate max-w-[140px]">
                   {snapshot.workspace.name || 'FlowPilot'}
                 </span>
-                <ChevronRight className="w-3.5 h-3.5 text-slate-400" />
-                <span className="font-semibold text-slate-900 dark:text-white">
+                <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <span className="font-semibold text-slate-900 dark:text-white whitespace-nowrap">
                   {navItems.find((n) => n.id === activeTab)?.label || 'Dashboard'}
                 </span>
               </div>
             )}
           </div>
 
-          {/* Center Domain Badge & System Health */}
+          {/* Center Domain Status */}
           {!isPublicLanding && (
             <div className="hidden lg:flex items-center gap-2">
               <button
                 onClick={() => setActiveTab('email_domain')}
-                className="group flex items-center gap-2 px-3 py-1.5 rounded-full bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 hover:border-blue-500/50 transition-colors text-xs"
+                className="group flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 hover:border-blue-500/50 transition-colors text-xs cursor-pointer whitespace-nowrap"
                 title="Manage Custom Domain & DNS"
               >
-                <span className="relative flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                </span>
+                <span className="inline-flex rounded-full h-2 w-2 bg-emerald-500 shrink-0" />
                 <span className="font-mono text-slate-600 dark:text-slate-400 group-hover:text-blue-600 dark:group-hover:text-blue-400">
                   passiveincome.work.gd
                 </span>
@@ -1609,14 +1772,15 @@ export default function App() {
           )}
 
           {/* Quick Utility Tools (Right side) */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 shrink-0">
             {!isPublicLanding && (
               <button
                 onClick={() => {
+                  setNavDrawerOpen(false);
                   setActiveTab('workflow_builder');
                   setAutomationModalOpenOnMount(true);
                 }}
-                className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-xs font-semibold shadow-xs shadow-blue-500/20 transition-colors cursor-pointer"
+                className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-xs font-semibold shadow-xs shadow-blue-500/20 transition-colors cursor-pointer whitespace-nowrap shrink-0"
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>New Workflow</span>
@@ -1625,8 +1789,11 @@ export default function App() {
 
             {/* View Mode Switcher */}
             <button
-              onClick={() => setIsPublicLanding((prev) => !prev)}
-              className="text-xs font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors hidden md:inline-flex items-center gap-1.5"
+              onClick={() => {
+                setNavDrawerOpen(false);
+                setIsPublicLanding((prev) => !prev);
+              }}
+              className="text-xs font-medium text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white px-2.5 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors hidden md:inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
             >
               {isPublicLanding ? (
                 <>
@@ -1644,7 +1811,7 @@ export default function App() {
             {/* System Diagnostics Trigger */}
             <button
               onClick={() => setDiagnosticsModalOpen(true)}
-              className="p-2 text-slate-500 hover:text-blue-600 dark:text-slate-400 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/50 rounded-lg transition-colors border border-transparent hover:border-blue-200 dark:hover:border-blue-800"
+              className="p-2 text-slate-500 hover:text-blue-600 dark:text-slate-400 dark:hover:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/50 rounded-lg transition-colors border border-transparent hover:border-blue-200 dark:hover:border-blue-800 cursor-pointer"
               title="Open System Diagnostics & Delivery Gateway Monitor"
             >
               <Activity className="w-4 h-4" />
@@ -1653,7 +1820,7 @@ export default function App() {
             {/* Design System Reference Trigger */}
             <button
               onClick={() => setDesignSystemModalOpen(true)}
-              className="p-2 text-slate-500 hover:text-purple-600 dark:text-slate-400 dark:hover:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-950/50 rounded-lg transition-colors border border-transparent hover:border-purple-200 dark:hover:border-purple-800"
+              className="p-2 text-slate-500 hover:text-purple-600 dark:text-slate-400 dark:hover:text-purple-400 hover:bg-purple-50 dark:hover:bg-purple-950/50 rounded-lg transition-colors border border-transparent hover:border-purple-200 dark:hover:border-purple-800 cursor-pointer"
               title="Design System & Theme Export"
             >
               <Palette className="w-4 h-4" />
@@ -1662,7 +1829,7 @@ export default function App() {
             {/* Light / Dark Theme Mode Toggle */}
             <button
               onClick={toggleTheme}
-              className="p-2 text-slate-500 hover:text-amber-600 dark:text-slate-400 dark:hover:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/50 rounded-lg transition-colors border border-transparent hover:border-amber-200 dark:hover:border-amber-800"
+              className="p-2 text-slate-500 hover:text-amber-600 dark:text-slate-400 dark:hover:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-950/50 rounded-lg transition-colors border border-transparent hover:border-amber-200 dark:hover:border-amber-800 cursor-pointer"
               title={themeMode === 'dark' ? 'Switch to Light Theme' : 'Switch to Dark Theme'}
             >
               {themeMode === 'dark' ? (
@@ -1677,7 +1844,7 @@ export default function App() {
               <div className="flex items-center gap-2 pl-2 border-l border-slate-200 dark:border-slate-800">
                 <button
                   onClick={() => setActiveTab('settings')}
-                  className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-left"
+                  className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors text-left cursor-pointer"
                 >
                   <div className="w-7 h-7 rounded-full bg-[#2563EB] text-white flex items-center justify-center font-bold text-xs ring-2 ring-blue-500/20">
                     {(user.displayName || user.email || 'U').charAt(0).toUpperCase()}
@@ -1696,7 +1863,7 @@ export default function App() {
                     await logout();
                     setIsPublicLanding(true);
                   }}
-                  className="p-2 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg transition-colors"
+                  className="p-2 text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg transition-colors cursor-pointer"
                   title="Sign Out"
                 >
                   <LogOut className="w-4 h-4" />
@@ -1709,7 +1876,7 @@ export default function App() {
                     setAuthModalMode('signin');
                     setAuthModalOpen(true);
                   }}
-                  className="text-xs font-semibold text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white px-3 py-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                  className="text-xs font-semibold text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white px-3 py-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer whitespace-nowrap"
                 >
                   Sign In
                 </button>
@@ -1718,103 +1885,157 @@ export default function App() {
                     setAuthModalMode('signup');
                     setAuthModalOpen(true);
                   }}
-                  className="text-xs font-semibold bg-[#2563EB] hover:bg-[#1D4ED8] text-white px-3.5 py-1.5 rounded-lg shadow-xs shadow-blue-500/20 transition-all flex items-center gap-1.5"
+                  className="text-xs font-semibold bg-[#2563EB] hover:bg-[#1D4ED8] text-white px-3.5 py-1.5 rounded-lg shadow-xs shadow-blue-500/20 transition-all flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
                 >
                   <UserIcon className="w-3.5 h-3.5" />
                   Create Account
                 </button>
               </div>
             )}
-
-            {/* Mobile Navigation Menu Toggle */}
-            {!isPublicLanding && (
-              <button
-                onClick={() => setMobileMenuOpen((prev) => !prev)}
-                className="xl:hidden p-2 text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800 rounded-lg ml-1"
-                aria-label="Toggle navigation menu"
-              >
-                {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
-              </button>
-            )}
           </div>
         </div>
+      </header>
 
-        {/* ------------------------------------------------------------------ */}
-        {/* SECONDARY NAVIGATION BAR (WORKSPACE TABS)                          */}
-        {/* ------------------------------------------------------------------ */}
-        {!isPublicLanding && (
-          <div className="hidden xl:block border-t border-b border-slate-200 dark:border-slate-800/80 bg-white/70 dark:bg-[#0A0F1D]/70 backdrop-blur-xs overflow-x-auto scrollbar-none">
-            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center space-x-1 py-1.5">
-              {navItems.map((item) => {
-                const Icon = item.icon;
-                const isActive = activeTab === item.id;
+      {/* ------------------------------------------------------------------ */}
+      {/* SLIDE-OUT WORKSPACE NAVIGATION DRAWER (DESKTOP & MOBILE)           */}
+      {/* ------------------------------------------------------------------ */}
+      {!isPublicLanding && (
+        <>
+          {navDrawerOpen && (
+            <div
+              className="fixed inset-0 z-50 bg-slate-950/45 backdrop-blur-xs transition-opacity"
+              onClick={() => setNavDrawerOpen(false)}
+              aria-hidden="true"
+            />
+          )}
+
+          <aside
+            className={`fixed inset-y-0 left-0 z-50 w-72 sm:w-80 bg-white dark:bg-[#0D1322] border-r border-slate-200 dark:border-slate-800 shadow-2xl flex flex-col transform transition-transform duration-200 ease-out ${
+              navDrawerOpen ? 'translate-x-0' : '-translate-x-full pointer-events-none'
+            }`}
+            aria-label="Workspace Navigation"
+            aria-hidden={!navDrawerOpen}
+          >
+            {/* Drawer Header */}
+            <div className="h-16 px-5 border-b border-slate-200 dark:border-slate-800 flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2.5">
+                <FlowPilotLogo variant={themeMode === 'dark' ? 'dark' : 'light'} size="sm" />
+              </div>
+              <button
+                type="button"
+                onClick={() => setNavDrawerOpen(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+                aria-label="Close navigation menu"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Grouped Navigation Items */}
+            <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-5">
+              {[
+                {
+                  groupTitle: 'Core Workspace',
+                  ids: ['dashboard', 'workflow_builder', 'lists', 'contacts'] as ActiveTab[],
+                },
+                {
+                  groupTitle: 'Messaging & Channels',
+                  ids: ['inbox', 'campaigns', 'autoresponders', 'chatbots'] as ActiveTab[],
+                },
+                {
+                  groupTitle: 'Lead Capture & Funnels',
+                  ids: ['assets', 'funnels'] as ActiveTab[],
+                },
+                {
+                  groupTitle: 'Connections & Settings',
+                  ids: [
+                    'connect_whatsapp',
+                    'whatsapp_connect',
+                    'email_domain',
+                    'webhooks',
+                    'settings',
+                  ] as ActiveTab[],
+                },
+              ].map((group) => {
+                const items = group.ids
+                  .map((id) => navItems.find((n) => n.id === id))
+                  .filter((n): n is NavItem => Boolean(n));
+
                 return (
-                  <button
-                    key={item.id}
-                    onClick={() => setActiveTab(item.id)}
-                    className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium transition-all whitespace-nowrap relative ${
-                      isActive
-                        ? 'bg-[#2563EB] text-white font-semibold shadow-xs shadow-blue-500/20'
-                        : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white hover:bg-slate-100 dark:hover:bg-slate-800/60'
-                    }`}
-                  >
-                    <Icon className={`w-3.5 h-3.5 ${isActive ? 'text-white' : 'text-slate-400 dark:text-slate-500'}`} />
-                    <span>{item.label}</span>
-                    {item.badge !== undefined && (
-                      <span
-                        className={`text-[10px] font-bold px-1.5 py-0.2 rounded-full leading-tight ${
-                          isActive
-                            ? 'bg-white text-blue-600'
-                            : 'bg-rose-500 text-white animate-pulse'
-                        }`}
-                      >
-                        {item.badge}
-                      </span>
-                    )}
-                  </button>
+                  <div key={group.groupTitle} className="space-y-1">
+                    <p className="px-3 text-[11px] font-bold uppercase tracking-wider text-slate-400 dark:text-slate-500">
+                      {group.groupTitle}
+                    </p>
+                    <div className="space-y-0.5">
+                      {items.map((item) => {
+                        const Icon = item.icon;
+                        const isActive = activeTab === item.id;
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            onClick={() => {
+                              setActiveTab(item.id);
+                              setNavDrawerOpen(false);
+                            }}
+                            className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-semibold transition-colors cursor-pointer whitespace-nowrap ${
+                              isActive
+                                ? 'bg-[#2563EB] text-white shadow-xs shadow-blue-500/20'
+                                : 'text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800/70 hover:text-slate-900 dark:hover:text-white'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2.5 min-w-0">
+                              <Icon
+                                className={`w-4 h-4 shrink-0 ${
+                                  isActive
+                                    ? 'text-white'
+                                    : 'text-slate-400 dark:text-slate-500'
+                                }`}
+                              />
+                              <span className="truncate">{item.label}</span>
+                            </div>
+                            {item.badge !== undefined && (
+                              <span
+                                className={`text-[10px] font-bold px-2 py-0.5 rounded-md tabular-nums ${
+                                  isActive
+                                    ? 'bg-white text-blue-600'
+                                    : 'bg-rose-500 text-white'
+                                }`}
+                              >
+                                {item.badge}
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
                 );
               })}
-            </div>
-          </div>
-        )}
+            </nav>
 
-        {/* Mobile Flyout Navigation Menu */}
-        {!isPublicLanding && mobileMenuOpen && (
-          <div className="xl:hidden border-t border-slate-200 dark:border-slate-800 bg-white dark:bg-[#0D1322] px-4 py-3 space-y-1 shadow-lg animate-in slide-in-from-top-2">
-            <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400 px-3 py-1">
-              Workspace Navigation
-            </p>
-            {navItems.map((item) => {
-              const Icon = item.icon;
-              const isActive = activeTab === item.id;
-              return (
-                <button
-                  key={item.id}
-                  onClick={() => {
-                    setActiveTab(item.id);
-                    setMobileMenuOpen(false);
-                  }}
-                  className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-xs font-semibold transition-colors ${
-                    isActive
-                      ? 'bg-blue-600 text-white'
-                      : 'text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800'
-                  }`}
-                >
-                  <div className="flex items-center gap-2.5">
-                    <Icon className="w-4 h-4" />
-                    <span>{item.label}</span>
-                  </div>
-                  {item.badge !== undefined && (
-                    <span className="bg-rose-500 text-white text-[10px] font-bold px-1.5 py-0.5 rounded-full">
-                      {item.badge}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </div>
-        )}
-      </header>
+            {/* Drawer Footer CTA */}
+            <div className="p-4 border-t border-slate-200 dark:border-slate-800 space-y-2.5 shrink-0 bg-slate-50/70 dark:bg-[#0A0F1D]">
+              <button
+                type="button"
+                onClick={() => {
+                  setNavDrawerOpen(false);
+                  setActiveTab('workflow_builder');
+                  setAutomationModalOpenOnMount(true);
+                }}
+                className="w-full py-2.5 px-3.5 rounded-xl bg-[#2563EB] hover:bg-[#1D4ED8] text-white text-xs font-bold flex items-center justify-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap"
+              >
+                <Plus className="w-4 h-4" />
+                <span>Create New Workflow</span>
+              </button>
+              <div className="flex items-center justify-between text-[11px] text-slate-500 dark:text-slate-400 px-1">
+                <span className="truncate">{snapshot.workspace.name || 'Workspace'}</span>
+                <span className="font-mono text-emerald-600 font-semibold">Live</span>
+              </div>
+            </div>
+          </aside>
+        </>
+      )}
 
       {/* ------------------------------------------------------------------ */}
       {/* MAIN CONTENT VIEW CONTROLLER                                       */}
@@ -1941,6 +2162,7 @@ export default function App() {
                     automations={snapshot.automations}
                     lists={snapshot.lists}
                     contacts={snapshot.contacts}
+                    assets={snapshot.assets}
                     preselectedListName={preselectedListName}
                     onClearPreselectedList={() => setPreselectedListName(null)}
                     openCreateModalOnMount={automationModalOpenOnMount}

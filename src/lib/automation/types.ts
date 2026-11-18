@@ -1,6 +1,16 @@
 export type DelayUnit = 'Minutes' | 'Hours' | 'Days';
 
-export type WorkflowNodeType = 
+export type WorkflowNodeType =
+  | 'trigger_form_submission'
+  | 'trigger_list_joined'
+  | 'trigger_contact_added'
+  | 'trigger_tag_added'
+  | 'trigger_tag_removed'
+  | 'trigger_purchase_completed'
+  | 'trigger_link_clicked'
+  | 'trigger_email_opened'
+  | 'trigger_webhook_received'
+  | 'trigger_specific_datetime'
   | 'trigger_whatsapp_reply'
   | 'trigger_email_reply'
   | 'trigger_keyword'
@@ -24,6 +34,11 @@ export interface WorkflowNodeData {
   matchType?: 'contains' | 'exact' | 'starts_with';
   // Trigger properties
   triggerKeyword?: string;
+  formScope?: 'all_list_forms' | 'specific_form';
+  targetFormId?: string;
+  targetFormTitle?: string;
+  tagName?: string;
+  scheduledAt?: string;
   [key: string]: any;
 }
 
