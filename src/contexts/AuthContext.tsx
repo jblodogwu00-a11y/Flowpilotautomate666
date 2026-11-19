@@ -11,7 +11,6 @@ import {
   sendPasswordReset,
   mapFirebaseAuthError,
   ensureUserDocumentInFirestore,
-  createSyntheticFirebaseUser,
 } from '../firebase';
 import {
   ActiveAccountSession,
@@ -57,10 +56,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
   const clearError = () => setError(null);
 
   useEffect(() => {
-    // 1. Preload local session so UI never flashes empty state
+    // 1. Preload real Firebase session hint while auth initializes
     const cached = getStoredActiveAccountSession();
-    if (cached && cached.emailVerified) {
-      setUser(auth.currentUser || createSyntheticFirebaseUser(cached));
+    if (cached && cached.emailVerified && cached.isFirebaseUser && auth.currentUser) {
+      setUser(auth.currentUser);
     }
 
     // 2. Global Firebase Auth State Listener
@@ -83,13 +82,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         };
         saveStoredActiveAccountSession(session);
       } else {
-        const local = getStoredActiveAccountSession();
-        if (local && local.emailVerified) {
-          setUser(createSyntheticFirebaseUser(local));
-        } else {
-          setUser(null);
-          setUserProfile(null);
-        }
+        // Never masquerade as signed in without real Firebase Auth credentials
+        saveStoredActiveAccountSession(null);
+        setUser(null);
+        setUserProfile(null);
       }
       setLoading(false);
     });
@@ -99,10 +95,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     };
   }, []);
 
-  // Synchronize Firestore user document (/users/{uid}) in realtime
+  // Synchronize Firestore user document (/users/{uid}) in realtime once Firebase Auth is ready
   useEffect(() => {
-    if (!user) {
-      setUserProfile(null);
+    if (loading || !user || auth.currentUser?.uid !== user.uid) {
+      if (!user) setUserProfile(null);
       return;
     }
 
@@ -122,7 +118,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         }
       },
       () => {
-        // Fallback without failing
         setUserProfile({
           uid: user.uid,
           email: user.email || '',
@@ -135,7 +130,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
     return () => {
       unsubDoc();
     };
-  }, [user]);
+  }, [loading, user]);
 
   const signInWithGoogle = async (): Promise<User> => {
     setError(null);

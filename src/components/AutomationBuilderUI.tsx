@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useEffect } from 'react';
+import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import {
   ReactFlow,
   Controls,
@@ -50,6 +50,10 @@ import {
   MousePointerClick,
   Calendar,
   Webhook,
+  Cloud,
+  CloudOff,
+  UploadCloud,
+  LogIn,
 } from 'lucide-react';
 import { DelayUnit, WorkflowNodeType } from '../lib/automation/types';
 import {
@@ -980,6 +984,9 @@ function serializeCompactGraph(nodes: FlowCustomNode[], edges: Edge[]): string {
 
 export interface AutomationBuilderUIProps {
   userId?: string;
+  isAuthenticated?: boolean;
+  cloudSyncState?: 'synced' | 'syncing' | 'local_only' | 'error';
+  onOpenAuth?: () => void;
   initialWorkflowId?: string;
   automations: Automation[];
   lists: AudienceList[];
@@ -990,11 +997,13 @@ export interface AutomationBuilderUIProps {
   openCreateModalOnMount?: boolean;
   onClearCreateModalMount?: () => void;
   onCreateAutomation: (
-    data: Omit<Automation, 'id' | 'workspaceId' | 'ownerId' | 'createdAt' | 'updatedAt'>
+    data: Omit<Automation, 'id' | 'workspaceId' | 'ownerId' | 'createdAt' | 'updatedAt'>,
+    options?: { logAction?: 'saved_draft' | 'published' | 'silent' }
   ) => Promise<Automation>;
   onUpdateAutomation: (
     id: string,
-    data: Omit<Automation, 'id' | 'workspaceId' | 'ownerId' | 'createdAt' | 'updatedAt'>
+    data: Omit<Automation, 'id' | 'workspaceId' | 'ownerId' | 'createdAt' | 'updatedAt'>,
+    options?: { logAction?: 'saved_draft' | 'published' | 'silent' }
   ) => Promise<void>;
   onDeleteAutomation: (id: string) => Promise<void>;
   onCreateList: (
@@ -1005,6 +1014,9 @@ export interface AutomationBuilderUIProps {
 }
 
 export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
+  isAuthenticated = false,
+  cloudSyncState = 'local_only',
+  onOpenAuth,
   automations = [],
   lists = [],
   contacts = [],
@@ -1045,9 +1057,12 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
   const [editingAutomationId, setEditingAutomationId] = useState<string | null>(null);
   const [workflowName, setWorkflowName] = useState('New Drip Automation');
   const [targetList, setTargetList] = useState('General Contacts');
-  const [workflowEnabled, setWorkflowEnabled] = useState(true);
+  const [workflowStatus, setWorkflowStatus] = useState<AutomationStatus>('draft');
   const [isSaving, setIsSaving] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<'idle' | 'dirty' | 'saving' | 'saved' | 'error'>('idle');
   const [saveBanner, setSaveBanner] = useState<string | null>(null);
+  const lastSavedKeyRef = useRef<string>('');
+  const isInitialDraftCreatingRef = useRef<boolean>(false);
 
   // Sidebar & Inspector
   const [sidebarTab, setSidebarTab] = useState<'nodes' | 'blueprints'>('nodes');
@@ -1112,23 +1127,197 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
     return Array.from(map.values());
   }, [lists, contacts]);
 
-  // Launch Canvas directly if invoked via Segments & Lists / Forms preselectedListName
-  useEffect(() => {
-    if (preselectedListName && preselectedListName.trim()) {
-      const cleanList = preselectedListName.trim();
+  // Build Firestore-safe workflow payload from canvas state
+  const buildWorkflowPayload = useCallback(
+    (
+      statusToSave: AutomationStatus,
+      nameInput: string,
+      listInput: string,
+      nodesInput: FlowCustomNode[],
+      edgesInput: Edge[],
+      existingAuto?: Automation
+    ): Omit<Automation, 'id' | 'workspaceId' | 'ownerId' | 'createdAt' | 'updatedAt'> => {
+      const cleanName = sanitizeString(nameInput, 120, 'Untitled Workflow');
+      const cleanList = sanitizeString(listInput, 80, 'General Contacts');
+
+      const triggerNode =
+        nodesInput.find(
+          (n) => n.type === 'trigger' && edgesInput.some((e) => e.source === n.id)
+        ) || nodesInput.find((n) => n.type === 'trigger');
+      const triggerNodeType =
+        (triggerNode?.data?.nodeType as WorkflowNodeType) || 'trigger_list_joined';
+      const triggerMeta = getTriggerMeta(triggerNodeType);
+      const triggerType: TriggerType = triggerMeta.firestoreTriggerType;
+
+      let rawTriggerDetail = `List: ${cleanList}`;
+      if (triggerNodeType === 'trigger_form_submission') {
+        if (
+          triggerNode?.data?.formScope === 'specific_form' &&
+          triggerNode?.data?.targetFormTitle
+        ) {
+          rawTriggerDetail = `Form: ${triggerNode.data.targetFormTitle} · List: ${cleanList}`;
+        } else {
+          rawTriggerDetail = `Any Form on "${cleanList}"`;
+        }
+      } else if (
+        triggerNodeType === 'trigger_keyword' &&
+        triggerNode?.data?.triggerKeyword
+      ) {
+        rawTriggerDetail = `List: ${cleanList} · Keyword "${triggerNode.data.triggerKeyword}"`;
+      } else if (
+        (triggerNodeType === 'trigger_tag_added' ||
+          triggerNodeType === 'trigger_tag_removed') &&
+        triggerNode?.data?.tagName
+      ) {
+        rawTriggerDetail = `${triggerMeta.title}: "${triggerNode.data.tagName}" · List: ${cleanList}`;
+      } else if (triggerNode?.data?.label) {
+        rawTriggerDetail = `List: ${cleanList} · ${triggerNode.data.label}`;
+      }
+
+      const triggerDetail = sanitizeString(rawTriggerDetail, 120, `List: ${cleanList}`);
+
+      const derivedSteps = nodesInput.map((n) => {
+        if (n.type === 'trigger') {
+          const m = getTriggerMeta(n.data?.nodeType);
+          return sanitizeString(
+            `Trigger: ${n.data?.label || m.defaultLabel}`,
+            200,
+            'Trigger'
+          );
+        }
+        if (n.type === 'delay') {
+          return sanitizeString(
+            `Wait ${n.data?.delayValue || 5} ${n.data?.delayUnit || 'Minutes'}`,
+            200,
+            'Wait Delay'
+          );
+        }
+        if (n.type === 'condition') {
+          return sanitizeString(
+            `If message contains "${n.data?.keyword || 'price'}"`,
+            200,
+            'Condition Check'
+          );
+        }
+        if (n.data?.nodeType === 'action_send_email') {
+          return sanitizeString(
+            `Send Email: ${(n.data?.message || '').replace(/<[^>]+>/g, '').slice(0, 120) || 'Email reply'}`,
+            200,
+            'Send Email'
+          );
+        }
+        if (n.data?.nodeType === 'action_end_flow' || n.data?.nodeType === 'action_end') {
+          return 'End Workflow';
+        }
+        return sanitizeString(
+          `Send WhatsApp: ${(n.data?.message || '').slice(0, 120) || 'WhatsApp reply'}`,
+          200,
+          'Send WhatsApp'
+        );
+      });
+
+      const stepsSummary = sanitizeStringArray(
+        derivedSteps.length > 0 ? derivedSteps : [`Trigger for ${cleanList}`],
+        20,
+        200
+      );
+      if (stepsSummary.length === 0) stepsSummary.push(`Trigger for ${cleanList}`);
+
+      const channelSet = new Set<string>();
+      nodesInput.forEach((n) => {
+        if (
+          n.data?.nodeType === 'action_send_email' ||
+          n.data?.nodeType === 'trigger_email_reply' ||
+          n.data?.nodeType === 'trigger_email_opened'
+        ) {
+          channelSet.add('email');
+        } else if (
+          n.data?.nodeType === 'action_send_whatsapp' ||
+          n.data?.nodeType === 'trigger_whatsapp_reply' ||
+          n.data?.nodeType === 'trigger_keyword'
+        ) {
+          channelSet.add('whatsapp');
+        }
+      });
+      if (channelSet.size === 0) channelSet.add('whatsapp');
+      const channels = Array.from(channelSet).slice(0, 5);
+
+      const flowGraphJson = serializeCompactGraph(nodesInput, edgesInput);
+
+      return {
+        name: cleanName,
+        triggerType,
+        triggerDetail,
+        targetList: cleanList,
+        stepsSummary,
+        channels,
+        status: statusToSave,
+        enrolledCount: existingAuto?.enrolledCount || 0,
+        completedCount: existingAuto?.completedCount || 0,
+        conversionRate: existingAuto?.conversionRate || 0,
+        version: (existingAuto?.version || 0) + 1,
+        flowGraphJson,
+      };
+    },
+    []
+  );
+
+  // Immediately create & persist a brand-new Draft workflow when entering canvas
+  const initializeNewDraftOnCanvas = useCallback(
+    async (cleanList: string, customWorkflowName?: string, bannerNotice?: string) => {
       const starter = buildStarterGraphForList(cleanList);
+      const resolvedName = customWorkflowName?.trim() || `${cleanList} Automation Flow`;
+      const initialKey = JSON.stringify({
+        name: resolvedName,
+        targetList: cleanList,
+        graph: serializeCompactGraph(starter.nodes, starter.edges),
+      });
+
+      lastSavedKeyRef.current = initialKey;
       setEditingAutomationId(null);
       setTargetList(cleanList);
-      setWorkflowName(`${cleanList} Automation Flow`);
-      setWorkflowEnabled(true);
+      setWorkflowName(resolvedName);
+      setWorkflowStatus('draft');
       setNodes(starter.nodes);
       setEdges(starter.edges);
       setSelectedNode(null);
-      setSaveBanner(`Creating automation workflow for list "${cleanList}".`);
+      setSaveStatus('saving');
+      setSaveBanner(bannerNotice || null);
       setViewMode('canvas');
+
+      isInitialDraftCreatingRef.current = true;
+      try {
+        const draftPayload = buildWorkflowPayload(
+          'draft',
+          resolvedName,
+          cleanList,
+          starter.nodes,
+          starter.edges
+        );
+        const created = await onCreateAutomation(draftPayload, { logAction: 'saved_draft' });
+        setEditingAutomationId(created.id);
+        setSaveStatus('saved');
+      } catch {
+        setSaveStatus('error');
+      } finally {
+        isInitialDraftCreatingRef.current = false;
+      }
+    },
+    [buildWorkflowPayload, onCreateAutomation, setEdges, setNodes]
+  );
+
+  // Launch Canvas directly as Draft if invoked via Segments & Lists / Forms preselectedListName
+  useEffect(() => {
+    if (preselectedListName && preselectedListName.trim()) {
+      const cleanList = preselectedListName.trim();
       onClearPreselectedList?.();
+      void initializeNewDraftOnCanvas(
+        cleanList,
+        `${cleanList} Automation Flow`,
+        `Draft started for list "${cleanList}". Edit steps anytime and click Publish when ready.`
+      );
     }
-  }, [preselectedListName, onClearPreselectedList, setNodes, setEdges]);
+  }, [preselectedListName, onClearPreselectedList, initializeNewDraftOnCanvas]);
 
   // Open Create Workflow modal on mount if triggered from Dashboard/Header Quick Action
   useEffect(() => {
@@ -1161,6 +1350,8 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
   const hubStats = useMemo(() => {
     const total = automations.length;
     const active = automations.filter((a) => a.status === 'active').length;
+    const drafts = automations.filter((a) => a.status === 'draft').length;
+    const paused = automations.filter((a) => a.status === 'paused').length;
     const enrolled = automations.reduce((s, a) => s + (a.enrolledCount || 0), 0);
     const avgConv =
       total > 0
@@ -1168,7 +1359,7 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
             automations.reduce((s, a) => s + (a.conversionRate || 0), 0) / total
           )
         : 0;
-    return { total, active, enrolled, avgConv };
+    return { total, active, drafts, paused, enrolled, avgConv };
   }, [automations]);
 
   // Open Create Workflow Modal
@@ -1185,28 +1376,19 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
     setCreateModalOpen(true);
   };
 
-  // Confirm Existing List Selection -> Enter Canvas
-  const handleStartWithSelectedList = () => {
+  // Confirm Existing List Selection -> Create Draft & Enter Canvas
+  const handleStartWithSelectedList = async () => {
     if (!chosenListName.trim()) {
       setModalError('Please choose a contact list first, or create a new list.');
       return;
     }
     const cleanList = chosenListName.trim();
-    const starter = buildStarterGraphForList(cleanList);
-    setEditingAutomationId(null);
-    setTargetList(cleanList);
-    setWorkflowName(
-      draftWorkflowName.trim() || `${cleanList} Automation Flow`
-    );
-    setWorkflowEnabled(true);
-    setNodes(starter.nodes);
-    setEdges(starter.edges);
-    setSelectedNode(null);
+    const customTitle = draftWorkflowName.trim();
     setCreateModalOpen(false);
-    setViewMode('canvas');
+    await initializeNewDraftOnCanvas(cleanList, customTitle);
   };
 
-  // Create New List Inline -> Persist & Enter Canvas
+  // Create New List Inline -> Persist & Create Draft on Canvas
   const handleCreateNewListAndStart = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanName = sanitizeString(newListName, 100, '');
@@ -1228,19 +1410,13 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
         killSwitchEnabled: killTags.length > 0,
         killSwitchTags: killTags.length > 0 ? killTags : ['Purchased_Course'],
       });
-      const starter = buildStarterGraphForList(cleanName);
-      setEditingAutomationId(null);
-      setTargetList(cleanName);
-      setWorkflowName(
-        draftWorkflowName.trim() || `${cleanName} Automation Flow`
-      );
-      setWorkflowEnabled(true);
-      setNodes(starter.nodes);
-      setEdges(starter.edges);
-      setSelectedNode(null);
+      const customTitle = draftWorkflowName.trim();
       setCreateModalOpen(false);
-      setSaveBanner(`Created list "${cleanName}" and launched Workflow Canvas.`);
-      setViewMode('canvas');
+      await initializeNewDraftOnCanvas(
+        cleanName,
+        customTitle,
+        `Created list "${cleanName}" and saved initial workflow draft.`
+      );
     } finally {
       setCreatingListAndFlow(false);
     }
@@ -1254,39 +1430,59 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
       combinedLists[0]?.name ||
       'General Contacts';
     const rehydrated = rehydrateAutomationToCanvas(auto);
+    const loadedStatus: AutomationStatus =
+      auto.status === 'active'
+        ? 'active'
+        : auto.status === 'paused'
+        ? 'paused'
+        : 'draft';
+
+    lastSavedKeyRef.current = JSON.stringify({
+      name: auto.name,
+      targetList: resolvedList,
+      graph: serializeCompactGraph(rehydrated.nodes, rehydrated.edges),
+    });
+
     setEditingAutomationId(auto.id);
     setWorkflowName(auto.name);
     setTargetList(resolvedList);
-    setWorkflowEnabled(auto.status === 'active');
+    setWorkflowStatus(loadedStatus);
     setNodes(rehydrated.nodes);
     setEdges(rehydrated.edges);
     setSelectedNode(null);
     setSaveBanner(null);
+    setSaveStatus('saved');
     setViewMode('canvas');
   };
 
-  // Toggle Active / Paused directly from Saved Workflows Hub
-  const handleToggleAutomationStatus = async (auto: Automation) => {
-    const nextStatus: AutomationStatus =
-      auto.status === 'active' ? 'paused' : 'active';
-    await onUpdateAutomation(auto.id, {
-      name: auto.name,
-      triggerType: auto.triggerType,
-      triggerDetail: auto.triggerDetail,
-      targetList: auto.targetList || auto.targetListName || 'General Contacts',
-      stepsSummary:
-        auto.stepsSummary && auto.stepsSummary.length > 0
-          ? auto.stepsSummary
-          : ['Automated workflow sequence'],
-      channels:
-        auto.channels && auto.channels.length > 0 ? auto.channels : ['whatsapp'],
-      status: nextStatus,
-      enrolledCount: auto.enrolledCount || 0,
-      completedCount: auto.completedCount || 0,
-      conversionRate: auto.conversionRate || 0,
-      version: auto.version || 1,
-      ...(auto.flowGraphJson ? { flowGraphJson: auto.flowGraphJson } : {}),
-    });
+  // Publish or Toggle Active / Paused directly from Saved Workflows Hub
+  const handleHubStatusChange = async (
+    auto: Automation,
+    nextStatus: AutomationStatus,
+    logAction: 'published' | 'saved_draft' | 'silent'
+  ) => {
+    await onUpdateAutomation(
+      auto.id,
+      {
+        name: auto.name,
+        triggerType: auto.triggerType,
+        triggerDetail: auto.triggerDetail,
+        targetList: auto.targetList || auto.targetListName || 'General Contacts',
+        stepsSummary:
+          auto.stepsSummary && auto.stepsSummary.length > 0
+            ? auto.stepsSummary
+            : ['Automated workflow sequence'],
+        channels:
+          auto.channels && auto.channels.length > 0 ? auto.channels : ['whatsapp'],
+        status: nextStatus,
+        enrolledCount: auto.enrolledCount || 0,
+        completedCount: auto.completedCount || 0,
+        conversionRate: auto.conversionRate || 0,
+        version: (auto.version || 0) + 1,
+        ...(auto.flowGraphJson ? { flowGraphJson: auto.flowGraphJson } : {}),
+      },
+      { logAction }
+    );
   };
 
   // Canvas Connect Handler
@@ -1419,142 +1615,157 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
     [selectedNode, setNodes, setEdges]
   );
 
-  // Persist workflow directly to Workspace Snapshot & Firestore schema
-  const handleSaveWorkflow = async () => {
-    setIsSaving(true);
-    setSaveBanner(null);
+  // Stable dirty-check key excluding transient ReactFlow selection/measurement flags
+  const currentGraphKey = useMemo(() => {
+    if (viewMode !== 'canvas') return '';
+    return JSON.stringify({
+      name: workflowName,
+      targetList,
+      graph: serializeCompactGraph(nodes, edges),
+    });
+  }, [viewMode, workflowName, targetList, nodes, edges]);
 
-    try {
-      const cleanName = sanitizeString(workflowName, 120, 'Untitled Workflow');
-      const cleanList = sanitizeString(targetList, 80, 'General Contacts');
-      // Prefer connected trigger node or form submission trigger if present
-      const triggerNode =
-        nodes.find((n) => n.type === 'trigger' && edges.some((e) => e.source === n.id)) ||
-        nodes.find((n) => n.type === 'trigger');
-      const triggerNodeType = (triggerNode?.data?.nodeType as WorkflowNodeType) || 'trigger_list_joined';
-      const triggerMeta = getTriggerMeta(triggerNodeType);
-      const triggerType: TriggerType = triggerMeta.firestoreTriggerType;
+  // Unified Persist Handler (Auto-save draft, Explicit Save Draft, Explicit Publish)
+  const persistWorkflow = useCallback(
+    async (opts: {
+      targetStatus: AutomationStatus;
+      logAction: 'saved_draft' | 'published' | 'silent';
+      showBanner?: boolean;
+    }) => {
+      setIsSaving(true);
+      setSaveStatus('saving');
+      if (opts.showBanner) setSaveBanner(null);
 
-      let rawTriggerDetail = `List: ${cleanList}`;
-      if (triggerNodeType === 'trigger_form_submission') {
-        if (triggerNode?.data?.formScope === 'specific_form' && triggerNode?.data?.targetFormTitle) {
-          rawTriggerDetail = `Form: ${triggerNode.data.targetFormTitle} · List: ${cleanList}`;
-        } else {
-          rawTriggerDetail = `Any Form on "${cleanList}"`;
-        }
-      } else if (triggerNodeType === 'trigger_keyword' && triggerNode?.data?.triggerKeyword) {
-        rawTriggerDetail = `List: ${cleanList} · Keyword "${triggerNode.data.triggerKeyword}"`;
-      } else if (
-        (triggerNodeType === 'trigger_tag_added' || triggerNodeType === 'trigger_tag_removed') &&
-        triggerNode?.data?.tagName
-      ) {
-        rawTriggerDetail = `${triggerMeta.title}: "${triggerNode.data.tagName}" · List: ${cleanList}`;
-      } else if (triggerNode?.data?.label) {
-        rawTriggerDetail = `List: ${cleanList} · ${triggerNode.data.label}`;
-      }
-
-      const triggerDetail = sanitizeString(rawTriggerDetail, 120, `List: ${cleanList}`);
-
-      const derivedSteps = nodes.map((n) => {
-        if (n.type === 'trigger') {
-          const m = getTriggerMeta(n.data?.nodeType);
-          return sanitizeString(
-            `Trigger: ${n.data?.label || m.defaultLabel}`,
-            200,
-            'Trigger'
-          );
-        }
-        if (n.type === 'delay') {
-          return sanitizeString(
-            `Wait ${n.data?.delayValue || 5} ${n.data?.delayUnit || 'Minutes'}`,
-            200,
-            'Wait Delay'
-          );
-        }
-        if (n.type === 'condition') {
-          return sanitizeString(
-            `If message contains "${n.data?.keyword || 'price'}"`,
-            200,
-            'Condition Check'
-          );
-        }
-        if (n.data?.nodeType === 'action_send_email') {
-          return sanitizeString(
-            `Send Email: ${(n.data?.message || '').replace(/<[^>]+>/g, '').slice(0, 120) || 'Email reply'}`,
-            200,
-            'Send Email'
-          );
-        }
-        if (n.data?.nodeType === 'action_end_flow' || n.data?.nodeType === 'action_end') {
-          return 'End Workflow';
-        }
-        return sanitizeString(
-          `Send WhatsApp: ${(n.data?.message || '').slice(0, 120) || 'WhatsApp reply'}`,
-          200,
-          'Send WhatsApp'
+      try {
+        const existingAuto = editingAutomationId
+          ? automations.find((a) => a.id === editingAutomationId)
+          : undefined;
+        const payload = buildWorkflowPayload(
+          opts.targetStatus,
+          workflowName,
+          targetList,
+          nodes,
+          edges,
+          existingAuto
         );
-      });
 
-      const stepsSummary = sanitizeStringArray(
-        derivedSteps.length > 0 ? derivedSteps : [`Trigger for ${cleanList}`],
-        20,
-        200
-      );
+        lastSavedKeyRef.current = JSON.stringify({
+          name: workflowName,
+          targetList,
+          graph: serializeCompactGraph(nodes, edges),
+        });
 
-      const channelSet = new Set<string>();
-      nodes.forEach((n) => {
-        if (
-          n.data?.nodeType === 'action_send_email' ||
-          n.data?.nodeType === 'trigger_email_reply' ||
-          n.data?.nodeType === 'trigger_email_opened'
-        ) {
-          channelSet.add('email');
-        } else if (
-          n.data?.nodeType === 'action_send_whatsapp' ||
-          n.data?.nodeType === 'trigger_whatsapp_reply' ||
-          n.data?.nodeType === 'trigger_keyword'
-        ) {
-          channelSet.add('whatsapp');
+        setWorkflowStatus(opts.targetStatus);
+
+        if (existingAuto || editingAutomationId) {
+          const targetId = existingAuto?.id || editingAutomationId!;
+          await onUpdateAutomation(targetId, payload, { logAction: opts.logAction });
+        } else {
+          const created = await onCreateAutomation(payload, {
+            logAction: opts.logAction,
+          });
+          setEditingAutomationId(created.id);
         }
-      });
-      if (channelSet.size === 0) channelSet.add('whatsapp');
-      const channels = Array.from(channelSet).slice(0, 5);
 
-      const flowGraphJson = serializeCompactGraph(nodes, edges);
-      const existingAuto = editingAutomationId
-        ? automations.find((a) => a.id === editingAutomationId)
-        : undefined;
+        setSaveStatus('saved');
 
-      const payload: Omit<
-        Automation,
-        'id' | 'workspaceId' | 'ownerId' | 'createdAt' | 'updatedAt'
-      > = {
-        name: cleanName,
-        triggerType,
-        triggerDetail,
-        targetList: cleanList,
-        stepsSummary,
-        channels,
-        status: workflowEnabled ? 'active' : 'paused',
-        enrolledCount: existingAuto?.enrolledCount || 0,
-        completedCount: existingAuto?.completedCount || 0,
-        conversionRate: existingAuto?.conversionRate || 0,
-        version: (existingAuto?.version || 0) + 1,
-        flowGraphJson,
-      };
-
-      if (existingAuto) {
-        await onUpdateAutomation(existingAuto.id, payload);
-        setSaveBanner(`Updated workflow "${cleanName}" for list "${cleanList}".`);
-      } else {
-        const created = await onCreateAutomation(payload);
-        setEditingAutomationId(created.id);
-        setSaveBanner(`Saved & activated workflow "${cleanName}" for list "${cleanList}".`);
+        if (opts.showBanner) {
+          if (opts.targetStatus === 'active') {
+            setSaveBanner(
+              isAuthenticated
+                ? `Published "${payload.name}" — workflow is live & synced across all your devices.`
+                : `Published "${payload.name}" locally. Sign in to sync live across mobile & desktop.`
+            );
+          } else {
+            setSaveBanner(
+              isAuthenticated
+                ? `Saved draft "${payload.name}" to cloud database.`
+                : `Saved draft "${payload.name}" locally. Sign in to sync across devices.`
+            );
+          }
+          setTimeout(() => setSaveBanner(null), 4000);
+        }
+      } catch {
+        setSaveStatus('error');
+      } finally {
+        setIsSaving(false);
       }
-    } finally {
-      setIsSaving(false);
-      setTimeout(() => setSaveBanner(null), 4000);
+    },
+    [
+      automations,
+      buildWorkflowPayload,
+      edges,
+      editingAutomationId,
+      isAuthenticated,
+      nodes,
+      onCreateAutomation,
+      onUpdateAutomation,
+      targetList,
+      workflowName,
+    ]
+  );
+
+  // Debounced auto-save draft (1200ms after edits while in Canvas view)
+  useEffect(() => {
+    if (viewMode !== 'canvas') return;
+    if (!currentGraphKey || currentGraphKey === lastSavedKeyRef.current) return;
+    if (isInitialDraftCreatingRef.current) return;
+
+    setSaveStatus('dirty');
+    const timer = setTimeout(() => {
+      if (isInitialDraftCreatingRef.current) return;
+      const autoSaveStatus: AutomationStatus =
+        workflowStatus === 'active'
+          ? 'active'
+          : workflowStatus === 'paused'
+          ? 'paused'
+          : 'draft';
+      void persistWorkflow({
+        targetStatus: autoSaveStatus,
+        logAction: 'silent',
+        showBanner: false,
+      });
+    }, 1200);
+
+    return () => clearTimeout(timer);
+  }, [currentGraphKey, persistWorkflow, viewMode, workflowStatus]);
+
+  const handleSaveDraftClick = () => {
+    void persistWorkflow({
+      targetStatus: 'draft',
+      logAction: 'saved_draft',
+      showBanner: true,
+    });
+  };
+
+  const handlePublishClick = () => {
+    void persistWorkflow({
+      targetStatus: 'active',
+      logAction: 'published',
+      showBanner: true,
+    });
+  };
+
+  const handleReturnToHub = async () => {
+    if (
+      viewMode === 'canvas' &&
+      currentGraphKey &&
+      currentGraphKey !== lastSavedKeyRef.current &&
+      !isInitialDraftCreatingRef.current
+    ) {
+      await persistWorkflow({
+        targetStatus:
+          workflowStatus === 'active'
+            ? 'active'
+            : workflowStatus === 'paused'
+            ? 'paused'
+            : 'draft',
+        logAction: 'silent',
+        showBanner: false,
+      });
     }
+    setSelectedNode(null);
+    setViewMode('list');
   };
 
   // Rich Email Editor helpers
@@ -1937,7 +2148,7 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
               Workflow Builder
             </h1>
             <p className="text-sm text-slate-600 dark:text-slate-400 mt-1">
-              Build and manage automated WhatsApp and Email drip sequences bound to your audience lists.
+              Build and manage automated WhatsApp and Email sequences. New workflows auto-save as Drafts until you publish.
             </p>
           </div>
 
@@ -1963,6 +2174,28 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
           </div>
         </div>
 
+        {/* Cross-Device Cloud Sync Notice when Signed Out */}
+        {!isAuthenticated && (
+          <div className="px-4 py-3 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/80 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-center gap-2.5 text-xs text-amber-900 dark:text-amber-200">
+              <CloudOff className="w-4 h-4 text-amber-600 shrink-0" />
+              <span>
+                You are currently working in local preview mode. Sign in so your drafts, published workflows, and activity sync across phone and desktop.
+              </span>
+            </div>
+            {onOpenAuth && (
+              <button
+                type="button"
+                onClick={onOpenAuth}
+                className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0 self-start sm:self-auto"
+              >
+                <LogIn className="w-3.5 h-3.5" />
+                <span>Sign In to Sync</span>
+              </button>
+            )}
+          </div>
+        )}
+
         {/* Metrics Strip (Single-Elevation, Tabular Numerals) */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           <div className="p-4 rounded-xl bg-white dark:bg-[#0D1322] border border-slate-200 dark:border-slate-800">
@@ -1975,10 +2208,18 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
           </div>
           <div className="p-4 rounded-xl bg-white dark:bg-[#0D1322] border border-slate-200 dark:border-slate-800">
             <div className="text-xs font-medium text-slate-500 dark:text-slate-400">
-              Active Flows
+              Published &amp; Live
             </div>
             <div className="text-2xl font-bold text-emerald-600 dark:text-emerald-400 mt-1 tabular-nums">
               {hubStats.active}
+            </div>
+          </div>
+          <div className="p-4 rounded-xl bg-white dark:bg-[#0D1322] border border-slate-200 dark:border-slate-800">
+            <div className="text-xs font-medium text-slate-500 dark:text-slate-400">
+              Saved Drafts
+            </div>
+            <div className="text-2xl font-bold text-slate-900 dark:text-white mt-1 tabular-nums">
+              {hubStats.drafts}
             </div>
           </div>
           <div className="p-4 rounded-xl bg-white dark:bg-[#0D1322] border border-slate-200 dark:border-slate-800">
@@ -1987,14 +2228,6 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
             </div>
             <div className="text-2xl font-bold text-slate-900 dark:text-white mt-1 tabular-nums">
               {hubStats.enrolled.toLocaleString()}
-            </div>
-          </div>
-          <div className="p-4 rounded-xl bg-white dark:bg-[#0D1322] border border-slate-200 dark:border-slate-800">
-            <div className="text-xs font-medium text-slate-500 dark:text-slate-400">
-              Avg Conversion
-            </div>
-            <div className="text-2xl font-bold text-slate-900 dark:text-white mt-1 tabular-nums">
-              {hubStats.avgConv}%
             </div>
           </div>
         </div>
@@ -2013,20 +2246,27 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
           </div>
 
           <div className="flex items-center gap-1 p-1 bg-slate-100 dark:bg-slate-900 rounded-xl border border-slate-200 dark:border-slate-800 self-start sm:self-auto">
-            {(['all', 'active', 'paused', 'draft'] as const).map((statusKey) => {
-              const active = hubStatusFilter === statusKey;
+            {(
+              [
+                { key: 'all', label: `All (${hubStats.total})` },
+                { key: 'active', label: `Live (${hubStats.active})` },
+                { key: 'draft', label: `Drafts (${hubStats.drafts})` },
+                { key: 'paused', label: `Paused (${hubStats.paused})` },
+              ] as const
+            ).map((tab) => {
+              const active = hubStatusFilter === tab.key;
               return (
                 <button
-                  key={statusKey}
+                  key={tab.key}
                   type="button"
-                  onClick={() => setHubStatusFilter(statusKey)}
-                  className={`px-3 py-1.5 text-xs font-semibold rounded-lg capitalize transition-colors cursor-pointer whitespace-nowrap ${
+                  onClick={() => setHubStatusFilter(tab.key)}
+                  className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors cursor-pointer whitespace-nowrap tabular-nums ${
                     active
                       ? 'bg-white dark:bg-slate-800 text-slate-900 dark:text-white shadow-2xs'
                       : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
                   }`}
                 >
-                  {statusKey}
+                  {tab.label}
                 </button>
               );
             })}
@@ -2065,6 +2305,7 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
                 auto.targetList || auto.targetListName || 'General Contacts';
               const isActive = auto.status === 'active';
               const isPaused = auto.status === 'paused';
+              const isDraft = auto.status === 'draft';
               const channelLabel =
                 (auto.channels || ['whatsapp']).join(', ') || 'whatsapp';
               const stepsCount = auto.stepsSummary?.length || 1;
@@ -2097,15 +2338,17 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
                             ? 'text-emerald-700 dark:text-emerald-400'
                             : isPaused
                             ? 'text-amber-700 dark:text-amber-400'
-                            : 'text-slate-500 dark:text-slate-400'
+                            : 'text-slate-600 dark:text-slate-400'
                         }`}
                       >
                         {isActive ? (
                           <CheckCircle2 className="w-3.5 h-3.5" />
-                        ) : (
+                        ) : isPaused ? (
                           <Pause className="w-3.5 h-3.5" />
+                        ) : (
+                          <FileText className="w-3.5 h-3.5" />
                         )}
-                        <span className="capitalize">{auto.status}</span>
+                        <span>{isActive ? 'Published' : isPaused ? 'Paused' : 'Draft'}</span>
                       </span>
                     </div>
 
@@ -2146,13 +2389,32 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
                     </button>
 
                     <div className="flex items-center gap-1.5">
-                      <button
-                        type="button"
-                        onClick={() => handleToggleAutomationStatus(auto)}
-                        className="px-3 py-2 text-xs font-semibold text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg cursor-pointer whitespace-nowrap"
-                      >
-                        {isActive ? 'Pause' : 'Activate'}
-                      </button>
+                      {isDraft ? (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleHubStatusChange(auto, 'active', 'published')
+                          }
+                          className="px-3 py-2 text-xs font-bold text-white bg-[#047857] hover:bg-[#065F46] rounded-lg cursor-pointer inline-flex items-center gap-1 whitespace-nowrap"
+                        >
+                          <UploadCloud className="w-3.5 h-3.5" />
+                          <span>Publish</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleHubStatusChange(
+                              auto,
+                              isActive ? 'paused' : 'active',
+                              isActive ? 'saved_draft' : 'published'
+                            )
+                          }
+                          className="px-3 py-2 text-xs font-semibold text-slate-700 dark:text-slate-300 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 rounded-lg cursor-pointer whitespace-nowrap"
+                        >
+                          {isActive ? 'Pause' : 'Publish Live'}
+                        </button>
+                      )}
 
                       {confirmDeleteId === auto.id ? (
                         <button
@@ -2204,6 +2466,21 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
   // ============================================================================
   // VIEW 2: VISUAL DRAG-AND-DROP WORKFLOW CANVAS
   // ============================================================================
+  const syncStatusLabel = (() => {
+    if (saveStatus === 'saving') return 'Saving draft…';
+    if (saveStatus === 'dirty') return 'Unsaved changes…';
+    if (saveStatus === 'error') return 'Sync error · Saved locally';
+    if (workflowStatus === 'active') {
+      return isAuthenticated && cloudSyncState === 'synced'
+        ? 'Published · Cloud synced'
+        : 'Published · Live';
+    }
+    if (workflowStatus === 'paused') return 'Paused';
+    return isAuthenticated
+      ? 'Draft · Auto-saved'
+      : 'Local draft · Sign in to sync';
+  })();
+
   return (
     <div className="flex flex-col h-[calc(100vh-64px)] min-h-[640px] bg-[#f8fafc] text-slate-900 font-sans antialiased overflow-hidden">
       {/* TOP BAR */}
@@ -2211,10 +2488,7 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
         <div className="flex items-center gap-2.5 min-w-0">
           <button
             type="button"
-            onClick={() => {
-              setSelectedNode(null);
-              setViewMode('list');
-            }}
+            onClick={() => void handleReturnToHub()}
             className="px-2.5 py-1.5 text-xs font-semibold text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
             title="Back to Saved Workflows"
           >
@@ -2231,7 +2505,7 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
           <select
             value={targetList}
             onChange={(e) => setTargetList(e.target.value)}
-            className="text-xs font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500 max-w-[170px] truncate cursor-pointer"
+            className="text-xs font-bold text-emerald-800 bg-emerald-50 border border-emerald-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:border-emerald-500 max-w-[160px] truncate cursor-pointer"
             title="Target Contact List"
           >
             {!combinedLists.some((l) => l.name === targetList) && targetList && (
@@ -2251,29 +2525,48 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
             type="text"
             value={workflowName}
             onChange={(e) => setWorkflowName(e.target.value)}
-            className="text-sm font-bold text-slate-900 bg-transparent hover:bg-slate-50 focus:bg-white px-2.5 py-1 rounded-lg border border-transparent hover:border-slate-300 focus:border-blue-500 focus:outline-none transition-all w-44 sm:w-64 truncate"
+            className="text-sm font-bold text-slate-900 bg-transparent hover:bg-slate-50 focus:bg-white px-2.5 py-1 rounded-lg border border-transparent hover:border-slate-300 focus:border-blue-500 focus:outline-none transition-all w-36 sm:w-56 truncate"
             placeholder="Workflow Name..."
           />
         </div>
 
-        {/* Right Controls */}
-        <div className="flex items-center gap-2.5 shrink-0">
-          <button
-            type="button"
-            onClick={() => setWorkflowEnabled((p) => !p)}
-            className={`px-3 py-1.5 rounded-xl border text-xs font-bold flex items-center gap-1.5 transition-all cursor-pointer whitespace-nowrap shrink-0 ${
-              workflowEnabled
-                ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
-                : 'bg-slate-100 text-slate-600 border-slate-300'
-            }`}
-          >
-            {workflowEnabled ? (
-              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+        {/* Right Controls: Sync State + Simulate + Save Draft + Publish */}
+        <div className="flex items-center gap-2 shrink-0">
+          <div className="hidden xl:flex items-center gap-1.5 text-xs font-medium text-slate-500 pr-1 whitespace-nowrap">
+            {isAuthenticated ? (
+              <Cloud
+                className={`w-3.5 h-3.5 ${
+                  workflowStatus === 'active'
+                    ? 'text-emerald-600'
+                    : saveStatus === 'error'
+                    ? 'text-rose-500'
+                    : 'text-slate-400'
+                }`}
+              />
             ) : (
-              <Pause className="w-3.5 h-3.5 text-slate-500" />
+              <CloudOff className="w-3.5 h-3.5 text-amber-500" />
             )}
-            <span>{workflowEnabled ? 'Active' : 'Paused'}</span>
-          </button>
+            <span
+              className={
+                workflowStatus === 'active'
+                  ? 'text-emerald-700 font-semibold'
+                  : saveStatus === 'error'
+                  ? 'text-rose-600 font-semibold'
+                  : 'text-slate-600'
+              }
+            >
+              {syncStatusLabel}
+            </span>
+            {!isAuthenticated && onOpenAuth && (
+              <button
+                type="button"
+                onClick={onOpenAuth}
+                className="ml-1 text-blue-600 hover:underline font-semibold cursor-pointer"
+              >
+                Sign In
+              </button>
+            )}
+          </div>
 
           <button
             type="button"
@@ -2286,16 +2579,32 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
 
           <button
             type="button"
-            onClick={handleSaveWorkflow}
+            onClick={handleSaveDraftClick}
             disabled={isSaving}
-            className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer disabled:opacity-50 whitespace-nowrap shrink-0"
+            className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 text-xs font-bold flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50 whitespace-nowrap shrink-0"
+            title="Save changes as Draft without making live"
           >
-            {isSaving ? (
+            <Save className="w-3.5 h-3.5 text-slate-600" />
+            <span>{isSaving && workflowStatus === 'draft' ? 'Saving...' : 'Save Draft'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handlePublishClick}
+            disabled={isSaving}
+            className={`px-4 py-2 rounded-xl text-white text-xs font-bold flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer disabled:opacity-50 whitespace-nowrap shrink-0 ${
+              workflowStatus === 'active'
+                ? 'bg-[#047857] hover:bg-[#065F46]'
+                : 'bg-blue-600 hover:bg-blue-700'
+            }`}
+            title="Publish workflow live and sync to database"
+          >
+            {isSaving && workflowStatus === 'active' ? (
               <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
             ) : (
-              <Save className="w-3.5 h-3.5" />
+              <UploadCloud className="w-3.5 h-3.5" />
             )}
-            <span>{isSaving ? 'Saving...' : 'Save Workflow'}</span>
+            <span>{workflowStatus === 'active' ? 'Update Live' : 'Publish'}</span>
           </button>
         </div>
       </header>

@@ -399,11 +399,10 @@ export function normalizeWorkspaceSnapshot(snap: Partial<WorkspaceSnapshot>): Wo
     },
     members: Array.isArray(snap.members) ? snap.members : starter.members,
     contacts: Array.isArray(snap.contacts) ? snap.contacts : [],
-    lists: Array.isArray(snap.lists) && snap.lists.length > 0 ? snap.lists : starter.lists,
-    automations:
-      Array.isArray(snap.automations) && snap.automations.length > 0
-        ? snap.automations
-        : starter.automations,
+    lists: Array.isArray(snap.lists) ? snap.lists : starter.lists,
+    automations: Array.isArray(snap.automations)
+      ? snap.automations
+      : starter.automations,
     autoResponders: Array.isArray(snap.autoResponders) ? snap.autoResponders : [],
     inboxThreads: Array.isArray(snap.inboxThreads) ? snap.inboxThreads : [],
     campaigns: Array.isArray(snap.campaigns) ? snap.campaigns : [],
@@ -427,7 +426,7 @@ export function loadLocalWorkspaceSnapshot(
         if (parsed && parsed.workspace) return normalizeWorkspaceSnapshot(parsed);
       }
     }
-    if (email && uid !== 'guest_sandbox') {
+    if (email && uid !== 'guest_sandbox' && uid !== 'default_workspace') {
       const emailKey = `${WORKSPACE_SNAPSHOT_PREFIX}email_${email
         .trim()
         .toLowerCase()}`;
@@ -456,8 +455,14 @@ export function saveLocalWorkspaceSnapshot(
     if (uid) {
       localStorage.setItem(`${WORKSPACE_SNAPSHOT_PREFIX}${uid}`, payload);
     }
-    // Never overwrite user email keys when in guest_sandbox mode
-    if (email && uid !== 'guest_sandbox' && email !== 'guest@flowpilot.app') {
+    // Never overwrite user email keys when in guest or unauthenticated mode
+    if (
+      email &&
+      uid !== 'guest_sandbox' &&
+      uid !== 'default_workspace' &&
+      email !== 'guest@flowpilot.app' &&
+      email !== 'operator@flowpilot.app'
+    ) {
       const emailKey = `${WORKSPACE_SNAPSHOT_PREFIX}email_${email
         .trim()
         .toLowerCase()}`;
@@ -465,6 +470,16 @@ export function saveLocalWorkspaceSnapshot(
     }
   } catch {
     // Ignore storage quota errors
+  }
+}
+
+export function clearLocalWorkspaceSnapshot(uid: string): void {
+  try {
+    if (uid) {
+      localStorage.removeItem(`${WORKSPACE_SNAPSHOT_PREFIX}${uid}`);
+    }
+  } catch {
+    // Ignore storage errors
   }
 }
 

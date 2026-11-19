@@ -233,6 +233,8 @@ export type ActivityEventType =
   | 'lead_captured'
   | 'form_captured'
   | 'automation_triggered'
+  | 'workflow_saved'
+  | 'workflow_published'
   | 'campaign_sent'
   | 'whatsapp_replied'
   | 'stage_converted'

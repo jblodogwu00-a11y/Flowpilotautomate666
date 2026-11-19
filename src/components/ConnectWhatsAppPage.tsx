@@ -151,11 +151,15 @@ export const ConnectWhatsAppPage: React.FC<ConnectWhatsAppPageProps> = ({
         const snap = await getDoc(connectionRef);
         exists = snap.exists();
       } catch (err) {
-        handleFirestoreError(err, OperationType.GET, docPath);
+        const msg =
+          err instanceof Error ? err.message : 'Failed to inspect Firestore record';
         setFirestoreState('error');
-        setFirestoreMessage(
-          err instanceof Error ? err.message : 'Failed to inspect Firestore record'
-        );
+        setFirestoreMessage(msg);
+        try {
+          handleFirestoreError(err, OperationType.GET, docPath);
+        } catch {
+          // Structured Firestore Error already logged by handleFirestoreError
+        }
         return;
       }
 
@@ -179,15 +183,19 @@ export const ConnectWhatsAppPage: React.FC<ConnectWhatsAppPageProps> = ({
         setFirestoreState('synced');
         setFirestoreMessage('Saved to Firestore');
       } catch (err) {
-        handleFirestoreError(
-          err,
-          exists ? OperationType.UPDATE : OperationType.CREATE,
-          docPath
-        );
+        const msg =
+          err instanceof Error ? err.message : 'Failed to save connection status';
         setFirestoreState('error');
-        setFirestoreMessage(
-          err instanceof Error ? err.message : 'Failed to save connection status'
-        );
+        setFirestoreMessage(msg);
+        try {
+          handleFirestoreError(
+            err,
+            exists ? OperationType.UPDATE : OperationType.CREATE,
+            docPath
+          );
+        } catch {
+          // Structured Firestore Error already logged by handleFirestoreError
+        }
       }
     },
     []

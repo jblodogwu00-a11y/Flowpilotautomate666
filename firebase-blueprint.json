@@ -298,7 +298,8 @@
             "warm_lead",
             "qualified",
             "customer",
-            "churned"
+            "churned",
+            "cold_subscriber"
           ]
         },
         "temperature": {
@@ -425,7 +426,8 @@
             "webhook_received",
             "manual_enrollment",
             "purchase_completed",
-            "whatsapp_keyword"
+            "whatsapp_keyword",
+            "booking_requested"
           ]
         },
         "triggerDetail": {
@@ -849,7 +851,8 @@
             "follow_up",
             "campaign_review",
             "compliance_check",
-            "onboarding"
+            "onboarding",
+            "whatsapp"
           ]
         },
         "priority": {
@@ -921,7 +924,10 @@
           "type": "string",
           "enum": [
             "lead_captured",
+            "form_captured",
             "automation_triggered",
+            "workflow_saved",
+            "workflow_published",
             "campaign_sent",
             "whatsapp_replied",
             "stage_converted",
@@ -945,7 +951,8 @@
             "whatsapp",
             "sms",
             "web",
-            "crm"
+            "crm",
+            "system"
           ]
         },
         "createdAt": {

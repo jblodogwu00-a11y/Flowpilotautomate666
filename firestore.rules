@@ -142,7 +142,7 @@ service cloud.firestore {
       data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 100 &&
       data.email is string && data.email.size() <= 150 &&
       data.phone is string && data.phone.size() <= 32 &&
-      data.stage is string && data.stage.size() <= 32 && data.stage in ['lead', 'warm_lead', 'qualified', 'customer', 'churned'] &&
+      data.stage is string && data.stage.size() <= 32 && data.stage in ['lead', 'warm_lead', 'qualified', 'customer', 'churned', 'cold_subscriber'] &&
       data.temperature is string && data.temperature.size() <= 20 && data.temperature in ['hot', 'warm', 'cold'] &&
       data.source is string && data.source.size() >= 1 && data.source.size() <= 80 &&
       data.consentStatus is string && data.consentStatus.size() <= 32 && data.consentStatus in ['opted_in', 'pending_double_opt_in', 'unsubscribed'] &&
@@ -179,7 +179,8 @@ service cloud.firestore {
         'form_submission', 'contact_added', 'tag_added', 'tag_removed',
         'list_joined', 'list_removed', 'link_clicked', 'email_opened',
         'specific_datetime', 'field_updated', 'webhook_received',
-        'manual_enrollment', 'purchase_completed', 'whatsapp_keyword'
+        'manual_enrollment', 'purchase_completed', 'whatsapp_keyword',
+        'booking_requested'
       ] &&
       data.triggerDetail is string && data.triggerDetail.size() >= 1 && data.triggerDetail.size() <= 120 &&
       (!('targetList' in data) || (data.targetList is string && data.targetList.size() <= 80)) &&
@@ -310,7 +311,7 @@ service cloud.firestore {
       data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
       data.ownerId == request.auth.uid &&
       data.title is string && data.title.size() >= 1 && data.title.size() <= 160 &&
-      data.category is string && data.category.size() <= 32 && data.category in ['follow_up', 'campaign_review', 'compliance_check', 'onboarding'] &&
+      data.category is string && data.category.size() <= 32 && data.category in ['follow_up', 'campaign_review', 'compliance_check', 'onboarding', 'whatsapp'] &&
       data.priority is string && data.priority.size() <= 20 && data.priority in ['high', 'medium', 'low'] &&
       data.dueDate is string && data.dueDate.size() >= 1 && data.dueDate.size() <= 40 &&
       data.relatedEntity is string && data.relatedEntity.size() <= 100 &&
@@ -332,12 +333,13 @@ service cloud.firestore {
       data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
       data.ownerId == request.auth.uid &&
       data.eventType is string && data.eventType.size() <= 40 && data.eventType in [
-        'lead_captured', 'automation_triggered', 'campaign_sent',
-        'whatsapp_replied', 'stage_converted', 'asset_published'
+        'lead_captured', 'form_captured', 'automation_triggered', 'workflow_saved',
+        'workflow_published', 'campaign_sent', 'whatsapp_replied',
+        'stage_converted', 'asset_published'
       ] &&
       data.title is string && data.title.size() >= 1 && data.title.size() <= 160 &&
       data.detail is string && data.detail.size() >= 1 && data.detail.size() <= 280 &&
-      data.channel is string && data.channel.size() <= 20 && data.channel in ['email', 'whatsapp', 'sms', 'web', 'crm'] &&
+      data.channel is string && data.channel.size() <= 20 && data.channel in ['email', 'whatsapp', 'sms', 'web', 'crm', 'system'] &&
       data.createdAt is timestamp &&
       data.updatedAt is timestamp;
     }

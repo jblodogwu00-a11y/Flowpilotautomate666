@@ -335,14 +335,14 @@ export function handleFirestoreError(
   error: unknown,
   operationType: OperationType,
   path: string | null
-): void {
+): never {
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
-      userId: auth.currentUser?.uid || getStoredActiveAccountSession()?.uid || null,
-      email: auth.currentUser?.email || getStoredActiveAccountSession()?.email || null,
-      emailVerified: auth.currentUser?.emailVerified ?? true,
-      isAnonymous: auth.currentUser?.isAnonymous ?? false,
+      userId: auth.currentUser?.uid || null,
+      email: auth.currentUser?.email || null,
+      emailVerified: auth.currentUser?.emailVerified ?? null,
+      isAnonymous: auth.currentUser?.isAnonymous ?? null,
       tenantId: auth.currentUser?.tenantId ?? null,
       providerInfo:
         auth.currentUser?.providerData?.map((provider) => ({
@@ -353,15 +353,18 @@ export function handleFirestoreError(
     operationType,
     path,
   };
-  console.warn('Firestore Sync Notice: ', JSON.stringify(errInfo));
+  const serialized = JSON.stringify(errInfo);
+  console.error('Firestore Error: ', serialized);
+  throw new Error(serialized);
 }
 
 async function testConnection() {
-  if (!auth.currentUser) return;
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
-  } catch {
-    // Non-fatal connectivity check
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('the client is offline')) {
+      console.error('Please check your Firebase configuration.');
+    }
   }
 }
 

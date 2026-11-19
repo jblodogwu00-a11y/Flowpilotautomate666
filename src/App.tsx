@@ -66,15 +66,23 @@ import {
   WorkspaceSnapshot,
   loadLocalWorkspaceSnapshot,
   saveLocalWorkspaceSnapshot,
-  fetchServerWorkspaceSnapshot,
-  pushServerWorkspaceSnapshot,
-  mergeActivities,
-  postUserActivityToServer,
   buildStarterWorkspaceSnapshot,
   normalizeWorkspaceSnapshot,
 } from './services/accountPersistenceService';
-import { db, auth, handleFirestoreError, OperationType } from './firebase';
-import { doc, setDoc, serverTimestamp } from 'firebase/firestore';
+import {
+  CloudSyncState,
+  appendActivityDoc,
+  deleteCollectionDoc,
+  deleteMemberDoc,
+  hydrateAndMergeWorkspaceFromFirestore,
+  subscribeToWorkspaceCollections,
+  trackGuestDirtyItem,
+  upsertCollectionDoc,
+  upsertMemberDoc,
+  upsertPrivateProfile,
+  upsertWorkspaceRoot,
+} from './services/firestoreWorkspaceSync';
+import { auth } from './firebase';
 import {
   deliverChannelMessage,
   personalizeAutomationMessage,
@@ -116,7 +124,9 @@ interface NavItem {
 }
 
 export default function App() {
-  const { user, userProfile, logout } = useAuth();
+  const { user, userProfile, loading: authLoading, logout } = useAuth();
+  const [cloudSyncState, setCloudSyncState] = useState<CloudSyncState>('local_only');
+  const [syncNotice, setSyncNotice] = useState<string | null>(null);
 
   // Active UI Theme
   const [themeMode, setThemeMode] = useState<ThemeMode>(getStoredThemeMode);
@@ -316,6 +326,7 @@ export default function App() {
   }, [navDrawerOpen]);
 
   // Active User UID for multi-tenant isolation
+  const isRealFirebaseUser = Boolean(!authLoading && user && auth.currentUser?.uid === user.uid);
   const activeUid = user?.uid || 'default_workspace';
 
   // Workspace Data State
@@ -330,61 +341,119 @@ export default function App() {
     );
   });
 
-  // Reload snapshot when activeUid or user changes, merging server and pre-login activities
-  useEffect(() => {
-    let isCancelled = false;
-
-    const syncUserData = async () => {
-      // 1. Immediately apply local snapshot for instant UI rendering
-      const loaded = loadLocalWorkspaceSnapshot(activeUid, user?.email || undefined);
-      if (loaded && !isCancelled) {
-        setSnapshot(loaded);
+  // Helper to execute Firestore cloud persistence safely without crashing UI
+  const syncCloudWrite = useCallback(
+    async (op: () => Promise<void>) => {
+      if (!auth.currentUser) {
+        setCloudSyncState('local_only');
+        return;
       }
-
-      // 2. Query server for persisted user snapshot & activities
+      setCloudSyncState('syncing');
       try {
-        const serverSnapshot = await fetchServerWorkspaceSnapshot(activeUid, user?.email || undefined);
-        if (serverSnapshot && !isCancelled) {
-          // If user is authenticated, check for any pre-login activities made under default_workspace
-          const preLoginSnap =
-            activeUid !== 'default_workspace'
-              ? loadLocalWorkspaceSnapshot('default_workspace')
-              : null;
-          const preActivities = preLoginSnap?.activities || [];
-
-          setSnapshot((prev) => {
-            const combinedActivities = mergeActivities(
-              serverSnapshot.activities || [],
-              [...prev.activities, ...preActivities]
-            );
-
-            const reconciled: WorkspaceSnapshot = {
-              ...serverSnapshot,
-              workspace: {
-                ...serverSnapshot.workspace,
-                id: activeUid,
-                ownerId: activeUid,
-              },
-              activities: combinedActivities.slice(0, 150),
-            };
-
-            const activeEmail = user?.email || 'operator@flowpilot.app';
-            saveLocalWorkspaceSnapshot(activeUid, activeEmail, reconciled);
-            pushServerWorkspaceSnapshot(activeUid, activeEmail, reconciled).catch(() => {});
-            return reconciled;
-          });
-        }
+        await op();
+        setCloudSyncState('synced');
       } catch (err) {
-        console.warn('[Sync] Error syncing user workspace state from server:', err);
+        setCloudSyncState('error');
+        console.warn('[FirestoreSync] Write deferred to local storage:', err);
+      }
+    },
+    []
+  );
+
+  // Hydrate entire workspace from Firestore + auto-merge pre-login guest drafts + live cross-device listener
+  useEffect(() => {
+    if (authLoading) return;
+    let isCancelled = false;
+    let unsubscribeRemote: (() => void) | undefined;
+
+    if (!isRealFirebaseUser || !user) {
+      // Signed-out mode: load dedicated guest workspace or fresh starter
+      const guestLoaded = loadLocalWorkspaceSnapshot('default_workspace');
+      setSnapshot(
+        guestLoaded ||
+          buildStarterWorkspaceSnapshot(
+            'default_workspace',
+            'operator@flowpilot.app',
+            'Workspace Operator',
+            'My Sovereign Workspace'
+          )
+      );
+      setCloudSyncState('local_only');
+      return () => {
+        isCancelled = true;
+      };
+    }
+
+    const syncFromFirestore = async () => {
+      const cachedForUser = loadLocalWorkspaceSnapshot(user.uid, user.email || undefined);
+      if (cachedForUser && !isCancelled) {
+        setSnapshot(cachedForUser);
+      }
+      setCloudSyncState('syncing');
+
+      try {
+        const guestSnapshot = loadLocalWorkspaceSnapshot('default_workspace');
+        const { snapshot: hydrated, mergedGuestCount } =
+          await hydrateAndMergeWorkspaceFromFirestore({
+            uid: user.uid,
+            email: user.email || 'operator@flowpilot.app',
+            displayName:
+              userProfile?.displayName ||
+              user.displayName ||
+              user.email?.split('@')[0] ||
+              'Workspace Owner',
+            localGuestSnapshot: guestSnapshot,
+          });
+
+        if (isCancelled) return;
+        setSnapshot(hydrated);
+        saveLocalWorkspaceSnapshot(
+          user.uid,
+          user.email || 'operator@flowpilot.app',
+          hydrated
+        );
+        setCloudSyncState('synced');
+
+        if (mergedGuestCount > 0) {
+          setSyncNotice(
+            `Synced ${mergedGuestCount} pre-login draft${mergedGuestCount === 1 ? '' : 's'} to your cloud account.`
+          );
+          setTimeout(() => setSyncNotice(null), 5000);
+        }
+
+        unsubscribeRemote = subscribeToWorkspaceCollections(
+          user.uid,
+          (patchFn) => {
+            if (isCancelled) return;
+            setSnapshot((prev) => {
+              const updated = normalizeWorkspaceSnapshot(patchFn(prev));
+              saveLocalWorkspaceSnapshot(
+                user.uid,
+                user.email || 'operator@flowpilot.app',
+                updated
+              );
+              return updated;
+            });
+          },
+          () => {
+            if (!isCancelled) setCloudSyncState('error');
+          }
+        );
+      } catch (err) {
+        if (!isCancelled) {
+          setCloudSyncState('error');
+          console.warn('[FirestoreSync] Error hydrating workspace:', err);
+        }
       }
     };
 
-    syncUserData();
+    syncFromFirestore();
 
     return () => {
       isCancelled = true;
+      if (unsubscribeRemote) unsubscribeRemote();
     };
-  }, [activeUid, user?.email]);
+  }, [authLoading, isRealFirebaseUser, user, userProfile?.displayName]);
 
   // Fetch published form from server when opened in Incognito or unauthenticated visitor session
   useEffect(() => {
@@ -394,7 +463,6 @@ export default function App() {
     const pathPart = window.location.pathname.replace(/^\/(form|public\/form|p)\/?/i, '');
     const requestedIdentifier = (cap || pathPart).trim();
 
-    // Check if we already have a local asset with custom headline/cta
     const localMatch = (snapshot?.assets || []).find(
       (a) => a.slug === requestedIdentifier || a.id === requestedIdentifier
     );
@@ -421,21 +489,20 @@ export default function App() {
       });
   }, [isFormRoute, snapshot?.assets]);
 
-  // Persist snapshot to localStorage and sync to server
+  // Persist snapshot to localStorage immediately
   const updateSnapshot = useCallback(
     (updater: (prev: WorkspaceSnapshot) => WorkspaceSnapshot) => {
       setSnapshot((prev) => {
         const next = normalizeWorkspaceSnapshot(updater(prev));
         const activeEmail = user?.email || 'operator@flowpilot.app';
         saveLocalWorkspaceSnapshot(activeUid, activeEmail, next);
-        pushServerWorkspaceSnapshot(activeUid, activeEmail, next).catch(() => {});
         return next;
       });
     },
     [activeUid, user?.email]
   );
 
-  // Activity Logger - Persists per user to local storage, server state, dedicated activities endpoint, and Firestore
+  // Activity Logger - Persists per user to local storage AND Firestore
   const handleLogActivity = useCallback(
     async (
       eventType: ActivityEventType,
@@ -449,41 +516,25 @@ export default function App() {
         workspaceId: snapshot.workspace.id || activeUid,
         ownerId: activeUid,
         eventType,
-        title: sanitizeString(title, 140, 'Activity logged'),
-        detail: sanitizeString(detail, 500, ''),
+        title: sanitizeString(title, 160, 'Activity logged'),
+        detail: sanitizeString(detail, 280, 'Workspace event recorded'),
         channel,
         createdAt: now,
         updatedAt: now,
       };
 
-      // 1. Update React snapshot & persist to local storage + server snapshot
       updateSnapshot((prev) => ({
         ...prev,
         activities: [newActivity, ...prev.activities.filter((a) => a.id !== newActivity.id)].slice(0, 150),
       }));
 
-      // 2. Direct server endpoint backup
-      postUserActivityToServer(activeUid, user?.email || undefined, newActivity).catch(() => {});
-
-      // 3. Firestore persistence if Firebase Auth user is present
       if (auth.currentUser) {
-        try {
-          await setDoc(doc(db, 'activities', newActivity.id), {
-            workspaceId: snapshot.workspace.id || activeUid,
-            ownerId: auth.currentUser.uid,
-            eventType: newActivity.eventType,
-            title: newActivity.title,
-            detail: newActivity.detail,
-            channel: newActivity.channel,
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          });
-        } catch (err) {
-          handleFirestoreError(err, OperationType.CREATE, `activities/${newActivity.id}`);
-        }
+        await syncCloudWrite(() => appendActivityDoc(auth.currentUser!.uid, newActivity));
+      } else {
+        trackGuestDirtyItem('activities', newActivity.id);
       }
     },
-    [activeUid, snapshot.workspace.id, updateSnapshot, user?.email]
+    [activeUid, snapshot.workspace.id, syncCloudWrite, updateSnapshot]
   );
 
   // --------------------------------------------------------------------------
@@ -506,6 +557,13 @@ export default function App() {
         ...prev,
         contacts: [newContact, ...prev.contacts],
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          upsertCollectionDoc('contacts', auth.currentUser!.uid, newContact.id, newContact)
+        );
+      } else {
+        trackGuestDirtyItem('contacts', newContact.id);
+      }
       await handleLogActivity(
         'lead_captured',
         `New contact added: ${newContact.fullName}`,
@@ -513,7 +571,7 @@ export default function App() {
         'crm'
       );
     },
-    [activeUid, handleLogActivity, snapshot.workspace.id, updateSnapshot]
+    [activeUid, handleLogActivity, snapshot.workspace.id, syncCloudWrite, updateSnapshot]
   );
 
   const handleUpdateContact = useCallback(
@@ -521,14 +579,27 @@ export default function App() {
       id: string,
       data: Omit<Contact, 'id' | 'workspaceId' | 'ownerId' | 'createdAt' | 'updatedAt'>
     ) => {
+      const now = new Date().toISOString();
       updateSnapshot((prev) => ({
         ...prev,
         contacts: prev.contacts.map((c) =>
-          c.id === id ? { ...c, ...data, updatedAt: new Date().toISOString() } : c
+          c.id === id ? { ...c, ...data, updatedAt: now } : c
         ),
       }));
+      if (auth.currentUser) {
+        const existing = snapshot.contacts.find((c) => c.id === id);
+        await syncCloudWrite(() =>
+          upsertCollectionDoc('contacts', auth.currentUser!.uid, id, {
+            ...(existing || {}),
+            ...data,
+            id,
+          })
+        );
+      } else {
+        trackGuestDirtyItem('contacts', id);
+      }
     },
-    [updateSnapshot]
+    [snapshot.contacts, syncCloudWrite, updateSnapshot]
   );
 
   const handleDeleteContact = useCallback(
@@ -537,8 +608,13 @@ export default function App() {
         ...prev,
         contacts: prev.contacts.filter((c) => c.id !== id),
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          deleteCollectionDoc('contacts', auth.currentUser!.uid, id)
+        );
+      }
     },
-    [updateSnapshot]
+    [syncCloudWrite, updateSnapshot]
   );
 
   const handleBulkImportContacts = useCallback(
@@ -550,6 +626,7 @@ export default function App() {
       let updatedCount = 0;
       let createdCount = 0;
       let skippedCount = 0;
+      const toPersist: Contact[] = [];
 
       updateSnapshot((prev) => {
         const contactMap = new Map<string, Contact>();
@@ -571,12 +648,14 @@ export default function App() {
                 const mergedTags = Array.from(
                   new Set([...(existing.tags || []), ...(raw.tags || []), ...(options?.applyTags || [])])
                 );
-                newContactsList[existingIndex] = {
+                const updatedContact: Contact = {
                   ...existing,
                   ...raw,
                   tags: mergedTags,
                   updatedAt: now,
                 };
+                newContactsList[existingIndex] = updatedContact;
+                toPersist.push(updatedContact);
                 updatedCount++;
               }
             } else {
@@ -593,6 +672,7 @@ export default function App() {
               updatedAt: now,
             };
             newContactsList.push(freshContact);
+            toPersist.push(freshContact);
             if (emailKey) contactMap.set(emailKey, freshContact);
             createdCount++;
           }
@@ -603,6 +683,20 @@ export default function App() {
           contacts: newContactsList,
         };
       });
+
+      if (toPersist.length > 0) {
+        if (auth.currentUser) {
+          await syncCloudWrite(async () => {
+            await Promise.all(
+              toPersist.map((c) =>
+                upsertCollectionDoc('contacts', auth.currentUser!.uid, c.id, c)
+              )
+            );
+          });
+        } else {
+          toPersist.forEach((c) => trackGuestDirtyItem('contacts', c.id));
+        }
+      }
 
       await handleLogActivity(
         'form_captured',
@@ -621,35 +715,42 @@ export default function App() {
         matchedContactNames: [],
       };
     },
-    [activeUid, handleLogActivity, updateSnapshot]
+    [activeUid, handleLogActivity, syncCloudWrite, updateSnapshot]
   );
 
   const handleMergeContacts = useCallback(
     async (primaryId: string, duplicateId: string) => {
-      updateSnapshot((prev) => {
-        const primary = prev.contacts.find((c) => c.id === primaryId);
-        const duplicate = prev.contacts.find((c) => c.id === duplicateId);
-        if (!primary || !duplicate) return prev;
+      const primary = snapshot.contacts.find((c) => c.id === primaryId);
+      const duplicate = snapshot.contacts.find((c) => c.id === duplicateId);
+      if (!primary || !duplicate) return;
 
-        const merged: Contact = {
-          ...primary,
-          phone: primary.phone || duplicate.phone,
-          company: primary.company || duplicate.company,
-          notes: `${primary.notes || ''}\n${duplicate.notes || ''}`.trim(),
-          tags: Array.from(new Set([...(primary.tags || []), ...(duplicate.tags || [])])),
-          ltv: (primary.ltv || 0) + (duplicate.ltv || 0),
-          updatedAt: new Date().toISOString(),
-        };
+      const merged: Contact = {
+        ...primary,
+        phone: primary.phone || duplicate.phone,
+        company: primary.company || duplicate.company,
+        notes: `${primary.notes || ''}\n${duplicate.notes || ''}`.trim(),
+        tags: Array.from(new Set([...(primary.tags || []), ...(duplicate.tags || [])])),
+        ltv: (primary.ltv || 0) + (duplicate.ltv || 0),
+        updatedAt: new Date().toISOString(),
+      };
 
-        return {
-          ...prev,
-          contacts: prev.contacts
-            .filter((c) => c.id !== duplicateId)
-            .map((c) => (c.id === primaryId ? merged : c)),
-        };
-      });
+      updateSnapshot((prev) => ({
+        ...prev,
+        contacts: prev.contacts
+          .filter((c) => c.id !== duplicateId)
+          .map((c) => (c.id === primaryId ? merged : c)),
+      }));
+
+      if (auth.currentUser) {
+        await syncCloudWrite(async () => {
+          await upsertCollectionDoc('contacts', auth.currentUser!.uid, primaryId, merged);
+          await deleteCollectionDoc('contacts', auth.currentUser!.uid, duplicateId);
+        });
+      } else {
+        trackGuestDirtyItem('contacts', primaryId);
+      }
     },
-    [updateSnapshot]
+    [snapshot.contacts, syncCloudWrite, updateSnapshot]
   );
 
   // --------------------------------------------------------------------------
@@ -671,8 +772,15 @@ export default function App() {
         ...prev,
         lists: [newList, ...prev.lists],
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          upsertCollectionDoc('lists', auth.currentUser!.uid, newList.id, newList)
+        );
+      } else {
+        trackGuestDirtyItem('lists', newList.id);
+      }
     },
-    [activeUid, snapshot.workspace.id, updateSnapshot]
+    [activeUid, snapshot.workspace.id, syncCloudWrite, updateSnapshot]
   );
 
   const handleUpdateList = useCallback(
@@ -680,14 +788,27 @@ export default function App() {
       id: string,
       data: Omit<AudienceList, 'id' | 'workspaceId' | 'ownerId' | 'createdAt' | 'updatedAt'>
     ) => {
+      const now = new Date().toISOString();
       updateSnapshot((prev) => ({
         ...prev,
         lists: prev.lists.map((l) =>
-          l.id === id ? { ...l, ...data, updatedAt: new Date().toISOString() } : l
+          l.id === id ? { ...l, ...data, updatedAt: now } : l
         ),
       }));
+      if (auth.currentUser) {
+        const existing = snapshot.lists.find((l) => l.id === id);
+        await syncCloudWrite(() =>
+          upsertCollectionDoc('lists', auth.currentUser!.uid, id, {
+            ...(existing || {}),
+            ...data,
+            id,
+          })
+        );
+      } else {
+        trackGuestDirtyItem('lists', id);
+      }
     },
-    [updateSnapshot]
+    [snapshot.lists, syncCloudWrite, updateSnapshot]
   );
 
   const handleDeleteList = useCallback(
@@ -696,8 +817,11 @@ export default function App() {
         ...prev,
         lists: prev.lists.filter((l) => l.id !== id),
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() => deleteCollectionDoc('lists', auth.currentUser!.uid, id));
+      }
     },
-    [updateSnapshot]
+    [syncCloudWrite, updateSnapshot]
   );
 
   // --------------------------------------------------------------------------
@@ -705,44 +829,89 @@ export default function App() {
   // --------------------------------------------------------------------------
   const handleCreateAutomation = useCallback(
     async (
-      data: Omit<Automation, 'id' | 'workspaceId' | 'ownerId' | 'createdAt' | 'updatedAt'>
+      data: Omit<Automation, 'id' | 'workspaceId' | 'ownerId' | 'createdAt' | 'updatedAt'>,
+      options?: { logAction?: 'saved_draft' | 'published' | 'silent' }
     ): Promise<Automation> => {
+      const now = new Date().toISOString();
       const newAuto: Automation = {
         ...data,
         id: generateSafeId('aut'),
         workspaceId: snapshot.workspace.id,
         ownerId: activeUid,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        createdAt: now,
+        updatedAt: now,
       };
       updateSnapshot((prev) => ({
         ...prev,
         automations: [newAuto, ...prev.automations],
       }));
-      await handleLogActivity(
-        'automation_triggered',
-        `Automation created: ${newAuto.name}`,
-        `Trigger: ${newAuto.triggerType} | Status: ${newAuto.status}`,
-        'system'
-      );
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          upsertCollectionDoc('automations', auth.currentUser!.uid, newAuto.id, newAuto)
+        );
+      } else {
+        trackGuestDirtyItem('automations', newAuto.id);
+      }
+
+      if (options?.logAction !== 'silent') {
+        const isPublished = options?.logAction === 'published' || newAuto.status === 'active';
+        await handleLogActivity(
+          isPublished ? 'workflow_published' : 'workflow_saved',
+          isPublished
+            ? `Workflow published: ${newAuto.name}`
+            : `Workflow draft saved: ${newAuto.name}`,
+          `List: ${newAuto.targetList || 'General Contacts'} | Status: ${newAuto.status}`,
+          'system'
+        );
+      }
       return newAuto;
     },
-    [activeUid, handleLogActivity, snapshot.workspace.id, updateSnapshot]
+    [activeUid, handleLogActivity, snapshot.workspace.id, syncCloudWrite, updateSnapshot]
   );
 
   const handleUpdateAutomation = useCallback(
     async (
       id: string,
-      data: Omit<Automation, 'id' | 'workspaceId' | 'ownerId' | 'createdAt' | 'updatedAt'>
+      data: Omit<Automation, 'id' | 'workspaceId' | 'ownerId' | 'createdAt' | 'updatedAt'>,
+      options?: { logAction?: 'saved_draft' | 'published' | 'silent' }
     ) => {
+      const now = new Date().toISOString();
+      const existing = snapshot.automations.find((a) => a.id === id);
+      const merged: Automation = {
+        ...(existing || ({ id, workspaceId: snapshot.workspace.id, ownerId: activeUid } as Automation)),
+        ...data,
+        id,
+        updatedAt: now,
+      };
       updateSnapshot((prev) => ({
         ...prev,
-        automations: prev.automations.map((a) =>
-          a.id === id ? { ...a, ...data, updatedAt: new Date().toISOString() } : a
-        ),
+        automations: prev.automations.map((a) => (a.id === id ? merged : a)),
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          upsertCollectionDoc('automations', auth.currentUser!.uid, id, merged)
+        );
+      } else {
+        trackGuestDirtyItem('automations', id);
+      }
+
+      if (options?.logAction === 'published') {
+        await handleLogActivity(
+          'workflow_published',
+          `Workflow published: ${merged.name}`,
+          `List: ${merged.targetList || 'General Contacts'} | Live v${merged.version || 1}`,
+          'system'
+        );
+      } else if (options?.logAction === 'saved_draft') {
+        await handleLogActivity(
+          'workflow_saved',
+          `Workflow draft saved: ${merged.name}`,
+          `List: ${merged.targetList || 'General Contacts'} | Draft saved`,
+          'system'
+        );
+      }
     },
-    [updateSnapshot]
+    [activeUid, handleLogActivity, snapshot.automations, snapshot.workspace.id, syncCloudWrite, updateSnapshot]
   );
 
   const handleDeleteAutomation = useCallback(
@@ -751,25 +920,32 @@ export default function App() {
         ...prev,
         automations: prev.automations.filter((a) => a.id !== id),
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() => deleteCollectionDoc('automations', auth.currentUser!.uid, id));
+      }
     },
-    [updateSnapshot]
+    [syncCloudWrite, updateSnapshot]
   );
 
   const handleSimulateAutomationRun = useCallback(
     async (auto: Automation) => {
+      const updatedAuto: Automation = {
+        ...auto,
+        enrolledCount: (auto.enrolledCount || 0) + 1,
+        completedCount: (auto.completedCount || 0) + 1,
+        updatedAt: new Date().toISOString(),
+      };
       updateSnapshot((prev) => ({
         ...prev,
-        automations: prev.automations.map((a) =>
-          a.id === auto.id
-            ? {
-                ...a,
-                enrolledCount: (a.enrolledCount || 0) + 1,
-                completedCount: (a.completedCount || 0) + 1,
-                updatedAt: new Date().toISOString(),
-              }
-            : a
-        ),
+        automations: prev.automations.map((a) => (a.id === auto.id ? updatedAuto : a)),
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          upsertCollectionDoc('automations', auth.currentUser!.uid, auto.id, updatedAuto)
+        );
+      } else {
+        trackGuestDirtyItem('automations', auto.id);
+      }
       await handleLogActivity(
         'automation_triggered',
         `Live Run Executed: ${auto.name}`,
@@ -777,7 +953,7 @@ export default function App() {
         'system'
       );
     },
-    [handleLogActivity, updateSnapshot]
+    [handleLogActivity, syncCloudWrite, updateSnapshot]
   );
 
   // --------------------------------------------------------------------------
@@ -787,20 +963,28 @@ export default function App() {
     async (
       data: Omit<AutoResponder, 'id' | 'workspaceId' | 'ownerId' | 'createdAt' | 'updatedAt'>
     ) => {
+      const now = new Date().toISOString();
       const newResponder: AutoResponder = {
         ...data,
         id: generateSafeId('rsp'),
         workspaceId: snapshot.workspace.id,
         ownerId: activeUid,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
+        createdAt: now,
+        updatedAt: now,
       };
       updateSnapshot((prev) => ({
         ...prev,
         autoResponders: [newResponder, ...prev.autoResponders],
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          upsertCollectionDoc('autoresponders', auth.currentUser!.uid, newResponder.id, newResponder)
+        );
+      } else {
+        trackGuestDirtyItem('autoResponders', newResponder.id);
+      }
     },
-    [activeUid, snapshot.workspace.id, updateSnapshot]
+    [activeUid, snapshot.workspace.id, syncCloudWrite, updateSnapshot]
   );
 
   const handleUpdateAutoResponder = useCallback(
@@ -808,14 +992,21 @@ export default function App() {
       id: string,
       data: Omit<AutoResponder, 'id' | 'workspaceId' | 'ownerId' | 'createdAt' | 'updatedAt'>
     ) => {
+      const existing = snapshot.autoResponders.find((r) => r.id === id);
+      const updated = { ...(existing || {}), ...data, id, updatedAt: new Date().toISOString() };
       updateSnapshot((prev) => ({
         ...prev,
-        autoResponders: prev.autoResponders.map((r) =>
-          r.id === id ? { ...r, ...data, updatedAt: new Date().toISOString() } : r
-        ),
+        autoResponders: prev.autoResponders.map((r) => (r.id === id ? { ...r, ...data, updatedAt: updated.updatedAt } : r)),
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          upsertCollectionDoc('autoresponders', auth.currentUser!.uid, id, updated)
+        );
+      } else {
+        trackGuestDirtyItem('autoResponders', id);
+      }
     },
-    [updateSnapshot]
+    [snapshot.autoResponders, syncCloudWrite, updateSnapshot]
   );
 
   const handleDeleteAutoResponder = useCallback(
@@ -824,8 +1015,13 @@ export default function App() {
         ...prev,
         autoResponders: prev.autoResponders.filter((r) => r.id !== id),
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          deleteCollectionDoc('autoresponders', auth.currentUser!.uid, id)
+        );
+      }
     },
-    [updateSnapshot]
+    [syncCloudWrite, updateSnapshot]
   );
 
   // --------------------------------------------------------------------------
@@ -849,9 +1045,16 @@ export default function App() {
         ...prev,
         inboxThreads: [newThread, ...prev.inboxThreads],
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          upsertCollectionDoc('inbox_threads', auth.currentUser!.uid, newThread.id, newThread)
+        );
+      } else {
+        trackGuestDirtyItem('inboxThreads', newThread.id);
+      }
       return newId;
     },
-    [activeUid, snapshot.workspace.id, updateSnapshot]
+    [activeUid, snapshot.workspace.id, syncCloudWrite, updateSnapshot]
   );
 
   const handleUpdateThread = useCallback(
@@ -859,14 +1062,23 @@ export default function App() {
       id: string,
       data: Omit<InboxThread, 'id' | 'workspaceId' | 'ownerId' | 'createdAt' | 'updatedAt'>
     ) => {
+      const existing = snapshot.inboxThreads.find((t) => t.id === id);
+      const updated = { ...(existing || {}), ...data, id, updatedAt: new Date().toISOString() };
       updateSnapshot((prev) => ({
         ...prev,
         inboxThreads: prev.inboxThreads.map((t) =>
-          t.id === id ? { ...t, ...data, updatedAt: new Date().toISOString() } : t
+          t.id === id ? { ...t, ...data, updatedAt: updated.updatedAt } : t
         ),
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          upsertCollectionDoc('inbox_threads', auth.currentUser!.uid, id, updated)
+        );
+      } else {
+        trackGuestDirtyItem('inboxThreads', id);
+      }
     },
-    [updateSnapshot]
+    [snapshot.inboxThreads, syncCloudWrite, updateSnapshot]
   );
 
   const handleDeleteThread = useCallback(
@@ -875,8 +1087,13 @@ export default function App() {
         ...prev,
         inboxThreads: prev.inboxThreads.filter((t) => t.id !== id),
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          deleteCollectionDoc('inbox_threads', auth.currentUser!.uid, id)
+        );
+      }
     },
-    [updateSnapshot]
+    [syncCloudWrite, updateSnapshot]
   );
 
   const handleForwardToInboxFromChatbot = useCallback(
@@ -913,8 +1130,8 @@ export default function App() {
         listName: payload.listName,
         channel: 'whatsapp',
         subjectOrContext: payload.contextLabel,
-        lastLeadMessage: payload.customerMessage || '',
-        lastMessagePreview: payload.outboundReply.slice(0, 100),
+        lastLeadMessage: payload.customerMessage || payload.outboundReply || 'Inbound bot message',
+        lastMessagePreview: (payload.outboundReply || 'Forwarded from chatbot').slice(0, 100),
         lastSender: 'autoresponder',
         status: 'replied',
         unreadCount: 1,
@@ -927,8 +1144,15 @@ export default function App() {
         ...prev,
         inboxThreads: [newThread, ...prev.inboxThreads],
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          upsertCollectionDoc('inbox_threads', auth.currentUser!.uid, newThread.id, newThread)
+        );
+      } else {
+        trackGuestDirtyItem('inboxThreads', newThread.id);
+      }
     },
-    [activeUid, snapshot.workspace.id, updateSnapshot]
+    [activeUid, snapshot.workspace.id, syncCloudWrite, updateSnapshot]
   );
 
   // --------------------------------------------------------------------------
@@ -951,6 +1175,13 @@ export default function App() {
         ...prev,
         campaigns: [newCampaign, ...prev.campaigns],
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          upsertCollectionDoc('campaigns', auth.currentUser!.uid, newCampaign.id, newCampaign)
+        );
+      } else {
+        trackGuestDirtyItem('campaigns', newCampaign.id);
+      }
       await handleLogActivity(
         'campaign_sent',
         `Campaign created: ${newCampaign.name}`,
@@ -958,7 +1189,7 @@ export default function App() {
         newCampaign.channel === 'whatsapp' ? 'whatsapp' : newCampaign.channel === 'sms' ? 'sms' : 'email'
       );
     },
-    [activeUid, handleLogActivity, snapshot.workspace.id, updateSnapshot]
+    [activeUid, handleLogActivity, snapshot.workspace.id, syncCloudWrite, updateSnapshot]
   );
 
   const handleUpdateCampaign = useCallback(
@@ -966,34 +1197,47 @@ export default function App() {
       id: string,
       data: Partial<Omit<Campaign, 'id' | 'workspaceId' | 'ownerId' | 'createdAt' | 'updatedAt'>>
     ) => {
+      const existing = snapshot.campaigns.find((c) => c.id === id);
+      const updated = { ...(existing || {}), ...data, id, updatedAt: new Date().toISOString() };
       updateSnapshot((prev) => ({
         ...prev,
         campaigns: prev.campaigns.map((c) =>
-          c.id === id ? { ...c, ...data, updatedAt: new Date().toISOString() } : c
+          c.id === id ? { ...c, ...data, updatedAt: updated.updatedAt } : c
         ),
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          upsertCollectionDoc('campaigns', auth.currentUser!.uid, id, updated)
+        );
+      } else {
+        trackGuestDirtyItem('campaigns', id);
+      }
     },
-    [updateSnapshot]
+    [snapshot.campaigns, syncCloudWrite, updateSnapshot]
   );
 
   const handleDispatchCampaign = useCallback(
     async (campaign: Campaign) => {
+      const updatedCampaign: Campaign = {
+        ...campaign,
+        status: 'sent',
+        sentCount: campaign.recipientCount || 1,
+        deliveredCount: campaign.recipientCount || 1,
+        openedCount: Math.round((campaign.recipientCount || 1) * 0.45),
+        clickedCount: Math.round((campaign.recipientCount || 1) * 0.18),
+        updatedAt: new Date().toISOString(),
+      };
       updateSnapshot((prev) => ({
         ...prev,
-        campaigns: prev.campaigns.map((c) =>
-          c.id === campaign.id
-            ? {
-                ...c,
-                status: 'sent',
-                sentCount: c.recipientCount || 1,
-                deliveredCount: c.recipientCount || 1,
-                openedCount: Math.round((c.recipientCount || 1) * 0.45),
-                clickedCount: Math.round((c.recipientCount || 1) * 0.18),
-                updatedAt: new Date().toISOString(),
-              }
-            : c
-        ),
+        campaigns: prev.campaigns.map((c) => (c.id === campaign.id ? updatedCampaign : c)),
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          upsertCollectionDoc('campaigns', auth.currentUser!.uid, campaign.id, updatedCampaign)
+        );
+      } else {
+        trackGuestDirtyItem('campaigns', campaign.id);
+      }
       await handleLogActivity(
         'campaign_sent',
         `Broadcast Dispatched: ${campaign.name}`,
@@ -1001,7 +1245,7 @@ export default function App() {
         campaign.channel === 'whatsapp' ? 'whatsapp' : campaign.channel === 'sms' ? 'sms' : 'email'
       );
     },
-    [handleLogActivity, updateSnapshot]
+    [handleLogActivity, syncCloudWrite, updateSnapshot]
   );
 
   const handleDeleteCampaign = useCallback(
@@ -1010,8 +1254,13 @@ export default function App() {
         ...prev,
         campaigns: prev.campaigns.filter((c) => c.id !== id),
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          deleteCollectionDoc('campaigns', auth.currentUser!.uid, id)
+        );
+      }
     },
-    [updateSnapshot]
+    [syncCloudWrite, updateSnapshot]
   );
 
   // --------------------------------------------------------------------------
@@ -1034,6 +1283,13 @@ export default function App() {
         ...prev,
         assets: [newAsset, ...prev.assets],
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          upsertCollectionDoc('assets', auth.currentUser!.uid, newAsset.id, newAsset)
+        );
+      } else {
+        trackGuestDirtyItem('assets', newAsset.id);
+      }
       await handleLogActivity(
         'asset_published',
         `Asset Published: ${newAsset.title}`,
@@ -1041,7 +1297,7 @@ export default function App() {
         'web'
       );
     },
-    [activeUid, handleLogActivity, snapshot.workspace.id, updateSnapshot]
+    [activeUid, handleLogActivity, snapshot.workspace.id, syncCloudWrite, updateSnapshot]
   );
 
   const handleUpdateAsset = useCallback(
@@ -1049,14 +1305,23 @@ export default function App() {
       id: string,
       data: Omit<CaptureAsset, 'id' | 'workspaceId' | 'ownerId' | 'createdAt' | 'updatedAt'>
     ) => {
+      const existing = snapshot.assets.find((a) => a.id === id);
+      const updated = { ...(existing || {}), ...data, id, updatedAt: new Date().toISOString() };
       updateSnapshot((prev) => ({
         ...prev,
         assets: prev.assets.map((a) =>
-          a.id === id ? { ...a, ...data, updatedAt: new Date().toISOString() } : a
+          a.id === id ? { ...a, ...data, updatedAt: updated.updatedAt } : a
         ),
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          upsertCollectionDoc('assets', auth.currentUser!.uid, id, updated)
+        );
+      } else {
+        trackGuestDirtyItem('assets', id);
+      }
     },
-    [updateSnapshot]
+    [snapshot.assets, syncCloudWrite, updateSnapshot]
   );
 
   const handleDeleteAsset = useCallback(
@@ -1065,8 +1330,11 @@ export default function App() {
         ...prev,
         assets: prev.assets.filter((a) => a.id !== id),
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() => deleteCollectionDoc('assets', auth.currentUser!.uid, id));
+      }
     },
-    [updateSnapshot]
+    [syncCloudWrite, updateSnapshot]
   );
 
   const handleSubmitAssetLead = useCallback(
@@ -1139,33 +1407,49 @@ export default function App() {
 
       const matchedIds = new Set(matchedAutomations.map((m) => m.id));
 
+      const updatedAsset = {
+        ...asset,
+        submissionsCount: (asset.submissionsCount || 0) + 1,
+        viewsCount: (asset.viewsCount || 0) + 1,
+        updatedAt: now,
+      };
+
+      const updatedMatchedAutos = matchedAutomations.map((auto) => ({
+        ...auto,
+        enrolledCount: (auto.enrolledCount || 0) + 1,
+        completedCount: (auto.completedCount || 0) + 1,
+        updatedAt: now,
+      }));
+
       updateSnapshot((prev) => ({
         ...prev,
         contacts: [newContact, ...prev.contacts],
-        assets: prev.assets.map((a) =>
-          a.id === asset.id
-            ? {
-                ...a,
-                submissionsCount: (a.submissionsCount || 0) + 1,
-                viewsCount: (a.viewsCount || 0) + 1,
-                updatedAt: now,
-              }
-            : a
-        ),
+        assets: prev.assets.map((a) => (a.id === asset.id ? updatedAsset : a)),
         automations:
           matchedIds.size > 0
-            ? prev.automations.map((auto) =>
-                matchedIds.has(auto.id)
-                  ? {
-                      ...auto,
-                      enrolledCount: (auto.enrolledCount || 0) + 1,
-                      completedCount: (auto.completedCount || 0) + 1,
-                      updatedAt: now,
-                    }
-                  : auto
-              )
+            ? prev.automations.map((auto) => {
+                const hit = updatedMatchedAutos.find((u) => u.id === auto.id);
+                return hit || auto;
+              })
             : prev.automations,
       }));
+
+      if (auth.currentUser) {
+        await syncCloudWrite(async () => {
+          const ops: Promise<void>[] = [
+            upsertCollectionDoc('contacts', auth.currentUser!.uid, newContact.id, newContact),
+            upsertCollectionDoc('assets', auth.currentUser!.uid, asset.id, updatedAsset),
+            ...updatedMatchedAutos.map((auto) =>
+              upsertCollectionDoc('automations', auth.currentUser!.uid, auto.id, auto)
+            ),
+          ];
+          await Promise.all(ops);
+        });
+      } else {
+        trackGuestDirtyItem('contacts', newContact.id);
+        trackGuestDirtyItem('assets', asset.id);
+        updatedMatchedAutos.forEach((a) => trackGuestDirtyItem('automations', a.id));
+      }
 
       await handleLogActivity(
         'form_captured',
@@ -1273,6 +1557,7 @@ export default function App() {
       snapshot.automations,
       snapshot.privateProfile,
       snapshot.workspace,
+      syncCloudWrite,
       updateSnapshot,
     ]
   );
@@ -1297,8 +1582,15 @@ export default function App() {
         ...prev,
         chatbots: [newBot, ...prev.chatbots],
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          upsertCollectionDoc('chatbots', auth.currentUser!.uid, newBot.id, newBot)
+        );
+      } else {
+        trackGuestDirtyItem('chatbots', newBot.id);
+      }
     },
-    [activeUid, snapshot.workspace.id, updateSnapshot]
+    [activeUid, snapshot.workspace.id, syncCloudWrite, updateSnapshot]
   );
 
   const handleUpdateChatbot = useCallback(
@@ -1306,14 +1598,23 @@ export default function App() {
       id: string,
       data: Omit<ChatbotFlow, 'id' | 'workspaceId' | 'ownerId' | 'createdAt' | 'updatedAt'>
     ) => {
+      const existing = snapshot.chatbots.find((b) => b.id === id);
+      const updated = { ...(existing || {}), ...data, id, updatedAt: new Date().toISOString() };
       updateSnapshot((prev) => ({
         ...prev,
         chatbots: prev.chatbots.map((b) =>
-          b.id === id ? { ...b, ...data, updatedAt: new Date().toISOString() } : b
+          b.id === id ? { ...b, ...data, updatedAt: updated.updatedAt } : b
         ),
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          upsertCollectionDoc('chatbots', auth.currentUser!.uid, id, updated)
+        );
+      } else {
+        trackGuestDirtyItem('chatbots', id);
+      }
     },
-    [updateSnapshot]
+    [snapshot.chatbots, syncCloudWrite, updateSnapshot]
   );
 
   const handleDeleteChatbot = useCallback(
@@ -1322,25 +1623,34 @@ export default function App() {
         ...prev,
         chatbots: prev.chatbots.filter((b) => b.id !== id),
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          deleteCollectionDoc('chatbots', auth.currentUser!.uid, id)
+        );
+      }
     },
-    [updateSnapshot]
+    [syncCloudWrite, updateSnapshot]
   );
 
   const handleRecordBotSession = useCallback(
     async (bot: ChatbotFlow) => {
+      const updatedBot: ChatbotFlow = {
+        ...bot,
+        sessionsCount: (bot.sessionsCount || 0) + 1,
+        resolvedCount: (bot.resolvedCount || 0) + 1,
+        updatedAt: new Date().toISOString(),
+      };
       updateSnapshot((prev) => ({
         ...prev,
-        chatbots: prev.chatbots.map((b) =>
-          b.id === bot.id
-            ? {
-                ...b,
-                sessionsCount: (b.sessionsCount || 0) + 1,
-                resolvedCount: (b.resolvedCount || 0) + 1,
-                updatedAt: new Date().toISOString(),
-              }
-            : b
-        ),
+        chatbots: prev.chatbots.map((b) => (b.id === bot.id ? updatedBot : b)),
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          upsertCollectionDoc('chatbots', auth.currentUser!.uid, bot.id, updatedBot)
+        );
+      } else {
+        trackGuestDirtyItem('chatbots', bot.id);
+      }
       await handleLogActivity(
         'whatsapp_replied',
         `Bot session completed: ${bot.name}`,
@@ -1348,7 +1658,7 @@ export default function App() {
         'whatsapp'
       );
     },
-    [handleLogActivity, updateSnapshot]
+    [handleLogActivity, syncCloudWrite, updateSnapshot]
   );
 
   // --------------------------------------------------------------------------
@@ -1371,26 +1681,37 @@ export default function App() {
         ...prev,
         tasks: [newTask, ...prev.tasks],
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          upsertCollectionDoc('tasks', auth.currentUser!.uid, newTask.id, newTask)
+        );
+      } else {
+        trackGuestDirtyItem('tasks', newTask.id);
+      }
     },
-    [activeUid, snapshot.workspace.id, updateSnapshot]
+    [activeUid, snapshot.workspace.id, syncCloudWrite, updateSnapshot]
   );
 
   const handleCompleteTask = useCallback(
     async (task: TaskItem) => {
+      const updatedTask: TaskItem = {
+        ...task,
+        status: task.status === 'completed' ? 'pending' : 'completed',
+        updatedAt: new Date().toISOString(),
+      };
       updateSnapshot((prev) => ({
         ...prev,
-        tasks: prev.tasks.map((t) =>
-          t.id === task.id
-            ? {
-                ...t,
-                status: t.status === 'completed' ? 'pending' : 'completed',
-                updatedAt: new Date().toISOString(),
-              }
-            : t
-        ),
+        tasks: prev.tasks.map((t) => (t.id === task.id ? updatedTask : t)),
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          upsertCollectionDoc('tasks', auth.currentUser!.uid, task.id, updatedTask)
+        );
+      } else {
+        trackGuestDirtyItem('tasks', task.id);
+      }
     },
-    [updateSnapshot]
+    [syncCloudWrite, updateSnapshot]
   );
 
   const handleDeleteTask = useCallback(
@@ -1399,8 +1720,11 @@ export default function App() {
         ...prev,
         tasks: prev.tasks.filter((t) => t.id !== taskId),
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() => deleteCollectionDoc('tasks', auth.currentUser!.uid, taskId));
+      }
     },
-    [updateSnapshot]
+    [syncCloudWrite, updateSnapshot]
   );
 
   // --------------------------------------------------------------------------
@@ -1408,32 +1732,50 @@ export default function App() {
   // --------------------------------------------------------------------------
   const handleUpdateWorkspace = useCallback(
     async (data: Omit<Workspace, 'id' | 'ownerId' | 'createdAt' | 'updatedAt'>) => {
+      const mergedWorkspace = {
+        ...snapshot.workspace,
+        ...data,
+        updatedAt: new Date().toISOString(),
+      };
       updateSnapshot((prev) => ({
         ...prev,
-        workspace: {
-          ...prev.workspace,
-          ...data,
-          updatedAt: new Date().toISOString(),
-        },
+        workspace: mergedWorkspace,
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() => upsertWorkspaceRoot(auth.currentUser!.uid, mergedWorkspace));
+      } else {
+        trackGuestDirtyItem('workspace');
+      }
     },
-    [updateSnapshot]
+    [snapshot.workspace, syncCloudWrite, updateSnapshot]
   );
 
   const handleUpdatePrivateProfile = useCallback(
     async (
       data: Omit<UserPrivateProfile, 'id' | 'ownerId' | 'createdAt' | 'updatedAt'>
     ) => {
+      const mergedProfile = {
+        ...snapshot.privateProfile,
+        ...data,
+        updatedAt: new Date().toISOString(),
+      };
       updateSnapshot((prev) => ({
         ...prev,
-        privateProfile: {
-          ...prev.privateProfile,
-          ...data,
-          updatedAt: new Date().toISOString(),
-        },
+        privateProfile: mergedProfile,
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          upsertPrivateProfile(
+            auth.currentUser!.uid,
+            user?.email || mergedProfile.email || 'operator@flowpilot.app',
+            mergedProfile
+          )
+        );
+      } else {
+        trackGuestDirtyItem('privateProfile');
+      }
     },
-    [updateSnapshot]
+    [snapshot.privateProfile, syncCloudWrite, updateSnapshot, user?.email]
   );
 
   const handleAddMember = useCallback(
@@ -1454,8 +1796,15 @@ export default function App() {
         ...prev,
         members: [...prev.members, newMember],
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          upsertMemberDoc(auth.currentUser!.uid, newMember.id, newMember)
+        );
+      } else {
+        trackGuestDirtyItem('members', newMember.id);
+      }
     },
-    [activeUid, snapshot.workspace.id, updateSnapshot]
+    [activeUid, snapshot.workspace.id, syncCloudWrite, updateSnapshot]
   );
 
   const handleDeleteMember = useCallback(
@@ -1464,8 +1813,11 @@ export default function App() {
         ...prev,
         members: prev.members.filter((m) => m.id !== memberId),
       }));
+      if (auth.currentUser) {
+        await syncCloudWrite(() => deleteMemberDoc(auth.currentUser!.uid, memberId));
+      }
     },
-    [updateSnapshot]
+    [syncCloudWrite, updateSnapshot]
   );
 
   const handleReseedWorkspace = useCallback(async () => {
@@ -1476,13 +1828,46 @@ export default function App() {
       snapshot.workspace.name || 'My Sovereign Workspace'
     );
     updateSnapshot(() => starter);
-  }, [activeUid, snapshot.workspace.name, updateSnapshot, user?.email, userProfile?.displayName]);
+    if (auth.currentUser) {
+      await syncCloudWrite(async () => {
+        const uid = auth.currentUser!.uid;
+        await upsertWorkspaceRoot(uid, starter.workspace);
+        await Promise.all([
+          ...starter.lists.map((l) => upsertCollectionDoc('lists', uid, l.id, l)),
+          ...starter.automations.map((a) => upsertCollectionDoc('automations', uid, a.id, a)),
+          ...starter.members.map((m) => upsertMemberDoc(uid, m.id, m)),
+        ]);
+      });
+    }
+  }, [activeUid, snapshot.workspace.name, syncCloudWrite, updateSnapshot, user?.email, userProfile?.displayName]);
 
   const handleRestoreWorkspaceSnapshot = useCallback(
     (snap: WorkspaceSnapshot) => {
       updateSnapshot(() => snap);
+      if (auth.currentUser) {
+        const uid = auth.currentUser.uid;
+        void syncCloudWrite(async () => {
+          await upsertWorkspaceRoot(uid, snap.workspace);
+          await upsertPrivateProfile(
+            uid,
+            user?.email || snap.privateProfile?.email || 'operator@flowpilot.app',
+            snap.privateProfile
+          );
+          await Promise.all([
+            ...snap.lists.map((l) => upsertCollectionDoc('lists', uid, l.id, l)),
+            ...snap.automations.map((a) => upsertCollectionDoc('automations', uid, a.id, a)),
+            ...snap.contacts.map((c) => upsertCollectionDoc('contacts', uid, c.id, c)),
+            ...snap.campaigns.map((c) => upsertCollectionDoc('campaigns', uid, c.id, c)),
+            ...snap.assets.map((a) => upsertCollectionDoc('assets', uid, a.id, a)),
+            ...snap.chatbots.map((b) => upsertCollectionDoc('chatbots', uid, b.id, b)),
+            ...snap.autoResponders.map((r) => upsertCollectionDoc('autoresponders', uid, r.id, r)),
+            ...snap.inboxThreads.map((t) => upsertCollectionDoc('inbox_threads', uid, t.id, t)),
+            ...snap.tasks.map((t) => upsertCollectionDoc('tasks', uid, t.id, t)),
+          ]);
+        });
+      }
     },
-    [updateSnapshot]
+    [syncCloudWrite, updateSnapshot, user?.email]
   );
 
   // Public Landing Page Lead Capture
@@ -1518,6 +1903,14 @@ export default function App() {
         contacts: [newContact, ...prev.contacts],
       }));
 
+      if (auth.currentUser) {
+        await syncCloudWrite(() =>
+          upsertCollectionDoc('contacts', auth.currentUser!.uid, newContact.id, newContact)
+        );
+      } else {
+        trackGuestDirtyItem('contacts', newContact.id);
+      }
+
       await handleLogActivity(
         'lead_captured',
         `Public portal lead captured: ${lead.fullName}`,
@@ -1525,7 +1918,7 @@ export default function App() {
         'web'
       );
     },
-    [activeUid, handleLogActivity, snapshot.workspace.id, updateSnapshot]
+    [activeUid, handleLogActivity, snapshot.workspace.id, syncCloudWrite, updateSnapshot]
   );
 
   // Quick Action Navigator from Dashboard
@@ -1610,18 +2003,35 @@ export default function App() {
           userEmail={user?.email || "jonajukej777@gmail.com"}
           onBackToDashboard={navigateBackFromWhatsAppEmbeddedSignup}
           onAccountConnected={(acc) => {
+            const nextWs = { ...snapshot.workspace, whatsappConnected: true };
+            const nextProf = snapshot.privateProfile
+              ? {
+                  ...snapshot.privateProfile,
+                  whatsappBusinessNumber: acc.number || snapshot.privateProfile.whatsappBusinessNumber,
+                }
+              : snapshot.privateProfile;
             updateSnapshot((prev) => ({
               ...prev,
-              workspace: {
-                ...prev.workspace,
-                whatsappConnected: true,
-              },
-              privateProfile: prev.privateProfile ? {
-                ...prev.privateProfile,
-                whatsappConnected: true,
-                whatsappBusinessNumber: acc.number || prev.privateProfile.whatsappBusinessNumber,
-              } : prev.privateProfile,
+              workspace: { ...prev.workspace, whatsappConnected: true },
+              privateProfile: prev.privateProfile
+                ? {
+                    ...prev.privateProfile,
+                    whatsappBusinessNumber: acc.number || prev.privateProfile.whatsappBusinessNumber,
+                  }
+                : prev.privateProfile,
             }));
+            if (auth.currentUser) {
+              void syncCloudWrite(async () => {
+                await upsertWorkspaceRoot(auth.currentUser!.uid, nextWs);
+                if (nextProf) {
+                  await upsertPrivateProfile(
+                    auth.currentUser!.uid,
+                    user?.email || nextProf.email || 'operator@flowpilot.app',
+                    nextProf
+                  );
+                }
+              });
+            }
           }}
         />
       </ErrorBoundary>
@@ -2060,6 +2470,18 @@ export default function App() {
           </ErrorBoundary>
         ) : (
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+            {syncNotice && (
+              <div className="mb-4 px-4 py-2.5 rounded-xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800 text-xs font-medium text-emerald-800 dark:text-emerald-200 flex items-center justify-between gap-3">
+                <span>{syncNotice}</span>
+                <button
+                  type="button"
+                  onClick={() => setSyncNotice(null)}
+                  className="text-emerald-700 dark:text-emerald-300 hover:underline font-semibold cursor-pointer"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
             <ErrorBoundary
               fallbackTitle={`Module Error: ${activeTab}`}
               onReset={() => setActiveTab('dashboard')}
@@ -2159,6 +2581,12 @@ export default function App() {
                 <div className="-mx-4 sm:-mx-6 lg:-mx-8 -my-6">
                   <AutomationBuilderUI
                     userId={activeUid}
+                    isAuthenticated={isRealFirebaseUser}
+                    cloudSyncState={cloudSyncState}
+                    onOpenAuth={() => {
+                      setAuthModalMode('signin');
+                      setAuthModalOpen(true);
+                    }}
                     automations={snapshot.automations}
                     lists={snapshot.lists}
                     contacts={snapshot.contacts}
@@ -2349,36 +2777,47 @@ export default function App() {
                     const phoneFromJid = details.ownerJid
                       ? details.ownerJid.split('@')[0].replace(/[^0-9+]/g, '')
                       : undefined;
+                    const nextWs = { ...snapshot.workspace, whatsappConnected: true };
+                    const nextProf = snapshot.privateProfile
+                      ? {
+                          ...snapshot.privateProfile,
+                          whatsappBusinessNumber:
+                            phoneFromJid || snapshot.privateProfile.whatsappBusinessNumber,
+                        }
+                      : snapshot.privateProfile;
                     updateSnapshot((prev) => ({
                       ...prev,
-                      workspace: {
-                        ...prev.workspace,
-                        whatsappConnected: true,
-                      },
+                      workspace: { ...prev.workspace, whatsappConnected: true },
                       privateProfile: prev.privateProfile
                         ? {
                             ...prev.privateProfile,
-                            whatsappConnected: true,
                             whatsappBusinessNumber:
                               phoneFromJid || prev.privateProfile.whatsappBusinessNumber,
                           }
                         : prev.privateProfile,
                     }));
+                    if (auth.currentUser) {
+                      void syncCloudWrite(async () => {
+                        await upsertWorkspaceRoot(auth.currentUser!.uid, nextWs);
+                        if (nextProf) {
+                          await upsertPrivateProfile(
+                            auth.currentUser!.uid,
+                            user?.email || nextProf.email || 'operator@flowpilot.app',
+                            nextProf
+                          );
+                        }
+                      });
+                    }
                   }}
                   onAccountDisconnected={() => {
+                    const nextWs = { ...snapshot.workspace, whatsappConnected: false };
                     updateSnapshot((prev) => ({
                       ...prev,
-                      workspace: {
-                        ...prev.workspace,
-                        whatsappConnected: false,
-                      },
-                      privateProfile: prev.privateProfile
-                        ? {
-                            ...prev.privateProfile,
-                            whatsappConnected: false,
-                          }
-                        : prev.privateProfile,
+                      workspace: { ...prev.workspace, whatsappConnected: false },
                     }));
+                    if (auth.currentUser) {
+                      void syncCloudWrite(() => upsertWorkspaceRoot(auth.currentUser!.uid, nextWs));
+                    }
                   }}
                 />
               )}
@@ -2389,18 +2828,37 @@ export default function App() {
                   userEmail={user?.email || undefined}
                   onBackToDashboard={() => setActiveTab('dashboard')}
                   onAccountConnected={(acc) => {
+                    const nextWs = { ...snapshot.workspace, whatsappConnected: true };
+                    const nextProf = snapshot.privateProfile
+                      ? {
+                          ...snapshot.privateProfile,
+                          whatsappBusinessNumber:
+                            acc.number || snapshot.privateProfile.whatsappBusinessNumber,
+                        }
+                      : snapshot.privateProfile;
                     updateSnapshot((prev) => ({
                       ...prev,
-                      workspace: {
-                        ...prev.workspace,
-                        whatsappConnected: true,
-                      },
-                      privateProfile: prev.privateProfile ? {
-                        ...prev.privateProfile,
-                        whatsappConnected: true,
-                        whatsappBusinessNumber: acc.number || prev.privateProfile.whatsappBusinessNumber,
-                      } : prev.privateProfile,
+                      workspace: { ...prev.workspace, whatsappConnected: true },
+                      privateProfile: prev.privateProfile
+                        ? {
+                            ...prev.privateProfile,
+                            whatsappBusinessNumber:
+                              acc.number || prev.privateProfile.whatsappBusinessNumber,
+                          }
+                        : prev.privateProfile,
                     }));
+                    if (auth.currentUser) {
+                      void syncCloudWrite(async () => {
+                        await upsertWorkspaceRoot(auth.currentUser!.uid, nextWs);
+                        if (nextProf) {
+                          await upsertPrivateProfile(
+                            auth.currentUser!.uid,
+                            user?.email || nextProf.email || 'operator@flowpilot.app',
+                            nextProf
+                          );
+                        }
+                      });
+                    }
                   }}
                 />
               )}
