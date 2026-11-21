@@ -667,6 +667,15 @@ export function serializeUserMessagingIdentities(
   }
 }
 
+export interface LiveWhatsAppSessionInfo {
+  status: 'open' | 'close' | 'connecting';
+  instanceName?: string;
+  ownerJid?: string | null;
+  phoneNumber?: string;
+  profileName?: string | null;
+  checkedAt?: string;
+}
+
 export interface ResolvedSenderIdentities {
   whatsappBusinessNumber: string;
   hasCustomWhatsappNumber: boolean;

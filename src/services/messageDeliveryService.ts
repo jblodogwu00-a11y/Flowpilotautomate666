@@ -6,6 +6,7 @@ import {
 } from '../types';
 import { getGmailAccessToken, getConnectedGmailAddress } from '../firebase';
 import { sendEvolutionTextMessage } from '../lib/evolutionClient';
+import { htmlToPlainText, htmlToWhatsAppText } from '../utils/richMessageFormat';
 
 export interface MessageDeliveryPayload {
   channel: ChannelType;
@@ -628,13 +629,21 @@ export async function deliverChannelMessage(
   const cleanRecipient = (payload.to || '').trim() || defaultRecipient;
   const webhookUrl = getStoredOutboundWebhookUrl();
 
+  const formattedBody =
+    payload.channel === 'whatsapp'
+      ? htmlToWhatsAppText(payload.body)
+      : payload.channel === 'sms'
+      ? htmlToPlainText(payload.body)
+      : payload.body;
+  const plainBodyPreview = htmlToPlainText(formattedBody).slice(0, 240);
+
   // DIRECT EVOLUTION API WHATSAPP SENDER DISPATCH (NO BACKEND /api CALLS)
   if (payload.channel === 'whatsapp') {
     try {
       const waResult = await sendEvolutionTextMessage({
         userId: payload.workspace?.ownerId || 'default_workspace',
         to: cleanRecipient,
-        text: payload.body,
+        text: formattedBody,
       });
       if (waResult.ok) {
         const receipt: MessageDeliveryReceipt = {
@@ -646,10 +655,10 @@ export async function deliverChannelMessage(
           senderName,
           toRecipient: cleanRecipient,
           leadName: payload.leadName || 'Lead Contact',
-          bodyPreview: payload.body.slice(0, 240),
+          bodyPreview: plainBodyPreview,
           source: payload.source,
           listName: payload.listName || 'General Contacts',
-          directLaunchUrl: `https://wa.me/${cleanRecipient.replace(/[^0-9]/g, '')}?text=${encodeURIComponent(payload.body)}`,
+          directLaunchUrl: `https://wa.me/${cleanRecipient.replace(/[^0-9]/g, '')}?text=${encodeURIComponent(formattedBody)}`,
           timestamp: new Date().toISOString(),
           detailMessage: waResult.detail || `Delivered via Evolution API to ${cleanRecipient}`,
         };
@@ -685,7 +694,7 @@ export async function deliverChannelMessage(
           connectedGmail ||
           identities.activeSenderEmail,
         subject: payload.subject || `Message from ${senderName}`,
-        body: payload.body,
+        body: formattedBody,
         listName: payload.listName || 'General Contacts',
         source: payload.source,
         webhookUrl,
@@ -725,14 +734,14 @@ export async function deliverChannelMessage(
     toRecipient: cleanRecipient,
     leadName: payload.leadName || 'Lead Contact',
     ...(payload.channel === 'email' && payload.subject ? { subject: payload.subject } : {}),
-    bodyPreview: payload.body.slice(0, 240),
+    bodyPreview: plainBodyPreview,
     source: payload.source,
     listName: payload.listName || 'General Contacts',
     directLaunchUrl: buildDirectChannelUrl(
       payload.channel,
       cleanRecipient,
       payload.subject || `Message from ${senderName}`,
-      payload.body
+      formattedBody
     ),
     timestamp: new Date().toISOString(),
     detailMessage: `Dispatched from ${resolvedFrom} (${senderName}) to ${cleanRecipient} via ${payload.channel.toUpperCase()}`,

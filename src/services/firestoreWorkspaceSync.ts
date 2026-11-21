@@ -673,7 +673,7 @@ export function serializeAutoResponderForFirestore(uid: string, r: Partial<AutoR
     triggerMessage: sanitizeString(r.triggerMessage || '', 500, 'hello'),
     responseMessage: sanitizeString(
       r.responseMessage || '',
-      2000,
+      15000,
       'Thanks for reaching out! We will reply shortly.'
     ),
     channel,

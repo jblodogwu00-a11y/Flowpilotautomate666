@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
   Zap,
   Plus,
@@ -19,6 +19,15 @@ import {
   X,
   RefreshCw,
   ExternalLink,
+  Bold,
+  Italic,
+  Strikethrough,
+  Link2,
+  List,
+  FileCode,
+  Eye,
+  PenLine,
+  AlertCircle,
 } from 'lucide-react';
 import {
   AutoResponder,
@@ -30,6 +39,7 @@ import {
   ActivityLog,
   Workspace,
   UserPrivateProfile,
+  LiveWhatsAppSessionInfo,
   sanitizeString,
   resolveWorkspaceSenderIdentities,
 } from '../types';
@@ -38,6 +48,16 @@ import {
   deliverChannelMessage,
   MessageDeliveryReceipt,
 } from '../services/messageDeliveryService';
+import { EmailEditor } from './EmailEditor';
+import {
+  formatWhatsAppPhoneFromJid,
+  isHtmlRichContent,
+  sanitizeRichHtmlForPreview,
+  ensureHtmlForEditor,
+  htmlToPlainText,
+  formatRichMessageForChannel,
+  renderWhatsAppFormattedHtml,
+} from '../utils/richMessageFormat';
 
 interface AutoRespondersViewProps {
   autoResponders: AutoResponder[];
@@ -45,6 +65,10 @@ interface AutoRespondersViewProps {
   contacts: Contact[];
   workspace?: Workspace;
   privateProfile?: UserPrivateProfile;
+  userId?: string;
+  liveWhatsappSession?: LiveWhatsAppSessionInfo | null;
+  onRefreshWhatsappSession?: () => Promise<LiveWhatsAppSessionInfo | null>;
+  onNavigateToConnectWhatsApp?: () => void;
   preselectedListName?: string | null;
   onClearPreselectedList?: () => void;
   onNavigateToSettings?: () => void;
@@ -98,6 +122,10 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
   contacts,
   workspace,
   privateProfile,
+  userId,
+  liveWhatsappSession,
+  onRefreshWhatsappSession,
+  onNavigateToConnectWhatsApp,
   preselectedListName,
   onClearPreselectedList,
   onNavigateToSettings,
@@ -115,11 +143,74 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
     [workspace, privateProfile]
   );
 
+  // Resolve exact live WhatsApp identity from Evolution session + synced Firestore connection + saved identities
+  const resolvedWhatsappIdentity = useMemo(() => {
+    const livePhone =
+      liveWhatsappSession?.phoneNumber ||
+      formatWhatsAppPhoneFromJid(liveWhatsappSession?.ownerJid);
+    const savedWaPhone = senderIdentities.hasCustomWhatsappNumber
+      ? formatWhatsAppPhoneFromJid(senderIdentities.whatsappBusinessNumber) ||
+        senderIdentities.whatsappBusinessNumber
+      : '';
+    const connectedPhone = livePhone || savedWaPhone;
+
+    const liveProfileName = (liveWhatsappSession?.profileName || '').trim();
+    const fallbackProfileName = (
+      senderIdentities.activeWhatsappIdentity?.senderName ||
+      workspace?.senderName ||
+      workspace?.name ||
+      ''
+    ).trim();
+    const profileName = liveProfileName || (connectedPhone ? fallbackProfileName : '');
+
+    const isOpen = liveWhatsappSession?.status === 'open';
+    const isConnecting = liveWhatsappSession?.status === 'connecting';
+    const isConnected = isOpen || Boolean(workspace?.whatsappConnected && connectedPhone);
+    const hasConfiguredPhone = Boolean(connectedPhone);
+
+    const formattedLabel = hasConfiguredPhone
+      ? profileName
+        ? `${profileName} (${connectedPhone})`
+        : connectedPhone
+      : 'Not connected — Connect WhatsApp to link your number';
+
+    return {
+      connectedPhone,
+      profileName,
+      isConnected,
+      isConnecting,
+      hasConfiguredPhone,
+      formattedLabel,
+    };
+  }, [liveWhatsappSession, senderIdentities, workspace]);
+
+  const [isRefreshingWa, setIsRefreshingWa] = useState(false);
+
+  const handleRefreshWhatsappStatus = async () => {
+    if (!onRefreshWhatsappSession || isRefreshingWa) return;
+    setIsRefreshingWa(true);
+    try {
+      await onRefreshWhatsappSession();
+    } finally {
+      setIsRefreshingWa(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!userId || !onRefreshWhatsappSession) return;
+    void onRefreshWhatsappSession();
+    // Refresh live WhatsApp session when entering Auto Responder view for this user
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId]);
+
   const getChannelFromDisplay = (ch: ChannelType): string => {
     if (ch === 'whatsapp') {
-      return `WhatsApp Business: ${senderIdentities.whatsappBusinessNumber} (${
-        workspace?.senderName || workspace?.name || 'Workspace'
-      })`;
+      if (!resolvedWhatsappIdentity.hasConfiguredPhone) {
+        return 'Not Connected — Scan QR to link your WhatsApp';
+      }
+      return resolvedWhatsappIdentity.isConnected
+        ? `WhatsApp: ${resolvedWhatsappIdentity.formattedLabel}`
+        : `WhatsApp (Reconnect Required): ${resolvedWhatsappIdentity.formattedLabel}`;
     }
     if (ch === 'email') {
       return `${senderIdentities.emailDisplaySender} (${
@@ -130,6 +221,7 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
     }
     return `SMS Sender ID: ${senderIdentities.smsSenderId}`;
   };
+
   // Combine explicit lists + any listName referenced on contacts or existing autoResponders
   const allAvailableLists = useMemo(() => {
     const known = new Set(lists.map((l) => l.name.toLowerCase()));
@@ -182,7 +274,7 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
   const [newSpecialListDesc, setNewSpecialListDesc] = useState('');
   const [creatingList, setCreatingList] = useState(false);
 
-  // Step 2: Two Message Boxes + Channel Dropdown state
+  // Step 2: Two Message Boxes + Channel Dropdown + Rich Text Formatting state
   const [editingResponder, setEditingResponder] = useState<AutoResponder | null>(null);
   const [responderName, setResponderName] = useState('');
   const [triggerMessage, setTriggerMessage] = useState('');
@@ -192,6 +284,14 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
   const [subjectLine, setSubjectLine] = useState('');
   const [savingResponder, setSavingResponder] = useState(false);
   const [feedbackBanner, setFeedbackBanner] = useState<string | null>(null);
+
+  const responseTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const [box2ViewMode, setBox2ViewMode] = useState<'write' | 'preview'>('write');
+  const [richEditorOpen, setRichEditorOpen] = useState(false);
+  const [richEditorDraftHtml, setRichEditorDraftHtml] = useState('');
+  const [linkPopoverOpen, setLinkPopoverOpen] = useState(false);
+  const [linkPopoverUrl, setLinkPopoverUrl] = useState('');
+  const [linkPopoverLabel, setLinkPopoverLabel] = useState('');
 
   // Library Filter & Search state
   const [librarySearchQuery, setLibrarySearchQuery] = useState('');
@@ -318,6 +418,8 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
     setSelectedChannel('whatsapp');
     setMatchType('contains');
     setSubjectLine('');
+    setBox2ViewMode('write');
+    setLinkPopoverOpen(false);
   };
 
   const handleEditResponder = (ar: AutoResponder) => {
@@ -329,6 +431,8 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
     setSelectedChannel(ar.channel);
     setMatchType(ar.matchType || 'contains');
     setSubjectLine(ar.subjectLine || '');
+    setBox2ViewMode(isHtmlRichContent(ar.responseMessage) ? 'preview' : 'write');
+    setLinkPopoverOpen(false);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -338,7 +442,7 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
       setFeedbackBanner('Please choose or search a Special List in Step 1 before saving.');
       return;
     }
-    if (!triggerMessage.trim() || !responseMessage.trim()) {
+    if (!triggerMessage.trim() || !htmlToPlainText(responseMessage).trim()) {
       setFeedbackBanner(
         'Please fill in both Message Box 1 (Trigger Message) and Message Box 2 (Auto-Response Message).'
       );
@@ -349,7 +453,11 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
     try {
       const cleanList = sanitizeString(selectedListName, 100, 'General Contacts');
       const cleanTrigger = sanitizeString(triggerMessage, 500, 'INFO');
-      const cleanResponse = sanitizeString(responseMessage, 2000, 'Thank you for reaching out!');
+      const cleanResponse = sanitizeString(
+        responseMessage,
+        15000,
+        'Thank you for reaching out!'
+      );
       const autoGeneratedTitle =
         responderName.trim() ||
         `${CHANNEL_LABELS[selectedChannel]} Auto-Reply for ${cleanList} ("${cleanTrigger.slice(0, 28)}")`;
@@ -431,9 +539,7 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
     setSelectedTestRecipient(
       ar.channel === 'email'
         ? firstLead?.email || privateProfile?.email || 'lead@example.com'
-        : firstLead?.phone ||
-          privateProfile?.whatsappBusinessNumber ||
-          '+1 (555) 234-8910'
+        : firstLead?.phone || '+1 (555) 234-8910'
     );
     setSimulationResult(null);
   };
@@ -474,26 +580,33 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
 
     const leadName = eligibleLead?.fullName || 'Sample Lead';
     const firstName = leadName.split(' ')[0] || 'Friend';
-    const personalizedReply = ar.responseMessage
+    const personalizedRawReply = ar.responseMessage
       .replace(/\{\{first_name\}\}/gi, firstName)
       .replace(/\{\{full_name\}\}/gi, leadName)
       .replace(/\{\{list_name\}\}/gi, ar.targetList);
+    const formattedReply = formatRichMessageForChannel(personalizedRawReply, ar.channel);
 
     const toRecipient =
       ar.channel === 'email'
         ? eligibleLead?.email || privateProfile?.email || 'lead@example.com'
-        : eligibleLead?.phone ||
-          privateProfile?.whatsappBusinessNumber ||
-          '+1 (555) 234-8910';
+        : eligibleLead?.phone || '+1 (555) 234-8910';
 
     const receipt = await deliverChannelMessage({
       channel: ar.channel,
       to: toRecipient,
       leadName,
       subject: ar.subjectLine || `Re: ${ar.triggerMessage.slice(0, 50)}`,
-      body: personalizedReply,
+      body: formattedReply,
       listName: ar.targetList,
       source: 'auto_responder',
+      overrideFromIdentity:
+        ar.channel === 'whatsapp' && resolvedWhatsappIdentity.hasConfiguredPhone
+          ? resolvedWhatsappIdentity.connectedPhone
+          : undefined,
+      overrideSenderName:
+        ar.channel === 'whatsapp' && resolvedWhatsappIdentity.profileName
+          ? resolvedWhatsappIdentity.profileName
+          : undefined,
       workspace,
       privateProfile,
     });
@@ -565,6 +678,10 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
       .replace(/\{\{first_name\}\}/gi, firstName)
       .replace(/\{\{full_name\}\}/gi, selectedTestLeadName)
       .replace(/\{\{list_name\}\}/gi, testingResponder.targetList);
+    const channelFormattedReply = formatRichMessageForChannel(
+      personalizedReply,
+      testingResponder.channel
+    );
 
     let deliveryReceipt: MessageDeliveryReceipt | undefined;
 
@@ -578,9 +695,17 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
         subject:
           testingResponder.subjectLine ||
           `Re: ${testingResponder.triggerMessage.slice(0, 50)}`,
-        body: personalizedReply,
+        body: channelFormattedReply,
         listName: testingResponder.targetList,
         source: 'auto_responder',
+        overrideFromIdentity:
+          testingResponder.channel === 'whatsapp' && resolvedWhatsappIdentity.hasConfiguredPhone
+            ? resolvedWhatsappIdentity.connectedPhone
+            : undefined,
+        overrideSenderName:
+          testingResponder.channel === 'whatsapp' && resolvedWhatsappIdentity.profileName
+            ? resolvedWhatsappIdentity.profileName
+            : undefined,
         workspace,
         privateProfile,
       });
@@ -624,7 +749,7 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
         listName: testingResponder.targetList,
         channel: testingResponder.channel,
         leadMessage: simulatedInboundText.trim(),
-        autoResponseSent: isMatch ? personalizedReply : undefined,
+        autoResponseSent: isMatch ? htmlToPlainText(personalizedReply) : undefined,
         responderName: testingResponder.name,
       });
     }
@@ -638,8 +763,84 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
     });
   };
 
+  const replaceOrInsertInResponse = (
+    builder: (selectedText: string) => string,
+    switchToWrite = true
+  ) => {
+    if (switchToWrite && box2ViewMode !== 'write') {
+      setBox2ViewMode('write');
+    }
+    const el = responseTextareaRef.current;
+    if (!el || box2ViewMode !== 'write') {
+      setResponseMessage((prev) => {
+        const snippet = builder('');
+        return prev ? `${prev}${prev.endsWith(' ') || prev.endsWith('\n') ? '' : ' '}${snippet}` : snippet;
+      });
+      return;
+    }
+
+    const start = el.selectionStart ?? responseMessage.length;
+    const end = el.selectionEnd ?? responseMessage.length;
+    const selected = responseMessage.slice(start, end);
+    const inserted = builder(selected);
+    const nextValue =
+      responseMessage.slice(0, start) + inserted + responseMessage.slice(end);
+    setResponseMessage(nextValue);
+
+    requestAnimationFrame(() => {
+      if (!responseTextareaRef.current) return;
+      responseTextareaRef.current.focus();
+      const cursor = start + inserted.length;
+      responseTextareaRef.current.setSelectionRange(cursor, cursor);
+    });
+  };
+
+  const applyQuickFormat = (kind: 'bold' | 'italic' | 'strike' | 'list') => {
+    replaceOrInsertInResponse((selected) => {
+      const content = selected.trim() || (
+        kind === 'bold'
+          ? 'bold text'
+          : kind === 'italic'
+          ? 'italic text'
+          : kind === 'strike'
+          ? 'strikethrough'
+          : 'Bullet item'
+      );
+      if (kind === 'bold') return `<strong>${content}</strong>`;
+      if (kind === 'italic') return `<em>${content}</em>`;
+      if (kind === 'strike') return `<s>${content}</s>`;
+      const items = content
+        .split(/\r?\n/)
+        .map((line) => line.trim().replace(/^[•\-]\s+/, ''))
+        .filter(Boolean);
+      return `<ul>${items.map((item) => `<li>${item}</li>`).join('')}</ul>`;
+    });
+  };
+
+  const handleConfirmInsertLink = () => {
+    const rawUrl = linkPopoverUrl.trim();
+    if (!rawUrl) return;
+    const normalizedUrl = /^https?:\/\//i.test(rawUrl) ? rawUrl : `https://${rawUrl}`;
+    const label = linkPopoverLabel.trim() || normalizedUrl;
+    replaceOrInsertInResponse(() => `<a href="${normalizedUrl}">${label}</a>`);
+    setLinkPopoverUrl('');
+    setLinkPopoverLabel('');
+    setLinkPopoverOpen(false);
+  };
+
   const insertMergeTag = (tag: string) => {
-    setResponseMessage((prev) => `${prev}${prev.endsWith(' ') || !prev ? '' : ' '}${tag}`);
+    replaceOrInsertInResponse((selected) => (selected ? `${selected} ${tag}` : tag), false);
+  };
+
+  const handleOpenRichEditor = () => {
+    setRichEditorDraftHtml(ensureHtmlForEditor(responseMessage));
+    setRichEditorOpen(true);
+  };
+
+  const handleSaveRichEditor = (html: string) => {
+    setResponseMessage(html);
+    setRichEditorOpen(false);
+    setBox2ViewMode('preview');
   };
 
   return (
@@ -724,8 +925,39 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
               Active 3-Channel Auto-Pilot Identities:
             </span>
             <span className="inline-flex items-center gap-1.5 font-mono font-semibold text-slate-900">
+              <span
+                className={`w-2 h-2 rounded-full shrink-0 ${
+                  resolvedWhatsappIdentity.isConnected
+                    ? 'bg-emerald-500'
+                    : resolvedWhatsappIdentity.isConnecting
+                    ? 'bg-amber-500'
+                    : 'bg-slate-400'
+                }`}
+              />
               <MessageSquare className="w-3.5 h-3.5 text-emerald-700" />
-              <span>WhatsApp From: {senderIdentities.whatsappBusinessNumber}</span>
+              {resolvedWhatsappIdentity.hasConfiguredPhone ? (
+                <span>
+                  WhatsApp From:{' '}
+                  <strong className="text-slate-950">
+                    {resolvedWhatsappIdentity.formattedLabel}
+                  </strong>
+                </span>
+              ) : (
+                <span className="text-amber-800 font-sans font-semibold">
+                  WhatsApp: Not connected
+                </span>
+              )}
+              {onRefreshWhatsappSession && (
+                <button
+                  type="button"
+                  onClick={handleRefreshWhatsappStatus}
+                  disabled={isRefreshingWa}
+                  title="Refresh connected WhatsApp identity"
+                  className="p-1 text-slate-500 hover:text-emerald-700 rounded cursor-pointer disabled:opacity-50"
+                >
+                  <RefreshCw className={`w-3 h-3 ${isRefreshingWa ? 'animate-spin' : ''}`} />
+                </button>
+              )}
             </span>
             <span aria-hidden="true" className="text-slate-300">
               ·
@@ -749,15 +981,28 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
             </span>
           </div>
 
-          {onNavigateToSettings && (
-            <button
-              type="button"
-              onClick={onNavigateToSettings}
-              className="text-xs font-bold text-emerald-700 hover:text-emerald-900 underline cursor-pointer self-start lg:self-auto shrink-0"
-            >
-              Configure WhatsApp, Email & SMS Connectors in Settings →
-            </button>
-          )}
+          <div className="flex flex-wrap items-center gap-3 self-start lg:self-auto shrink-0">
+            {onNavigateToConnectWhatsApp && (
+              <button
+                type="button"
+                onClick={onNavigateToConnectWhatsApp}
+                className="text-xs font-bold text-emerald-700 hover:text-emerald-900 underline cursor-pointer"
+              >
+                {resolvedWhatsappIdentity.isConnected
+                  ? 'Manage WhatsApp Connection →'
+                  : 'Connect WhatsApp →'}
+              </button>
+            )}
+            {onNavigateToSettings && (
+              <button
+                type="button"
+                onClick={onNavigateToSettings}
+                className="text-xs font-semibold text-slate-600 hover:text-slate-900 underline cursor-pointer"
+              >
+                All Channel Settings
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
@@ -1098,50 +1343,238 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
 
             {/* MESSAGE BOX 2: AUTO-RESPONSE MESSAGE SENT TO LEAD ON AUTO-PILOT */}
             <div className="p-4 sm:p-5 rounded-2xl bg-emerald-50/50 border border-emerald-200 flex flex-col justify-between space-y-3">
-              <div className="space-y-2">
-                <div className="flex items-center justify-between gap-2">
+              <div className="space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
                   <label className="text-xs sm:text-sm font-bold text-slate-950 flex items-center gap-2">
                     <span className="w-5 h-5 rounded-md bg-[#047857] text-white text-[11px] font-bold inline-flex items-center justify-center">
                       2
                     </span>
                     <span>Auto-Response Message (Sent on Auto-Pilot) *</span>
                   </label>
-                  <span className="text-[11px] font-bold text-emerald-800">
-                    Auto-Pilot Reply
-                  </span>
+                  <button
+                    type="button"
+                    onClick={handleOpenRichEditor}
+                    className="px-2.5 py-1 text-[11px] font-bold text-emerald-800 bg-white hover:bg-emerald-100 border border-emerald-300 rounded-lg inline-flex items-center gap-1.5 cursor-pointer shadow-2xs"
+                  >
+                    <FileCode className="w-3.5 h-3.5 text-emerald-700" />
+                    <span>Rich Editor</span>
+                  </button>
                 </div>
+
                 <p className="text-xs text-slate-600">
-                  Input the automated response message that will immediately go out to the lead on
-                  auto-pilot when their message matches Box 1:
+                  Format your automated response using bold, italics, links, lists, or open the{' '}
+                  <strong className="text-slate-900">Rich Editor</strong> studio. Rich HTML
+                  automatically adapts for {CHANNEL_LABELS[selectedChannel]}.
                 </p>
-                <textarea
-                  rows={5}
-                  required
-                  value={responseMessage}
-                  onChange={(e) => setResponseMessage(e.target.value)}
-                  placeholder='Example: "Hey {{first_name}}! Thanks for messaging us. Here is your direct access link: https://flowpilot.app/?capture=vip-access"'
-                  className="w-full p-3.5 text-xs sm:text-sm bg-white border border-emerald-300 rounded-xl text-slate-900 focus:border-emerald-700 focus:outline-none leading-relaxed"
-                />
+
+                {/* Quick Formatting Toolbar + Write / Preview Toggle */}
+                <div className="rounded-xl bg-white border border-emerald-300 overflow-hidden focus-within:border-emerald-700">
+                  <div className="px-2.5 py-1.5 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        onClick={() => applyQuickFormat('bold')}
+                        title="Bold"
+                        className="p-1.5 text-slate-700 hover:bg-white hover:text-slate-950 rounded-md transition-colors cursor-pointer"
+                      >
+                        <Bold className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => applyQuickFormat('italic')}
+                        title="Italic"
+                        className="p-1.5 text-slate-700 hover:bg-white hover:text-slate-950 rounded-md transition-colors cursor-pointer"
+                      >
+                        <Italic className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => applyQuickFormat('strike')}
+                        title="Strikethrough"
+                        className="p-1.5 text-slate-700 hover:bg-white hover:text-slate-950 rounded-md transition-colors cursor-pointer"
+                      >
+                        <Strikethrough className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setLinkPopoverOpen((v) => !v)}
+                        title="Insert Link"
+                        className={`p-1.5 rounded-md transition-colors cursor-pointer ${
+                          linkPopoverOpen
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : 'text-slate-700 hover:bg-white hover:text-slate-950'
+                        }`}
+                      >
+                        <Link2 className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => applyQuickFormat('list')}
+                        title="Bullet List"
+                        className="p-1.5 text-slate-700 hover:bg-white hover:text-slate-950 rounded-md transition-colors cursor-pointer"
+                      >
+                        <List className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+
+                    <div className="inline-flex items-center p-0.5 bg-slate-200/70 rounded-lg">
+                      <button
+                        type="button"
+                        onClick={() => setBox2ViewMode('write')}
+                        className={`px-2 py-0.5 text-[11px] font-semibold rounded-md inline-flex items-center gap-1 cursor-pointer ${
+                          box2ViewMode === 'write'
+                            ? 'bg-white text-slate-950 shadow-2xs'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        <PenLine className="w-3 h-3" />
+                        <span>Write</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setBox2ViewMode('preview')}
+                        className={`px-2 py-0.5 text-[11px] font-semibold rounded-md inline-flex items-center gap-1 cursor-pointer ${
+                          box2ViewMode === 'preview'
+                            ? 'bg-white text-slate-950 shadow-2xs'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        <Eye className="w-3 h-3" />
+                        <span>Preview</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Inline Link Insertion Bar */}
+                  {linkPopoverOpen && (
+                    <div className="p-2.5 bg-emerald-50/70 border-b border-emerald-200 flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                      <input
+                        type="url"
+                        value={linkPopoverUrl}
+                        onChange={(e) => setLinkPopoverUrl(e.target.value)}
+                        placeholder="https://your-link.com"
+                        className="flex-1 px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-lg"
+                      />
+                      <input
+                        type="text"
+                        value={linkPopoverLabel}
+                        onChange={(e) => setLinkPopoverLabel(e.target.value)}
+                        placeholder="Link text (optional)"
+                        className="flex-1 px-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-lg"
+                      />
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={handleConfirmInsertLink}
+                          disabled={!linkPopoverUrl.trim()}
+                          className="px-2.5 py-1.5 text-xs font-bold text-white bg-[#047857] hover:bg-[#065F46] disabled:opacity-50 rounded-lg cursor-pointer"
+                        >
+                          Insert
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setLinkPopoverOpen(false)}
+                          className="px-2 py-1.5 text-xs font-semibold text-slate-600 hover:text-slate-900 cursor-pointer"
+                        >
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {box2ViewMode === 'write' ? (
+                    <textarea
+                      ref={responseTextareaRef}
+                      rows={5}
+                      value={responseMessage}
+                      onChange={(e) => setResponseMessage(e.target.value)}
+                      placeholder='Example: "Hey {{first_name}}! Thanks for messaging us. Here is your direct access link: https://flowpilot.app/?capture=vip-access"'
+                      className="w-full p-3.5 text-xs sm:text-sm bg-white text-slate-900 focus:outline-none leading-relaxed resize-y"
+                    />
+                  ) : (
+                    <div className="p-3.5 min-h-[132px] bg-white text-xs sm:text-sm text-slate-900 space-y-2.5">
+                      {!htmlToPlainText(responseMessage).trim() ? (
+                        <div className="text-slate-400 italic">
+                          Nothing entered yet — switch to Write or click Rich Editor to compose your reply.
+                        </div>
+                      ) : selectedChannel === 'whatsapp' ? (
+                        <>
+                          <div
+                            className="p-3 rounded-xl bg-emerald-50 border border-emerald-200/80 text-slate-900 leading-relaxed space-y-1 [&_strong]:font-bold [&_em]:italic"
+                            dangerouslySetInnerHTML={{
+                              __html: renderWhatsAppFormattedHtml(responseMessage),
+                            }}
+                          />
+                          {isHtmlRichContent(responseMessage) && (
+                            <div className="text-[11px] text-emerald-800 bg-emerald-50/70 px-2.5 py-1.5 rounded-lg border border-emerald-200 font-mono whitespace-pre-wrap">
+                              <span className="font-sans font-bold block mb-0.5 text-[10px] uppercase tracking-wider text-emerald-700">
+                                Auto-Converted WhatsApp Delivery Syntax
+                              </span>
+                              {formatRichMessageForChannel(responseMessage, 'whatsapp')}
+                            </div>
+                          )}
+                        </>
+                      ) : selectedChannel === 'email' ? (
+                        <div
+                          className="leading-relaxed [&_p]:mb-2 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 [&_a]:text-emerald-700 [&_a]:underline [&_h1]:text-base [&_h1]:font-bold [&_h2]:text-sm [&_h2]:font-bold"
+                          dangerouslySetInnerHTML={{
+                            __html: sanitizeRichHtmlForPreview(responseMessage),
+                          }}
+                        />
+                      ) : (
+                        <div className="whitespace-pre-wrap leading-relaxed text-slate-800">
+                          {htmlToPlainText(responseMessage)}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                {selectedChannel === 'whatsapp' && isHtmlRichContent(responseMessage) && box2ViewMode === 'write' && (
+                  <div className="text-[11px] text-emerald-800 font-medium flex items-center gap-1.5">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                    <span>
+                      Rich formatting active · Auto-converts to native WhatsApp (*bold*, _italic_) on delivery.
+                    </span>
+                  </div>
+                )}
 
                 {/* Outgoing Sender Identity Preview inside Box 2 */}
                 <div className="p-2.5 rounded-xl bg-white border border-emerald-200/90 flex flex-wrap items-center justify-between gap-2 text-[11px]">
-                  <div className="text-slate-700">
-                    <span className="font-bold text-emerald-900">
-                      Lead Sees Auto-Pilot Message Coming From:{' '}
-                    </span>
-                    <span className="font-mono font-semibold text-slate-950">
-                      {getChannelFromDisplay(selectedChannel)}
-                    </span>
+                  <div className="text-slate-700 flex items-center gap-1.5">
+                    {selectedChannel === 'whatsapp' && !resolvedWhatsappIdentity.hasConfiguredPhone && (
+                      <AlertCircle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                    )}
+                    <div>
+                      <span className="font-bold text-emerald-900">
+                        Lead Sees Auto-Pilot Message Coming From:{' '}
+                      </span>
+                      <span className="font-mono font-semibold text-slate-950">
+                        {getChannelFromDisplay(selectedChannel)}
+                      </span>
+                    </div>
                   </div>
-                  {onNavigateToSettings && (
-                    <button
-                      type="button"
-                      onClick={onNavigateToSettings}
-                      className="font-bold text-emerald-700 hover:underline cursor-pointer"
-                    >
-                      Change in Settings
-                    </button>
-                  )}
+                  <div className="flex items-center gap-2">
+                    {selectedChannel === 'whatsapp' && onNavigateToConnectWhatsApp ? (
+                      <button
+                        type="button"
+                        onClick={onNavigateToConnectWhatsApp}
+                        className="font-bold text-emerald-700 hover:underline cursor-pointer"
+                      >
+                        {resolvedWhatsappIdentity.hasConfiguredPhone
+                          ? 'Switch / Reconnect WhatsApp'
+                          : 'Connect WhatsApp →'}
+                      </button>
+                    ) : onNavigateToSettings ? (
+                      <button
+                        type="button"
+                        onClick={onNavigateToSettings}
+                        className="font-bold text-emerald-700 hover:underline cursor-pointer"
+                      >
+                        Change in Settings
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
               </div>
 
@@ -1262,7 +1695,7 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
                   savingResponder ||
                   !selectedListName.trim() ||
                   !triggerMessage.trim() ||
-                  !responseMessage.trim()
+                  !htmlToPlainText(responseMessage).trim()
                 }
                 className="px-6 py-3 text-xs sm:text-sm font-bold text-white bg-[#047857] hover:bg-[#065F46] disabled:opacity-50 rounded-xl transition-colors inline-flex items-center justify-center gap-2 cursor-pointer shadow-xs"
               >
@@ -1472,8 +1905,15 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
                     </div>
 
                     <div className="lg:col-span-5 p-3.5 rounded-xl bg-emerald-50/60 border border-emerald-200 space-y-1.5">
-                      <div className="text-[11px] font-bold uppercase tracking-wider text-emerald-800">
-                        2. Auto-Pilot Response via {CHANNEL_LABELS[ar.channel]}
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-[11px] font-bold uppercase tracking-wider text-emerald-800">
+                          2. Auto-Pilot Response via {CHANNEL_LABELS[ar.channel]}
+                        </div>
+                        {ar.channel === 'whatsapp' && isHtmlRichContent(ar.responseMessage) && (
+                          <span className="text-[10px] font-semibold text-emerald-800 bg-white px-2 py-0.5 rounded border border-emerald-200">
+                            WhatsApp format ready
+                          </span>
+                        )}
                       </div>
                       <div className="text-[11px] font-mono font-semibold text-emerald-950 bg-white/80 px-2.5 py-1 rounded-lg border border-emerald-200/70">
                         From: {getChannelFromDisplay(ar.channel)}
@@ -1483,9 +1923,25 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
                           Subject: {ar.subjectLine}
                         </div>
                       )}
-                      <p className="text-xs sm:text-sm text-slate-900 whitespace-pre-wrap">
-                        {ar.responseMessage}
-                      </p>
+                      {ar.channel === 'whatsapp' ? (
+                        <div
+                          className="text-xs sm:text-sm text-slate-900 leading-relaxed space-y-0.5 [&_strong]:font-bold [&_em]:italic"
+                          dangerouslySetInnerHTML={{
+                            __html: renderWhatsAppFormattedHtml(ar.responseMessage),
+                          }}
+                        />
+                      ) : ar.channel === 'email' ? (
+                        <div
+                          className="text-xs sm:text-sm text-slate-900 leading-relaxed [&_p]:mb-1.5 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 [&_a]:text-emerald-700 [&_a]:underline [&_h1]:font-bold [&_h2]:font-bold"
+                          dangerouslySetInnerHTML={{
+                            __html: sanitizeRichHtmlForPreview(ar.responseMessage),
+                          }}
+                        />
+                      ) : (
+                        <p className="text-xs sm:text-sm text-slate-900 whitespace-pre-wrap">
+                          {htmlToPlainText(ar.responseMessage)}
+                        </p>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -1623,7 +2079,25 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
                         </div>
                       )}
                     </div>
-                    <div className="whitespace-pre-wrap">{simulationResult.replySent}</div>
+                    {simulationResult.channel === 'whatsapp' ? (
+                      <div
+                        className="leading-relaxed space-y-1 [&_strong]:font-bold [&_em]:italic"
+                        dangerouslySetInnerHTML={{
+                          __html: renderWhatsAppFormattedHtml(simulationResult.replySent),
+                        }}
+                      />
+                    ) : simulationResult.channel === 'email' ? (
+                      <div
+                        className="leading-relaxed [&_p]:mb-1.5 [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 [&_a]:text-emerald-700 [&_a]:underline"
+                        dangerouslySetInnerHTML={{
+                          __html: sanitizeRichHtmlForPreview(simulationResult.replySent),
+                        }}
+                      />
+                    ) : (
+                      <div className="whitespace-pre-wrap">
+                        {htmlToPlainText(simulationResult.replySent)}
+                      </div>
+                    )}
                     {simulationResult.receipt && (
                       <div className="pt-2 border-t border-slate-100 flex items-center justify-between gap-2">
                         <span className="text-[11px] text-emerald-800 font-semibold">
@@ -1668,6 +2142,53 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
                 )}
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ===================================================================== */}
+      {/* WORKFLOW BUILDER-STYLE RICH TEXT EDITOR STUDIO MODAL                  */}
+      {/* ===================================================================== */}
+      {richEditorOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 backdrop-blur-xs p-4 sm:p-6">
+          <div className="bg-white rounded-2xl border border-slate-200 shadow-2xl max-w-5xl w-full max-h-[92vh] flex flex-col overflow-hidden">
+            <div className="h-14 border-b border-slate-200 px-6 flex items-center justify-between shrink-0 bg-white">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-xl bg-emerald-50 text-emerald-700 flex items-center justify-center">
+                  <FileCode className="w-4 h-4" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-bold text-slate-900">
+                    {CHANNEL_LABELS[selectedChannel]} Auto-Responder Rich Text Studio
+                  </h3>
+                  <p className="text-[11px] text-slate-500">
+                    Visual formatting, custom links, and rich blocks — auto-converts cleanly for{' '}
+                    {CHANNEL_LABELS[selectedChannel]}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setRichEditorOpen(false)}
+                className="p-1.5 text-slate-400 hover:text-slate-700 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="flex-1 overflow-y-auto p-4 sm:p-6 bg-slate-50">
+              <EmailEditor
+                initialContent={richEditorDraftHtml}
+                onChange={(html) => setRichEditorDraftHtml(html)}
+                onSave={handleSaveRichEditor}
+                subject={subjectLine || responderName || 'Auto-Response Reply'}
+                onSubjectChange={selectedChannel === 'email' ? setSubjectLine : undefined}
+                breadcrumbLabel="Auto Responder"
+                editorTitle={`${CHANNEL_LABELS[selectedChannel]} Rich Text Editor`}
+                saveButtonLabel="Apply Rich Message"
+                hideEmailMetadataBar={selectedChannel !== 'email'}
+              />
+            </div>
           </div>
         </div>
       )}

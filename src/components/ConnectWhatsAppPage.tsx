@@ -40,6 +40,7 @@ import {
   disconnectEvolutionInstance,
   sendEvolutionTextMessage,
 } from '../lib/evolutionClient';
+import { formatWhatsAppPhoneFromJid } from '../utils/richMessageFormat';
 
 export type { EvolutionConnectionStatus };
 
@@ -119,9 +120,22 @@ export const ConnectWhatsAppPage: React.FC<ConnectWhatsAppPageProps> = ({
     async (
       targetUid: string,
       targetInstance: string,
-      targetStatus: EvolutionConnectionStatus
+      targetStatus: EvolutionConnectionStatus,
+      meta?: {
+        ownerJid?: string | null;
+        phoneNumber?: string | null;
+        profileName?: string | null;
+      }
     ) => {
-      const dedupeKey = `${targetUid}:${targetInstance}:${targetStatus}`;
+      const cleanJid = meta?.ownerJid ? String(meta.ownerJid).trim().slice(0, 128) : '';
+      const cleanPhone = meta?.phoneNumber
+        ? String(meta.phoneNumber).trim().slice(0, 64)
+        : formatWhatsAppPhoneFromJid(cleanJid).slice(0, 64);
+      const cleanProfile = meta?.profileName
+        ? String(meta.profileName).trim().slice(0, 120)
+        : '';
+
+      const dedupeKey = `${targetUid}:${targetInstance}:${targetStatus}:${cleanPhone}:${cleanProfile}`;
       if (lastPersistedKeyRef.current === dedupeKey) {
         return;
       }
@@ -163,12 +177,18 @@ export const ConnectWhatsAppPage: React.FC<ConnectWhatsAppPageProps> = ({
         return;
       }
 
+      const optionalFields: Record<string, string> = {};
+      if (cleanJid) optionalFields.ownerJid = cleanJid;
+      if (cleanPhone) optionalFields.phoneNumber = cleanPhone;
+      if (cleanProfile) optionalFields.profileName = cleanProfile;
+
       try {
         if (!exists) {
           await setDoc(connectionRef, {
             userId: targetUid,
             instanceName: targetInstance,
             status: targetStatus,
+            ...optionalFields,
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
           });
@@ -176,6 +196,7 @@ export const ConnectWhatsAppPage: React.FC<ConnectWhatsAppPageProps> = ({
           await updateDoc(connectionRef, {
             instanceName: targetInstance,
             status: targetStatus,
+            ...optionalFields,
             updatedAt: serverTimestamp(),
           });
         }
@@ -213,7 +234,11 @@ export const ConnectWhatsAppPage: React.FC<ConnectWhatsAppPageProps> = ({
       setStatusDetail(data.detail || '');
       setLastCheckedAt(data.checkedAt || new Date().toISOString());
 
-      await saveConnectionToFirestore(data.userId, data.instanceName, data.status);
+      await saveConnectionToFirestore(data.userId, data.instanceName, data.status, {
+        ownerJid: data.ownerJid,
+        phoneNumber: data.phoneNumber || formatWhatsAppPhoneFromJid(data.ownerJid),
+        profileName: data.profileName,
+      });
 
       if (data.status === 'open' && !notifiedConnectedRef.current) {
         notifiedConnectedRef.current = true;
@@ -319,6 +344,9 @@ export const ConnectWhatsAppPage: React.FC<ConnectWhatsAppPageProps> = ({
             userId?: string;
             instanceName?: string;
             status?: EvolutionConnectionStatus;
+            ownerJid?: string;
+            phoneNumber?: string;
+            profileName?: string;
           };
           if (data.status && data.instanceName) {
             setPersistedSnapshot({
@@ -327,6 +355,8 @@ export const ConnectWhatsAppPage: React.FC<ConnectWhatsAppPageProps> = ({
               status: data.status,
             });
             setStatus(data.status);
+            if (data.ownerJid) setOwnerJid(data.ownerJid);
+            if (data.profileName) setProfileName(data.profileName);
             setFirestoreState('synced');
             setFirestoreMessage('Loaded from Firestore');
           }
@@ -489,9 +519,7 @@ export const ConnectWhatsAppPage: React.FC<ConnectWhatsAppPageProps> = ({
     );
   }
 
-  const cleanPhoneFromJid = ownerJid
-    ? ownerJid.split('@')[0].replace(/[^0-9+]/g, '')
-    : null;
+  const cleanPhoneFromJid = formatWhatsAppPhoneFromJid(ownerJid) || null;
 
   return (
     <div className="max-w-5xl mx-auto space-y-5">

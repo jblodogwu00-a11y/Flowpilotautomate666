@@ -52,6 +52,9 @@ import {
   CsvImportOptions,
   CsvImportResultSummary,
   MemberRole,
+  LiveWhatsAppSessionInfo,
+  parseUserMessagingIdentities,
+  UserMessagingIdentity,
   generateSafeId,
   sanitizeString,
 } from './types';
@@ -82,7 +85,17 @@ import {
   upsertPrivateProfile,
   upsertWorkspaceRoot,
 } from './services/firestoreWorkspaceSync';
-import { auth } from './firebase';
+import {
+  doc,
+  getDoc,
+  onSnapshot,
+  serverTimestamp,
+  setDoc,
+  updateDoc,
+} from 'firebase/firestore';
+import { auth, db } from './firebase';
+import { checkEvolutionConnectionState } from './lib/evolutionClient';
+import { formatWhatsAppPhoneFromJid } from './utils/richMessageFormat';
 import {
   deliverChannelMessage,
   personalizeAutomationMessage,
@@ -488,6 +501,185 @@ export default function App() {
         setIsLoadingPublicForm(false);
       });
   }, [isFormRoute, snapshot?.assets]);
+
+  // Live connected WhatsApp account state (synced from whatsapp_connections + Evolution API)
+  const [liveWhatsappSession, setLiveWhatsappSession] =
+    useState<LiveWhatsAppSessionInfo | null>(null);
+
+  const applyConnectedWhatsappIdentityToSnapshot = useCallback(
+    (phone: string, profileName?: string | null) => {
+      const cleanPhone = (phone || '').trim();
+      const cleanProfile = (profileName || '').trim();
+      if (!cleanPhone && !cleanProfile) return;
+
+      updateSnapshot((prev) => {
+        const currentProf = prev.privateProfile;
+        let nextProfile = currentProf;
+        if (currentProf) {
+          const existingIdentities = parseUserMessagingIdentities(currentProf);
+          const nextIdentities: UserMessagingIdentity[] = existingIdentities.map((id) =>
+            id.channel === 'whatsapp' ? { ...id, isDefault: false } : id
+          );
+          if (cleanPhone) {
+            const matchIdx = nextIdentities.findIndex(
+              (i) =>
+                i.channel === 'whatsapp' &&
+                i.value.replace(/[^0-9]/g, '') === cleanPhone.replace(/[^0-9]/g, '')
+            );
+            const waLabel = cleanProfile
+              ? `${cleanProfile} (WhatsApp)`
+              : 'Connected WhatsApp';
+            if (matchIdx >= 0) {
+              nextIdentities[matchIdx] = {
+                ...nextIdentities[matchIdx],
+                label: waLabel,
+                senderName: cleanProfile || nextIdentities[matchIdx].senderName,
+                value: cleanPhone,
+                isDefault: true,
+                verified: true,
+              };
+            } else {
+              nextIdentities.unshift({
+                id: 'wa_connected_live',
+                channel: 'whatsapp',
+                label: waLabel,
+                senderName:
+                  cleanProfile ||
+                  prev.workspace.senderName ||
+                  prev.workspace.name ||
+                  'WhatsApp Business',
+                value: cleanPhone,
+                providerMode: 'evolution_qr',
+                isDefault: true,
+                verified: true,
+                createdAt: new Date().toISOString(),
+              });
+            }
+          }
+          nextProfile = {
+            ...currentProf,
+            whatsappBusinessNumber: cleanPhone || currentProf.whatsappBusinessNumber,
+            whatsappPhoneId: cleanPhone || currentProf.whatsappPhoneId,
+            messagingIdentitiesJson: JSON.stringify(nextIdentities).slice(0, 10000),
+          };
+        }
+
+        return {
+          ...prev,
+          workspace: {
+            ...prev.workspace,
+            whatsappConnected: true,
+          },
+          privateProfile: nextProfile,
+        };
+      });
+    },
+    []
+  );
+
+  const refreshLiveWhatsappSession = useCallback(async () => {
+    if (!activeUid) return null;
+    try {
+      const res = await checkEvolutionConnectionState(activeUid, false);
+      const formattedPhone =
+        res.phoneNumber || formatWhatsAppPhoneFromJid(res.ownerJid) || '';
+      const nextSession: LiveWhatsAppSessionInfo = {
+        status: res.status,
+        instanceName: res.instanceName,
+        ownerJid: res.ownerJid,
+        phoneNumber: formattedPhone || undefined,
+        profileName: res.profileName,
+        checkedAt: res.checkedAt,
+      };
+      setLiveWhatsappSession(nextSession);
+
+      if (res.status === 'open') {
+        applyConnectedWhatsappIdentityToSnapshot(formattedPhone, res.profileName);
+
+        if (auth.currentUser && auth.currentUser.uid === activeUid) {
+          const uid = auth.currentUser.uid;
+          const connRef = doc(db, 'whatsapp_connections', uid);
+          const payloadFields: Record<string, string> = {};
+          if (res.ownerJid) payloadFields.ownerJid = res.ownerJid.slice(0, 128);
+          if (formattedPhone) payloadFields.phoneNumber = formattedPhone.slice(0, 64);
+          if (res.profileName) payloadFields.profileName = res.profileName.slice(0, 120);
+          getDoc(connRef)
+            .then((snap) => {
+              if (!snap.exists()) {
+                return setDoc(connRef, {
+                  userId: uid,
+                  instanceName: res.instanceName,
+                  status: res.status,
+                  ...payloadFields,
+                  createdAt: serverTimestamp(),
+                  updatedAt: serverTimestamp(),
+                });
+              }
+              return updateDoc(connRef, {
+                instanceName: res.instanceName,
+                status: res.status,
+                ...payloadFields,
+                updatedAt: serverTimestamp(),
+              });
+            })
+            .catch(() => {});
+        }
+      }
+      return nextSession;
+    } catch {
+      return null;
+    }
+  }, [activeUid, applyConnectedWhatsappIdentityToSnapshot]);
+
+  // Listen to whatsapp_connections/{uid} & probe Evolution status on load/login
+  useEffect(() => {
+    if (authLoading) return;
+    let unsubConn: (() => void) | undefined;
+
+    if (isRealFirebaseUser && user) {
+      unsubConn = onSnapshot(
+        doc(db, 'whatsapp_connections', user.uid),
+        (snap) => {
+          if (!snap.exists()) return;
+          const data = snap.data() as {
+            status?: 'open' | 'close' | 'connecting';
+            instanceName?: string;
+            ownerJid?: string;
+            phoneNumber?: string;
+            profileName?: string;
+          };
+          const resolvedPhone =
+            data.phoneNumber || formatWhatsAppPhoneFromJid(data.ownerJid) || '';
+          setLiveWhatsappSession({
+            status: data.status || 'close',
+            instanceName: data.instanceName,
+            ownerJid: data.ownerJid || null,
+            phoneNumber: resolvedPhone || undefined,
+            profileName: data.profileName || null,
+            checkedAt: new Date().toISOString(),
+          });
+          if (data.status === 'open' && (resolvedPhone || data.profileName)) {
+            applyConnectedWhatsappIdentityToSnapshot(resolvedPhone, data.profileName);
+          }
+        },
+        () => {}
+      );
+    } else {
+      setLiveWhatsappSession(null);
+    }
+
+    void refreshLiveWhatsappSession();
+
+    return () => {
+      if (unsubConn) unsubConn();
+    };
+  }, [
+    authLoading,
+    isRealFirebaseUser,
+    user,
+    refreshLiveWhatsappSession,
+    applyConnectedWhatsappIdentityToSnapshot,
+  ]);
 
   // Persist snapshot to localStorage immediately
   const updateSnapshot = useCallback(
@@ -2632,9 +2824,13 @@ export default function App() {
                   contacts={snapshot.contacts}
                   workspace={snapshot.workspace}
                   privateProfile={snapshot.privateProfile}
+                  userId={activeUid}
+                  liveWhatsappSession={liveWhatsappSession}
+                  onRefreshWhatsappSession={refreshLiveWhatsappSession}
                   preselectedListName={preselectedListName}
                   onClearPreselectedList={() => setPreselectedListName(null)}
                   onNavigateToSettings={() => setActiveTab('settings')}
+                  onNavigateToConnectWhatsApp={() => setActiveTab('connect_whatsapp')}
                   onCreateAutoResponder={handleCreateAutoResponder}
                   onUpdateAutoResponder={handleUpdateAutoResponder}
                   onDeleteAutoResponder={handleDeleteAutoResponder}
@@ -2774,28 +2970,78 @@ export default function App() {
                     setAuthModalOpen(true);
                   }}
                   onAccountConnected={(details) => {
-                    const phoneFromJid = details.ownerJid
-                      ? details.ownerJid.split('@')[0].replace(/[^0-9+]/g, '')
-                      : undefined;
+                    const phoneFromJid = formatWhatsAppPhoneFromJid(details.ownerJid);
+                    setLiveWhatsappSession({
+                      status: details.status || 'open',
+                      instanceName: details.instanceName,
+                      ownerJid: details.ownerJid || null,
+                      phoneNumber: phoneFromJid || undefined,
+                      profileName: details.profileName || null,
+                      checkedAt: new Date().toISOString(),
+                    });
+                    applyConnectedWhatsappIdentityToSnapshot(
+                      phoneFromJid,
+                      details.profileName
+                    );
+
                     const nextWs = { ...snapshot.workspace, whatsappConnected: true };
+                    const existingIdentities = snapshot.privateProfile
+                      ? parseUserMessagingIdentities(snapshot.privateProfile)
+                      : [];
+                    const updatedIdentities = existingIdentities.map((id) =>
+                      id.channel === 'whatsapp' ? { ...id, isDefault: false } : id
+                    );
+                    if (phoneFromJid) {
+                      const waLabel = details.profileName
+                        ? `${details.profileName} (WhatsApp)`
+                        : 'Connected WhatsApp';
+                      const idx = updatedIdentities.findIndex(
+                        (i) =>
+                          i.channel === 'whatsapp' &&
+                          i.value.replace(/[^0-9]/g, '') ===
+                            phoneFromJid.replace(/[^0-9]/g, '')
+                      );
+                      if (idx >= 0) {
+                        updatedIdentities[idx] = {
+                          ...updatedIdentities[idx],
+                          label: waLabel,
+                          senderName:
+                            details.profileName || updatedIdentities[idx].senderName,
+                          value: phoneFromJid,
+                          isDefault: true,
+                          verified: true,
+                        };
+                      } else {
+                        updatedIdentities.unshift({
+                          id: 'wa_connected_live',
+                          channel: 'whatsapp',
+                          label: waLabel,
+                          senderName:
+                            details.profileName ||
+                            snapshot.workspace.senderName ||
+                            snapshot.workspace.name ||
+                            'WhatsApp Business',
+                          value: phoneFromJid,
+                          providerMode: 'evolution_qr',
+                          isDefault: true,
+                          verified: true,
+                          createdAt: new Date().toISOString(),
+                        });
+                      }
+                    }
+
                     const nextProf = snapshot.privateProfile
                       ? {
                           ...snapshot.privateProfile,
                           whatsappBusinessNumber:
                             phoneFromJid || snapshot.privateProfile.whatsappBusinessNumber,
+                          whatsappPhoneId:
+                            phoneFromJid || snapshot.privateProfile.whatsappPhoneId,
+                          messagingIdentitiesJson:
+                            JSON.stringify(updatedIdentities).slice(0, 10000),
                         }
                       : snapshot.privateProfile;
-                    updateSnapshot((prev) => ({
-                      ...prev,
-                      workspace: { ...prev.workspace, whatsappConnected: true },
-                      privateProfile: prev.privateProfile
-                        ? {
-                            ...prev.privateProfile,
-                            whatsappBusinessNumber:
-                              phoneFromJid || prev.privateProfile.whatsappBusinessNumber,
-                          }
-                        : prev.privateProfile,
-                    }));
+
                     if (auth.currentUser) {
                       void syncCloudWrite(async () => {
                         await upsertWorkspaceRoot(auth.currentUser!.uid, nextWs);
@@ -2810,6 +3056,9 @@ export default function App() {
                     }
                   }}
                   onAccountDisconnected={() => {
+                    setLiveWhatsappSession((prev) =>
+                      prev ? { ...prev, status: 'close' } : { status: 'close' }
+                    );
                     const nextWs = { ...snapshot.workspace, whatsappConnected: false };
                     updateSnapshot((prev) => ({
                       ...prev,

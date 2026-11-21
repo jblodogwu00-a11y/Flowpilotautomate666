@@ -108,6 +108,10 @@ export interface EmailEditorProps {
   onPreheaderChange?: (preheader: string) => void;
   recipientEmail?: string;
   readOnly?: boolean;
+  breadcrumbLabel?: string;
+  editorTitle?: string;
+  saveButtonLabel?: string;
+  hideEmailMetadataBar?: boolean;
 }
 
 const FONT_FAMILIES = [
@@ -168,6 +172,10 @@ export const EmailEditor: React.FC<EmailEditorProps> = ({
   onPreheaderChange,
   recipientEmail = 'subscriber@example.com',
   readOnly = false,
+  breadcrumbLabel = 'Campaigns',
+  editorTitle = 'Visual Email Composer',
+  saveButtonLabel = 'Save Email',
+  hideEmailMetadataBar = false,
 }) => {
   const [deviceView, setDeviceView] = useState<'desktop' | 'mobile'>('desktop');
   const [linkModalOpen, setLinkModalOpen] = useState(false);
@@ -361,13 +369,15 @@ export const EmailEditor: React.FC<EmailEditorProps> = ({
           </div>
           <div className="min-w-0">
             <div className="flex items-center gap-2 text-xs text-slate-500 font-medium">
-              <span>Campaigns</span>
+              <span>{breadcrumbLabel}</span>
               <span>/</span>
-              <span className="text-slate-900 font-semibold truncate">Visual Email Composer</span>
+              <span className="text-slate-900 font-semibold truncate">{editorTitle}</span>
             </div>
-            <div className="text-xs text-slate-600 truncate mt-0.5">
-              Subject: <span className="font-medium text-slate-900">{subject || 'Untitled Email'}</span>
-            </div>
+            {!hideEmailMetadataBar && (
+              <div className="text-xs text-slate-600 truncate mt-0.5">
+                Subject: <span className="font-medium text-slate-900">{subject || 'Untitled Email'}</span>
+              </div>
+            )}
           </div>
         </div>
 
@@ -421,39 +431,41 @@ export const EmailEditor: React.FC<EmailEditorProps> = ({
               className="px-4 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer"
             >
               <Check className="w-3.5 h-3.5" />
-              <span>Save Email</span>
+              <span>{saveButtonLabel}</span>
             </button>
           )}
         </div>
       </div>
 
       {/* METADATA BAR: Subject & Preheader Inputs */}
-      <div className="bg-slate-50/80 border-b border-slate-200 px-5 py-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-        <div>
-          <label className="block text-slate-600 font-semibold mb-1">
-            Subject Line ({'{{first_name}}'} supported)
-          </label>
-          <input
-            type="text"
-            value={subject}
-            onChange={(e) => onSubjectChange?.(e.target.value)}
-            placeholder="e.g. {{first_name}}, here is your invite link..."
-            className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-900 font-medium placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
-          />
+      {!hideEmailMetadataBar && (
+        <div className="bg-slate-50/80 border-b border-slate-200 px-5 py-3 grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+          <div>
+            <label className="block text-slate-600 font-semibold mb-1">
+              Subject Line ({'{{first_name}}'} supported)
+            </label>
+            <input
+              type="text"
+              value={subject}
+              onChange={(e) => onSubjectChange?.(e.target.value)}
+              placeholder="e.g. {{first_name}}, here is your invite link..."
+              className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-900 font-medium placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+            />
+          </div>
+          <div>
+            <label className="block text-slate-600 font-semibold mb-1">
+              Preheader Preview Text (shown in inbox snippet)
+            </label>
+            <input
+              type="text"
+              value={preheader}
+              onChange={(e) => onPreheaderChange?.(e.target.value)}
+              placeholder="e.g. Open now to unlock your personalized dashboard."
+              className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-900 font-medium placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
+            />
+          </div>
         </div>
-        <div>
-          <label className="block text-slate-600 font-semibold mb-1">
-            Preheader Preview Text (shown in inbox snippet)
-          </label>
-          <input
-            type="text"
-            value={preheader}
-            onChange={(e) => onPreheaderChange?.(e.target.value)}
-            placeholder="e.g. Open now to unlock your personalized dashboard."
-            className="w-full px-3 py-1.5 bg-white border border-slate-200 rounded-lg text-slate-900 font-medium placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all"
-          />
-        </div>
-      </div>
+      )}
 
       {/* STICKY TOOLBAR: Notion/ConvertKit Style (Row 1 & Row 2) */}
       <div className="sticky top-0 z-20 bg-white border-b border-slate-200 px-4 py-2 space-y-2 shadow-xs">

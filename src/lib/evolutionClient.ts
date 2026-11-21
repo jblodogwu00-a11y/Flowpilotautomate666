@@ -1,4 +1,5 @@
 import QRCode from 'qrcode';
+import { formatWhatsAppPhoneFromJid, htmlToWhatsAppText } from '../utils/richMessageFormat';
 
 export const EVOLUTION_URL = 'https://incomestream.duckdns.org';
 export const API_KEY = 'stakecut-secret-12345';
@@ -15,6 +16,7 @@ export interface EvolutionClientSessionResult {
   pairingCode: string | null;
   upstreamCount: number | null;
   ownerJid: string | null;
+  phoneNumber: string | null;
   profileName: string | null;
   disconnectionReasonCode: number | null;
   detail: string;
@@ -179,8 +181,18 @@ async function fetchInstanceMetadata(instanceName: string): Promise<{
         if (!stateRaw) {
           stateRaw = found.connectionStatus || found.instance?.status || null;
         }
-        ownerJid = found.ownerJid || found.instance?.owner || null;
-        profileName = found.profileName || found.instance?.profileName || null;
+        ownerJid =
+          found.ownerJid ||
+          found.owner ||
+          found.instance?.owner ||
+          found.number ||
+          stateData?.instance?.owner ||
+          null;
+        profileName =
+          found.profileName ||
+          found.instance?.profileName ||
+          found.pushName ||
+          null;
         if (typeof found.disconnectionReasonCode === 'number') {
           disconnectionReasonCode = found.disconnectionReasonCode;
         }
@@ -263,6 +275,7 @@ export async function createAndConnectEvolutionInstance(
           pairingCode: null,
           upstreamCount: null,
           ownerJid: null,
+          phoneNumber: null,
           profileName: null,
           disconnectionReasonCode: null,
           detail: String(msg),
@@ -363,6 +376,7 @@ export async function createAndConnectEvolutionInstance(
         pairingCode,
         upstreamCount,
         ownerJid: meta.ownerJid,
+        phoneNumber: formatWhatsAppPhoneFromJid(meta.ownerJid) || null,
         profileName: meta.profileName,
         disconnectionReasonCode: meta.disconnectionReasonCode,
         detail: String(connectErrorMessage),
@@ -387,6 +401,7 @@ export async function createAndConnectEvolutionInstance(
       pairingCode,
       upstreamCount,
       ownerJid: meta.ownerJid,
+      phoneNumber: formatWhatsAppPhoneFromJid(meta.ownerJid) || null,
       profileName: meta.profileName,
       disconnectionReasonCode: meta.disconnectionReasonCode,
       detail,
@@ -404,6 +419,7 @@ export async function createAndConnectEvolutionInstance(
       pairingCode: null,
       upstreamCount: null,
       ownerJid: null,
+      phoneNumber: null,
       profileName: null,
       disconnectionReasonCode: null,
       detail: errMsg,
@@ -428,6 +444,23 @@ export async function checkEvolutionConnectionState(
     const meta = await fetchInstanceMetadata(instanceName);
 
     if (!meta.exists && meta.stateStatusCode === 404) {
+      if (!includeQrIfClosed) {
+        return {
+          ok: true,
+          instanceName,
+          userId: cleanUid,
+          status: 'close',
+          qrCode: null,
+          pairingCode: null,
+          upstreamCount: null,
+          ownerJid: null,
+          phoneNumber: null,
+          profileName: null,
+          disconnectionReasonCode: null,
+          detail: 'WhatsApp instance has not been initialized yet.',
+          checkedAt: new Date().toISOString(),
+        };
+      }
       return createAndConnectEvolutionInstance(cleanUid, false);
     }
 
@@ -469,6 +502,7 @@ export async function checkEvolutionConnectionState(
       pairingCode,
       upstreamCount,
       ownerJid: meta.ownerJid,
+      phoneNumber: formatWhatsAppPhoneFromJid(meta.ownerJid) || null,
       profileName: meta.profileName,
       disconnectionReasonCode: meta.disconnectionReasonCode,
       detail,
@@ -486,6 +520,7 @@ export async function checkEvolutionConnectionState(
       pairingCode: null,
       upstreamCount: null,
       ownerJid: null,
+      phoneNumber: null,
       profileName: null,
       disconnectionReasonCode: null,
       detail: errMsg,
@@ -543,7 +578,7 @@ export async function sendEvolutionTextMessage(params: {
   const cleanUid = sanitizeEvolutionId(params.userId || 'user', 'user');
   const instanceName = params.instanceName || buildEvolutionInstanceName(cleanUid);
   const cleanPhone = String(params.to || '').replace(/[^0-9]/g, '');
-  const cleanText = String(params.text || '').trim();
+  const cleanText = htmlToWhatsAppText(String(params.text || '')).trim();
 
   if (!cleanPhone || !cleanText) {
     return {

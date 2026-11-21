@@ -1097,7 +1097,7 @@
         },
         "responseMessage": {
           "type": "string",
-          "maxLength": 2000,
+          "maxLength": 15000,
           "minLength": 1
         },
         "channel": {
@@ -1448,6 +1448,24 @@
             "close",
             "connecting"
           ]
+        },
+        "ownerJid": {
+          "type": "string",
+          "description": "Connected WhatsApp account JID from Evolution API.",
+          "maxLength": 128,
+          "minLength": 0
+        },
+        "phoneNumber": {
+          "type": "string",
+          "description": "Formatted WhatsApp phone number extracted from connected session.",
+          "maxLength": 64,
+          "minLength": 0
+        },
+        "profileName": {
+          "type": "string",
+          "description": "Connected WhatsApp Business or display profile name.",
+          "maxLength": 120,
+          "minLength": 0
         },
         "createdAt": {
           "type": "string",
