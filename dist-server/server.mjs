@@ -1,11 +1,11 @@
 // serverCore.ts
 import "dotenv/config";
 import express from "express";
-import fs5 from "fs";
-import crypto from "crypto";
-import path5 from "path";
+import fs8 from "fs";
+import crypto2 from "crypto";
+import path8 from "path";
 import nodemailer from "nodemailer";
-import { fileURLToPath as fileURLToPath2 } from "url";
+import { fileURLToPath as fileURLToPath5 } from "url";
 import { createServer as createViteServer } from "vite";
 
 // src/services/whatsappBaileysService.ts
@@ -14,10 +14,10 @@ import makeWASocket, {
   makeCacheableSignalKeyStore,
   initAuthCreds as initAuthCreds2
 } from "@whiskeysockets/baileys";
-import QRCode from "qrcode";
+import QRCode3 from "qrcode";
 import pino from "pino";
-import fs4 from "fs";
-import path4 from "path";
+import fs5 from "fs";
+import path5 from "path";
 
 // src/lib/whatsapp/listener.ts
 import fs from "fs";
@@ -502,12 +502,12 @@ async function updateJobStatus(jobId, status, error) {
   return job;
 }
 
-// src/lib/customDomainEmail.ts
+// src/lib/evolutionApi.ts
 import "dotenv/config";
-import { Resend } from "resend";
 import fs3 from "fs";
 import path3 from "path";
 import { fileURLToPath } from "url";
+import QRCode2 from "qrcode";
 
 // src/lib/firebaseAdmin.ts
 import { initializeApp as initializeApp2, getApps as getApps2, cert, applicationDefault } from "firebase-admin/app";
@@ -553,6 +553,11 @@ import {
   serverTimestamp,
   getDocFromServer
 } from "firebase/firestore";
+
+// src/lib/evolutionClient.ts
+import QRCode from "qrcode";
+
+// src/firebase.ts
 var app = getApps().length ? getApp() : initializeApp(firebase_applet_config_default);
 var targetDatabaseId = firebase_applet_config_default.firestoreDatabaseId || "ai-studio-53b8d6de-81d3-4f2a-9ea0-7359072dfac0";
 setLogLevel("silent");
@@ -580,10 +585,12 @@ googleProvider.addScope("email");
 googleProvider.setCustomParameters({ prompt: "select_account" });
 var firebaseProjectId = firebase_applet_config_default.projectId;
 async function testConnection() {
-  if (!auth.currentUser) return;
   try {
     await getDocFromServer(doc(db, "test", "connection"));
-  } catch {
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("the client is offline")) {
+      console.error("Please check your Firebase configuration.");
+    }
   }
 }
 testConnection();
@@ -700,458 +707,1317 @@ async function setFirestoreDoc(collectionName, docId, data, merge = true) {
   }
 }
 
-// src/lib/customDomainEmail.ts
+// src/lib/evolutionApi.ts
 var __filename = fileURLToPath(import.meta.url);
 var __dirname = path3.dirname(__filename);
-var DATA_DIR2 = path3.join(__dirname, "../../.data");
-var EMAIL_STORE_PATH = path3.join(DATA_DIR2, "email_domains_store.json");
 var ENV_FILE_PATH = path3.join(__dirname, "../../.env");
-function getResendClient() {
-  let apiKey = (process.env.RESEND_API_KEY || "").trim();
-  if (!apiKey && fs3.existsSync(ENV_FILE_PATH)) {
+function readEnvFallback(key) {
+  const fromProcess = (process.env[key] || "").trim();
+  if (fromProcess) return fromProcess;
+  if (fs3.existsSync(ENV_FILE_PATH)) {
     try {
       const content = fs3.readFileSync(ENV_FILE_PATH, "utf-8");
-      const match = content.match(/RESEND_API_KEY\s*=\s*([^\r\n]+)/);
+      const regex = new RegExp(`^${key}\\s*=\\s*([^\\r\\n]+)`, "m");
+      const match = content.match(regex);
       if (match && match[1]) {
-        apiKey = match[1].trim();
+        return match[1].trim();
       }
     } catch {
     }
   }
-  if (!apiKey || apiKey === "your_resend_api_key_here") {
+  return "";
+}
+function getEvolutionConfig() {
+  const rawUrl = readEnvFallback("EVOLUTION_URL") || readEnvFallback("EVOLUTION_API_URL") || "https://incomestream.duckdns.org";
+  const baseUrl = rawUrl.replace(/\/manager\/?$/i, "").replace(/\/+$/, "");
+  const apiKey = readEnvFallback("EVOLUTION_API_KEY") || "stakecut-secret-12345";
+  return { baseUrl, apiKey };
+}
+function sanitizeEvolutionId(raw, fallback = "workspace") {
+  const cleaned = String(raw || "").trim().replace(/[^a-zA-Z0-9_\-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+  return (cleaned || fallback).slice(0, 128);
+}
+function buildEvolutionInstanceName(userId, requestedInstanceName) {
+  const cleanUid = sanitizeEvolutionId(userId, "user");
+  const defaultName = `flowpilot-${cleanUid}`;
+  if (requestedInstanceName && requestedInstanceName.trim()) {
+    const cleanedReq = sanitizeEvolutionId(requestedInstanceName, defaultName);
+    if (cleanedReq.startsWith("flowpilot-")) {
+      return cleanedReq.slice(0, 160);
+    }
+  }
+  return defaultName.slice(0, 160);
+}
+function normalizeEvolutionStatus(raw) {
+  const normalized = String(raw || "").trim().toLowerCase();
+  if (normalized === "open" || normalized === "connected" || normalized === "online") {
+    return "open";
+  }
+  if (normalized === "connecting" || normalized === "qr" || normalized === "pairing" || normalized === "initializing") {
+    return "connecting";
+  }
+  return "close";
+}
+async function evolutionFetch(endpointPath, init = {}) {
+  const { baseUrl, apiKey } = getEvolutionConfig();
+  if (!apiKey) {
+    return {
+      ok: false,
+      status: 503,
+      data: { error: "EVOLUTION_API_KEY is not configured on the server." },
+      rawText: "EVOLUTION_API_KEY is not configured on the server."
+    };
+  }
+  const targetUrl = `${baseUrl}${endpointPath.startsWith("/") ? endpointPath : `/${endpointPath}`}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 12e3);
+  try {
+    const response = await fetch(targetUrl, {
+      method: init.method || "GET",
+      headers: {
+        apikey: apiKey,
+        "Content-Type": "application/json",
+        Accept: "application/json"
+      },
+      ...init.body ? { body: JSON.stringify(init.body) } : {},
+      signal: controller.signal
+    });
+    const rawText = await response.text();
+    let parsed = null;
+    try {
+      parsed = rawText ? JSON.parse(rawText) : {};
+    } catch {
+      parsed = { message: rawText.slice(0, 300) };
+    }
+    return {
+      ok: response.ok,
+      status: response.status,
+      data: parsed,
+      rawText
+    };
+  } catch (err) {
+    const message = err?.name === "AbortError" ? "Evolution API request timed out after 12 seconds." : err?.message || "Failed to reach Evolution API server.";
+    return {
+      ok: false,
+      status: 502,
+      data: { error: message },
+      rawText: message
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+async function extractQrCodeDataUrl(payload) {
+  if (!payload || typeof payload !== "object") {
+    return { qrCode: null, pairingCode: null };
+  }
+  const pairingCodeRaw = payload.pairingCode || payload.qrcode?.pairingCode || payload.data?.pairingCode || null;
+  const pairingCode = pairingCodeRaw ? String(pairingCodeRaw).trim() : null;
+  const base64Candidate = payload.base64 || payload.qrcode?.base64 || payload.data?.base64 || "";
+  if (typeof base64Candidate === "string" && base64Candidate.trim().length > 20) {
+    const trimmed = base64Candidate.trim();
+    return {
+      qrCode: trimmed.startsWith("data:image/") ? trimmed : `data:image/png;base64,${trimmed}`,
+      pairingCode
+    };
+  }
+  const rawCode = payload.code || payload.qrcode?.code || payload.qr || payload.data?.code || "";
+  if (typeof rawCode === "string" && rawCode.trim().length > 10) {
+    try {
+      const dataUrl = await QRCode2.toDataURL(rawCode.trim(), {
+        width: 320,
+        margin: 2,
+        color: {
+          dark: "#0F172A",
+          light: "#FFFFFF"
+        }
+      });
+      return { qrCode: dataUrl, pairingCode };
+    } catch {
+      return { qrCode: null, pairingCode };
+    }
+  }
+  return { qrCode: null, pairingCode };
+}
+async function syncAdminWhatsAppConnectionDoc(userId, instanceName, status) {
+  if (!hasFirebaseServiceAccount()) return;
+  try {
+    const existing = await getFirestoreDoc("whatsapp_connections", userId);
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+    await setFirestoreDoc(
+      "whatsapp_connections",
+      userId,
+      {
+        userId,
+        instanceName,
+        status,
+        createdAt: existing?.createdAt || nowIso,
+        updatedAt: nowIso
+      },
+      true
+    );
+  } catch (err) {
+    console.warn("[Evolution API] Admin Firestore sync notice:", err);
+  }
+}
+async function inspectInstanceSummary(instanceName) {
+  const [stateRes, listRes] = await Promise.all([
+    evolutionFetch(`/instance/connectionState/${encodeURIComponent(instanceName)}`),
+    evolutionFetch(`/instance/fetchInstances?instanceName=${encodeURIComponent(instanceName)}`)
+  ]);
+  let rawState = stateRes.data?.instance?.state || stateRes.data?.state;
+  let ownerJid = null;
+  let profileName = null;
+  let disconnectionReasonCode = null;
+  let exists = stateRes.ok;
+  if (listRes.ok && Array.isArray(listRes.data)) {
+    const found = listRes.data.find(
+      (item) => item?.name === instanceName || item?.instance?.instanceName === instanceName
+    ) || listRes.data[0];
+    if (found) {
+      exists = true;
+      if (!rawState) {
+        rawState = found.connectionStatus || found.instance?.status;
+      }
+      ownerJid = found.ownerJid || found.instance?.owner || null;
+      profileName = found.profileName || found.instance?.profileName || null;
+      if (typeof found.disconnectionReasonCode === "number") {
+        disconnectionReasonCode = found.disconnectionReasonCode;
+      }
+    }
+  }
+  return {
+    status: normalizeEvolutionStatus(rawState),
+    ownerJid,
+    profileName,
+    disconnectionReasonCode,
+    exists
+  };
+}
+async function configureInstanceWebhook(instanceName, webhookUrl) {
+  const appUrl = typeof process !== "undefined" && process.env?.APP_URL ? process.env.APP_URL.replace(/\/+$/, "") : "";
+  const targetUrl = webhookUrl || (appUrl ? `${appUrl}/api/whatsapp/evolution-webhook` : "http://localhost:3000/api/whatsapp/evolution-webhook");
+  const res = await evolutionFetch(`/webhook/set/${encodeURIComponent(instanceName)}`, {
+    method: "POST",
+    body: {
+      webhook: {
+        enabled: true,
+        url: targetUrl,
+        byEvents: false,
+        events: ["MESSAGES_UPSERT"]
+      }
+    }
+  });
+  return res.ok;
+}
+async function initializeEvolutionConnection(params) {
+  const userId = sanitizeEvolutionId(params.userId, "user");
+  const instanceName = buildEvolutionInstanceName(userId, params.instanceName);
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  const { apiKey } = getEvolutionConfig();
+  if (!apiKey) {
+    return {
+      ok: false,
+      instanceName,
+      userId,
+      status: "close",
+      qrCode: null,
+      pairingCode: null,
+      qrPending: false,
+      upstreamCount: null,
+      ownerJid: null,
+      profileName: null,
+      disconnectionReasonCode: null,
+      detail: "Evolution API key is not configured on the server.",
+      error: "Evolution API key (EVOLUTION_API_KEY) is not configured on the server.",
+      checkedAt: nowIso
+    };
+  }
+  const createRes = await evolutionFetch("/instance/create", {
+    method: "POST",
+    body: {
+      instanceName,
+      qrcode: true,
+      integration: "WHATSAPP-BAILEYS"
+    }
+  });
+  let qrCode = null;
+  let pairingCode = null;
+  if (createRes.ok) {
+    const extracted = await extractQrCodeDataUrl(createRes.data);
+    qrCode = extracted.qrCode;
+    pairingCode = extracted.pairingCode;
+  } else {
+    const errText = JSON.stringify(createRes.data || createRes.rawText || "").toLowerCase();
+    const alreadyExists = createRes.status === 403 || createRes.status === 409 || errText.includes("already in use") || errText.includes("already exists");
+    if (!alreadyExists && createRes.status !== 200 && createRes.status !== 201) {
+      const upstreamMsg = createRes.data?.response?.message?.[0] || createRes.data?.message || createRes.data?.error || `Evolution API returned HTTP ${createRes.status}`;
+      return {
+        ok: false,
+        instanceName,
+        userId,
+        status: "close",
+        qrCode: null,
+        pairingCode: null,
+        qrPending: false,
+        upstreamCount: null,
+        ownerJid: null,
+        profileName: null,
+        disconnectionReasonCode: null,
+        detail: String(upstreamMsg),
+        error: String(upstreamMsg),
+        checkedAt: nowIso
+      };
+    }
+  }
+  configureInstanceWebhook(instanceName, params.webhookUrl).catch(() => {
+  });
+  if (params.forceRestart) {
+    await evolutionFetch(`/instance/restart/${encodeURIComponent(instanceName)}`, {
+      method: "POST"
+    });
+    await new Promise((resolve) => setTimeout(resolve, 600));
+  }
+  let summary = await inspectInstanceSummary(instanceName);
+  let upstreamCount = null;
+  if (summary.status !== "open" && !qrCode) {
+    let connectRes = await evolutionFetch(
+      `/instance/connect/${encodeURIComponent(instanceName)}`
+    );
+    if (connectRes.ok && connectRes.data) {
+      if (typeof connectRes.data.count === "number") {
+        upstreamCount = connectRes.data.count;
+      }
+      const extracted = await extractQrCodeDataUrl(connectRes.data);
+      qrCode = extracted.qrCode;
+      pairingCode = extracted.pairingCode || pairingCode;
+      if (!qrCode && (connectRes.data.count === 0 || !connectRes.data.base64)) {
+        await new Promise((resolve) => setTimeout(resolve, 850));
+        connectRes = await evolutionFetch(
+          `/instance/connect/${encodeURIComponent(instanceName)}`
+        );
+        if (connectRes.ok && connectRes.data) {
+          if (typeof connectRes.data.count === "number") {
+            upstreamCount = connectRes.data.count;
+          }
+          const retryExtracted = await extractQrCodeDataUrl(connectRes.data);
+          qrCode = retryExtracted.qrCode;
+          pairingCode = retryExtracted.pairingCode || pairingCode;
+        }
+      }
+    }
+    summary = await inspectInstanceSummary(instanceName);
+  }
+  await syncAdminWhatsAppConnectionDoc(userId, instanceName, summary.status);
+  const detail = summary.status === "open" ? "WhatsApp Connected" : qrCode ? "Scan with your WhatsApp" : `Instance initialized (${instanceName}). Awaiting QR code payload from Evolution API (count: ${upstreamCount ?? 0}).`;
+  return {
+    ok: true,
+    instanceName,
+    userId,
+    status: summary.status,
+    qrCode,
+    pairingCode,
+    qrPending: summary.status !== "open" && !qrCode,
+    upstreamCount,
+    ownerJid: summary.ownerJid,
+    profileName: summary.profileName,
+    disconnectionReasonCode: summary.disconnectionReasonCode,
+    detail,
+    checkedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+async function getEvolutionConnectionStatus(params) {
+  const userId = sanitizeEvolutionId(params.userId, "user");
+  const instanceName = buildEvolutionInstanceName(userId, params.instanceName);
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  const { apiKey } = getEvolutionConfig();
+  if (!apiKey) {
+    return {
+      ok: false,
+      instanceName,
+      userId,
+      status: "close",
+      qrCode: null,
+      pairingCode: null,
+      qrPending: false,
+      upstreamCount: null,
+      ownerJid: null,
+      profileName: null,
+      disconnectionReasonCode: null,
+      detail: "Evolution API key is not configured on the server.",
+      error: "Evolution API key (EVOLUTION_API_KEY) is not configured on the server.",
+      checkedAt: nowIso
+    };
+  }
+  const summary = await inspectInstanceSummary(instanceName);
+  if (!summary.exists) {
+    return initializeEvolutionConnection({ userId, instanceName });
+  }
+  let qrCode = null;
+  let pairingCode = null;
+  let upstreamCount = null;
+  if (summary.status !== "open") {
+    const connectRes = await evolutionFetch(
+      `/instance/connect/${encodeURIComponent(instanceName)}`
+    );
+    if (connectRes.ok && connectRes.data) {
+      if (typeof connectRes.data.count === "number") {
+        upstreamCount = connectRes.data.count;
+      }
+      const extracted = await extractQrCodeDataUrl(connectRes.data);
+      qrCode = extracted.qrCode;
+      pairingCode = extracted.pairingCode;
+    }
+  }
+  await syncAdminWhatsAppConnectionDoc(userId, instanceName, summary.status);
+  const detail = summary.status === "open" ? "WhatsApp Connected" : qrCode ? "Scan with your WhatsApp" : `Session status is "${summary.status}". Still awaiting QR image from Evolution API (count: ${upstreamCount ?? 0}).`;
+  return {
+    ok: true,
+    instanceName,
+    userId,
+    status: summary.status,
+    qrCode,
+    pairingCode,
+    qrPending: summary.status !== "open" && !qrCode,
+    upstreamCount,
+    ownerJid: summary.ownerJid,
+    profileName: summary.profileName,
+    disconnectionReasonCode: summary.disconnectionReasonCode,
+    detail,
+    checkedAt: (/* @__PURE__ */ new Date()).toISOString()
+  };
+}
+async function disconnectEvolutionConnection(params) {
+  const userId = sanitizeEvolutionId(params.userId, "user");
+  const instanceName = buildEvolutionInstanceName(userId, params.instanceName);
+  const logoutRes = await evolutionFetch(
+    `/instance/logout/${encodeURIComponent(instanceName)}`,
+    { method: "DELETE" }
+  );
+  await syncAdminWhatsAppConnectionDoc(userId, instanceName, "close");
+  if (!logoutRes.ok && logoutRes.status !== 404 && logoutRes.status !== 400) {
+    return {
+      ok: false,
+      instanceName,
+      status: "close",
+      error: logoutRes.data?.message || logoutRes.data?.error || `Failed to log out instance (HTTP ${logoutRes.status})`
+    };
+  }
+  return {
+    ok: true,
+    instanceName,
+    status: "close"
+  };
+}
+async function sendWhatsAppViaEvolution(instanceName, leadPhone, text) {
+  const cleanPhone = String(leadPhone || "").replace(/[^0-9]/g, "");
+  const cleanText = String(text || "").trim();
+  if (!cleanPhone || !cleanText) {
+    return {
+      ok: false,
+      instanceName,
+      to: cleanPhone,
+      detail: "Recipient phone number and non-empty message text are required.",
+      error: "Recipient phone number and non-empty message text are required."
+    };
+  }
+  try {
+    const summary = await inspectInstanceSummary(instanceName);
+    if (summary.status !== "open") {
+      return {
+        ok: false,
+        instanceName,
+        to: cleanPhone,
+        detail: `Instance "${instanceName}" is currently "${summary.status}". Scan QR code in Connect WhatsApp to connect before sending.`,
+        error: `WhatsApp instance "${instanceName}" is disconnected. Please scan the QR code to connect first.`
+      };
+    }
+  } catch (inspectErr) {
+    console.warn(`[sendWhatsAppViaEvolution] Could not pre-check status for ${instanceName}:`, inspectErr?.message || inspectErr);
+  }
+  const endpoint = `/message/sendText/${encodeURIComponent(instanceName)}`;
+  const res = await evolutionFetch(endpoint, {
+    method: "POST",
+    body: {
+      number: cleanPhone,
+      text: cleanText
+    }
+  });
+  if (!res.ok) {
+    const errorMsg = res.data?.response?.message?.[0] || res.data?.message || res.data?.error || `Evolution sendText failed (HTTP ${res.status})`;
+    return {
+      ok: false,
+      instanceName,
+      to: cleanPhone,
+      detail: String(errorMsg),
+      error: String(errorMsg)
+    };
+  }
+  const messageId = res.data?.key?.id || res.data?.messageId || `evo_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+  return {
+    ok: true,
+    messageId,
+    instanceName,
+    to: cleanPhone,
+    detail: `Sent via Evolution API (${instanceName}) to +${cleanPhone}`
+  };
+}
+
+// src/lib/customDomainEmail.ts
+import "dotenv/config";
+import { Resend } from "resend";
+import fs4 from "node:fs";
+import path4 from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+var __filename2 = fileURLToPath2(import.meta.url);
+var __dirname2 = path4.dirname(__filename2);
+var DATA_DIR2 = path4.join(__dirname2, "../../.data");
+var EMAIL_STORE_PATH = path4.join(DATA_DIR2, "email_domains_store.json");
+var CustomDomainEmailError = class extends Error {
+  constructor(message, statusCode = 400, code = "CUSTOM_DOMAIN_ERROR") {
+    super(message);
+    this.name = "CustomDomainEmailError";
+    this.statusCode = statusCode;
+    this.code = code;
+  }
+};
+var FREE_EMAIL_PROVIDERS = /* @__PURE__ */ new Set([
+  "gmail.com",
+  "googlemail.com",
+  "yahoo.com",
+  "yahoo.co.uk",
+  "yahoo.fr",
+  "yahoo.ca",
+  "yahoo.in",
+  "yahoo.com.au",
+  "ymail.com",
+  "rocketmail.com",
+  "outlook.com",
+  "hotmail.com",
+  "hotmail.co.uk",
+  "hotmail.fr",
+  "live.com",
+  "live.co.uk",
+  "msn.com",
+  "icloud.com",
+  "me.com",
+  "mac.com",
+  "aol.com",
+  "aim.com",
+  "proton.me",
+  "protonmail.com",
+  "protonmail.ch",
+  "pm.me",
+  "zoho.com",
+  "zohomail.com",
+  "gmx.com",
+  "gmx.net",
+  "gmx.de",
+  "mail.com",
+  "yandex.com",
+  "yandex.ru",
+  "tutanota.com",
+  "tutanota.de",
+  "tuta.io",
+  "fastmail.com",
+  "fastmail.fm",
+  "hey.com",
+  "inbox.com",
+  "mail.ru",
+  "rambler.ru",
+  "qq.com",
+  "163.com",
+  "126.com",
+  "rediffmail.com"
+]);
+var RESERVED_DOMAINS = /* @__PURE__ */ new Set([
+  "localhost",
+  "localhost.localdomain",
+  "example.com",
+  "example.org",
+  "example.net",
+  "resend.dev",
+  "flowpilot.app",
+  "send.flowpilot.app"
+]);
+function isResendConfigured() {
+  const apiKey = (process.env.RESEND_API_KEY || "").trim();
+  return Boolean(
+    apiKey && apiKey !== "your_resend_api_key_here" && apiKey !== "MY_RESEND_API_KEY" && apiKey.startsWith("re_")
+  );
+}
+function getResendClient() {
+  const apiKey = (process.env.RESEND_API_KEY || "").trim();
+  if (!apiKey || apiKey === "your_resend_api_key_here" || apiKey === "MY_RESEND_API_KEY") {
     return null;
   }
   return new Resend(apiKey);
 }
-try {
-  if (!fs3.existsSync(DATA_DIR2)) {
-    fs3.mkdirSync(DATA_DIR2, { recursive: true });
+function requireResendClient() {
+  const client = getResendClient();
+  if (!client) {
+    throw new CustomDomainEmailError(
+      "Centralized Resend email infrastructure is not configured on this server. Please set RESEND_API_KEY in the server environment.",
+      503,
+      "RESEND_NOT_CONFIGURED"
+    );
   }
-} catch {
+  return client;
 }
-function loadLocalEmailStore() {
+function ensureDataDir2() {
   try {
-    if (fs3.existsSync(EMAIL_STORE_PATH)) {
-      const raw = fs3.readFileSync(EMAIL_STORE_PATH, "utf-8");
+    if (!fs4.existsSync(DATA_DIR2)) {
+      fs4.mkdirSync(DATA_DIR2, { recursive: true });
+    }
+  } catch {
+  }
+}
+function sanitizeOwnerId(ownerId) {
+  const clean = String(ownerId || "").trim();
+  if (!clean || !/^[a-zA-Z0-9_.\-@]+$/.test(clean) || clean.length > 128) {
+    throw new CustomDomainEmailError("Valid authenticated user ID is required.", 401, "UNAUTHORIZED");
+  }
+  return clean;
+}
+function loadEmailStore() {
+  try {
+    if (fs4.existsSync(EMAIL_STORE_PATH)) {
+      const raw = fs4.readFileSync(EMAIL_STORE_PATH, "utf-8");
       const parsed = JSON.parse(raw);
+      if (parsed && parsed.version === 2) {
+        return {
+          version: 2,
+          domainsByOwner: parsed.domainsByOwner || {},
+          sendersByOwner: parsed.sendersByOwner || {},
+          webhookLogs: Array.isArray(parsed.webhookLogs) ? parsed.webhookLogs : []
+        };
+      }
       return {
-        domain: parsed.domain || null,
-        users: parsed.users || {}
+        version: 2,
+        domainsByOwner: {},
+        sendersByOwner: {},
+        webhookLogs: []
       };
     }
   } catch (err) {
-    console.warn("[Custom Domain Email] Read local store notice:", err.message);
+    console.warn("[CustomDomainEmail] Read local store notice:", err?.message || err);
   }
   return {
-    domain: null,
-    users: {}
+    version: 2,
+    domainsByOwner: {},
+    sendersByOwner: {},
+    webhookLogs: []
   };
 }
-function saveLocalEmailStore(state) {
+function saveEmailStore(state) {
   try {
-    if (!fs3.existsSync(DATA_DIR2)) {
-      fs3.mkdirSync(DATA_DIR2, { recursive: true });
-    }
-    fs3.writeFileSync(EMAIL_STORE_PATH, JSON.stringify(state, null, 2), "utf-8");
+    ensureDataDir2();
+    fs4.writeFileSync(EMAIL_STORE_PATH, JSON.stringify(state, null, 2), "utf-8");
   } catch (err) {
-    console.warn("[Custom Domain Email] Write local store notice:", err.message);
+    console.warn("[CustomDomainEmail] Write local store notice:", err?.message || err);
   }
 }
-async function getActiveEmailDomain() {
-  const local = loadLocalEmailStore();
-  if (local.domain?.domain) {
-    try {
-      const remoteDoc = await getFirestoreDoc("email_domains", local.domain.domain);
-      if (remoteDoc && remoteDoc.domain) {
-        return remoteDoc;
-      }
-    } catch {
+function normalizeDomain(rawDomain) {
+  let cleaned = String(rawDomain || "").trim().toLowerCase().replace(/^https?:\/\//, "").replace(/\/.*$/, "").replace(/\.+$/, "");
+  if (cleaned.startsWith("www.")) {
+    cleaned = cleaned.slice(4);
+  }
+  return cleaned;
+}
+function sanitizeHeaderString(value, maxLength = 100) {
+  return String(value || "").replace(/[\r\n\0<>"]/g, " ").replace(/\s+/g, " ").trim().slice(0, maxLength);
+}
+function validateCustomDomainSenderInput(params) {
+  const cleanName = sanitizeHeaderString(params.fromName, 100);
+  if (cleanName.length < 2) {
+    throw new CustomDomainEmailError(
+      "Please enter a From Name (at least 2 characters, e.g. Musa Store).",
+      400,
+      "INVALID_FROM_NAME"
+    );
+  }
+  const rawEmail = String(params.fromEmail || "").trim();
+  if (!rawEmail || /[\r\n\s<>]/.test(rawEmail)) {
+    throw new CustomDomainEmailError(
+      "Please enter a valid custom domain email address without spaces or brackets.",
+      400,
+      "INVALID_FROM_EMAIL"
+    );
+  }
+  const cleanEmail = rawEmail.toLowerCase();
+  const emailRegex = /^[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9-]+(\.[a-z0-9-]+)+$/;
+  if (!emailRegex.test(cleanEmail) || cleanEmail.length > 150) {
+    throw new CustomDomainEmailError(
+      "Please enter a valid email address (for example: hello@yourdomain.com).",
+      400,
+      "INVALID_FROM_EMAIL"
+    );
+  }
+  const atIndex = cleanEmail.lastIndexOf("@");
+  const rawDomain = cleanEmail.slice(atIndex + 1);
+  const domain = normalizeDomain(rawDomain);
+  if (!domain || domain.length < 4 || domain.length > 253 || !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(domain) || domain.includes("..") || /^\d+\.\d+\.\d+\.\d+$/.test(domain)) {
+    throw new CustomDomainEmailError(
+      "Please enter an email address with a valid custom domain (for example: hello@yourdomain.com).",
+      400,
+      "INVALID_DOMAIN"
+    );
+  }
+  if (FREE_EMAIL_PROVIDERS.has(domain)) {
+    throw new CustomDomainEmailError(
+      `Free email providers like ${domain} cannot be used as a custom sending domain. Enter an email address from your own domain (for example: hello@yourbrand.com).`,
+      400,
+      "FREE_EMAIL_PROVIDER_NOT_ALLOWED"
+    );
+  }
+  if (RESERVED_DOMAINS.has(domain) || domain.endsWith(".local") || domain.endsWith(".internal") || domain.endsWith(".test") || domain.endsWith(".localhost")) {
+    throw new CustomDomainEmailError(
+      `The domain "${domain}" is reserved and cannot be registered. Please use your own custom domain.`,
+      400,
+      "RESERVED_DOMAIN_NOT_ALLOWED"
+    );
+  }
+  let cleanReplyTo;
+  if (params.replyToEmail && params.replyToEmail.trim()) {
+    const candidate = params.replyToEmail.trim().toLowerCase();
+    if (!emailRegex.test(candidate) || /[\r\n\s<>]/.test(candidate)) {
+      throw new CustomDomainEmailError(
+        "Reply-To address must be a valid email address.",
+        400,
+        "INVALID_REPLY_TO"
+      );
     }
-    return local.domain;
+    cleanReplyTo = candidate;
   }
-  return null;
+  return {
+    fromName: cleanName,
+    fromEmail: cleanEmail,
+    domain,
+    replyToEmail: cleanReplyTo
+  };
 }
-async function getEmailUsers() {
-  const local = loadLocalEmailStore();
-  const users = { ...local.users };
-  for (const uid of ["me", "brother"]) {
-    try {
-      const doc3 = await getFirestoreDoc("email_users", uid);
-      if (doc3 && doc3.userId) {
-        users[uid] = doc3;
-      }
-    } catch {
-    }
-  }
-  return users;
+function normalizeResendStatus(rawStatus) {
+  const s = String(rawStatus || "not_started").toLowerCase().trim();
+  if (s === "verified") return "verified";
+  if (s === "pending") return "pending";
+  if (s === "failed") return "failed";
+  if (s === "temporary_failure") return "temporary_failure";
+  return "not_started";
 }
-function formatResendDnsRecords(records, domainName) {
-  if (!Array.isArray(records) || records.length === 0) {
-    return [
-      {
-        record: "SPF",
-        name: `send.${domainName}`,
-        type: "TXT",
-        value: "v=spf1 include:amazonses.com ~all",
-        status: "not_started"
-      },
-      {
-        record: "DKIM",
-        name: `resend._domainkey.${domainName}`,
-        type: "TXT",
-        value: `k=rsa; p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC3...`,
-        status: "not_started"
-      },
-      {
-        record: "DMARC",
-        name: `_dmarc.${domainName}`,
-        type: "TXT",
-        value: `v=DMARC1; p=none; rua=mailto:dmarc@${domainName}`,
-        status: "not_started"
-      }
-    ];
-  }
-  return records.map((r) => ({
-    id: r.id,
-    record: r.record || r.type || "TXT",
-    name: r.name || "",
-    type: r.type || "TXT",
-    ttl: r.ttl || "Auto",
-    status: r.status || "not_started",
-    value: r.value || "",
-    priority: r.priority
+function mapResendRecords(records) {
+  if (!Array.isArray(records)) return [];
+  return records.filter((r) => Boolean(r && typeof r === "object")).map((r) => ({
+    ...r.id ? { id: String(r.id) } : {},
+    record: String(r.record || r.type || "TXT"),
+    name: String(r.name || ""),
+    type: String(r.type || "TXT").toUpperCase(),
+    ttl: r.ttl !== void 0 && r.ttl !== null ? r.ttl : "Auto",
+    status: String(r.status || "not_started"),
+    value: String(r.value || ""),
+    ...typeof r.priority === "number" ? { priority: r.priority } : {}
   }));
 }
-async function addOrUpdateSharedDomain(params) {
-  const { fromName, fromEmail, userId } = params;
-  const cleanEmail = String(fromEmail || "").trim().toLowerCase();
-  const cleanName = String(fromName || "").trim() || (userId === "me" ? "Musa Store" : "Brother Store");
-  const cleanUserId = userId === "brother" ? "brother" : "me";
-  if (!cleanEmail || !cleanEmail.includes("@")) {
-    throw new Error("Please enter a valid email address.");
+function buildSafeDomainDocId(ownerId, domain) {
+  const safeOwner = ownerId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+  const safeDomain = domain.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 56);
+  return `${safeOwner}__${safeDomain}`.slice(0, 128);
+}
+async function syncDomainToFirestoreBestEffort(domainDoc) {
+  try {
+    const docId = buildSafeDomainDocId(domainDoc.ownerId, domainDoc.domain);
+    await setFirestoreDoc("email_domains", docId, domainDoc, true);
+  } catch {
   }
-  const parts = cleanEmail.split("@");
-  const extractedDomain = parts[1]?.toLowerCase().trim();
-  if (!extractedDomain || extractedDomain.length < 3 || !extractedDomain.includes(".")) {
-    throw new Error("Invalid email domain. Please enter an email like hello@musa.com");
+}
+async function syncSenderToFirestoreBestEffort(senderDoc) {
+  try {
+    const safeId = senderDoc.id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 128);
+    await setFirestoreDoc("email_senders", safeId, senderDoc, true);
+  } catch {
   }
-  const localStore = loadLocalEmailStore();
-  const existingDomainRec = localStore.domain;
-  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
-  let domainRecord;
-  if (existingDomainRec && existingDomainRec.domain && existingDomainRec.domain.toLowerCase() !== extractedDomain) {
-    console.log(`[Custom Domain Email] Switching shared domain from "${existingDomainRec.domain}" to "${extractedDomain}"...`);
-    const resend = getResendClient();
-    if (resend && existingDomainRec.domainId && !existingDomainRec.domainId.startsWith("dom_")) {
-      try {
-        await resend.domains.remove(existingDomainRec.domainId);
-        console.log(`[Resend] Removed previous domain "${existingDomainRec.domain}" from Resend account.`);
-      } catch (remErr) {
-        console.warn("[Resend] Notice while removing previous domain:", remErr.message);
+}
+async function getUserEmailDomainStatus(ownerId, options = {}) {
+  const cleanOwnerId = sanitizeOwnerId(ownerId);
+  const store = loadEmailStore();
+  let domain = store.domainsByOwner[cleanOwnerId] || null;
+  const senders = store.sendersByOwner[cleanOwnerId] || [];
+  if (!domain) {
+    try {
+      const remoteSender = await getFirestoreDoc("email_users", cleanOwnerId);
+      if (remoteSender && remoteSender.ownerId === cleanOwnerId && remoteSender.domain) {
+        const conflict = Object.values(store.domainsByOwner).find(
+          (d) => d.domain === remoteSender.domain && d.ownerId !== cleanOwnerId
+        );
+        if (!conflict) {
+          const docId = buildSafeDomainDocId(cleanOwnerId, String(remoteSender.domain));
+          const remoteDomain = await getFirestoreDoc("email_domains", docId);
+          if (remoteDomain && remoteDomain.ownerId === cleanOwnerId) {
+            domain = remoteDomain;
+          }
+        }
       }
+    } catch {
     }
   }
-  if (existingDomainRec && existingDomainRec.domain && existingDomainRec.domain.toLowerCase() === extractedDomain && existingDomainRec.domainId) {
-    domainRecord = {
-      ...existingDomainRec,
-      updatedAt: nowIso
-    };
-  } else {
+  if (options.refresh && domain && domain.resendDomainId) {
     const resend = getResendClient();
-    let resendDomainId = `dom_${Date.now().toString(36)}`;
-    let records = [];
-    let domainStatus = "pending";
     if (resend) {
       try {
-        console.log(`[Resend] Registering domain "${extractedDomain}"...`);
-        const { data, error } = await resend.domains.create({ name: extractedDomain });
-        if (error) {
-          console.warn("[Resend] Create domain response:", error.message);
-          if (error.message?.toLowerCase().includes("already exists") || error.message?.toLowerCase().includes("already registered")) {
-            try {
-              const listRes = await resend.domains.list();
-              const found = (listRes.data?.data || []).find(
-                (d) => d.name?.toLowerCase() === extractedDomain
-              );
-              if (found) {
-                const getRes = await resend.domains.get(found.id);
-                resendDomainId = found.id;
-                domainStatus = getRes.data?.status || found.status || "pending";
-                records = formatResendDnsRecords(getRes.data?.records || [], extractedDomain);
-              }
-            } catch (listErr) {
-              console.warn("[Resend] List domains fallback error:", listErr.message);
-            }
-          } else if (error.message?.toLowerCase().includes("free public domains") || error.message?.toLowerCase().includes("domain you own")) {
-            console.log(`[Resend Notice] Domain "${extractedDomain}" is on a free public suffix: generating DNS blueprints.`);
-            domainStatus = "pending_dns";
-            records = formatResendDnsRecords([], extractedDomain);
-          } else {
-            console.warn("[Resend] Non-fatal domain error:", error.message);
-            domainStatus = "pending";
-            records = formatResendDnsRecords([], extractedDomain);
-          }
-        } else if (data) {
-          resendDomainId = data.id;
-          domainStatus = data.status || "pending";
-          records = formatResendDnsRecords(data.records || [], extractedDomain);
+        const { data, error } = await resend.domains.get(domain.resendDomainId);
+        if (!error && data) {
+          const nextStatus = normalizeResendStatus(data.status);
+          domain = {
+            ...domain,
+            status: nextStatus,
+            verified: nextStatus === "verified",
+            region: data.region || domain.region,
+            records: mapResendRecords(data.records),
+            capabilities: data.capabilities || domain.capabilities,
+            updatedAt: (/* @__PURE__ */ new Date()).toISOString(),
+            ...nextStatus === "verified" && !domain.lastVerifiedAt ? { lastVerifiedAt: (/* @__PURE__ */ new Date()).toISOString() } : {}
+          };
+          store.domainsByOwner[cleanOwnerId] = domain;
+          saveEmailStore(store);
+          await syncDomainToFirestoreBestEffort(domain);
         }
-      } catch (apiErr) {
-        console.warn("[Resend] Direct API error, generating DNS blueprints:", apiErr.message);
-        records = formatResendDnsRecords([], extractedDomain);
+      } catch (err) {
+        console.warn("[Resend] Refresh domain status notice:", err?.message || err);
+      }
+    }
+  }
+  const defaultSender = senders.find((s) => s.isDefault) || senders[0] || null;
+  return {
+    domain,
+    sender: defaultSender,
+    senders,
+    resendConfigured: isResendConfigured()
+  };
+}
+async function connectUserCustomDomain(params) {
+  const cleanOwnerId = sanitizeOwnerId(params.ownerId);
+  const { fromName, fromEmail, domain, replyToEmail } = validateCustomDomainSenderInput({
+    fromName: params.fromName,
+    fromEmail: params.fromEmail,
+    replyToEmail: params.replyToEmail
+  });
+  const store = loadEmailStore();
+  const conflictingOwnerDomain = Object.values(store.domainsByOwner).find(
+    (entry) => entry.domain.toLowerCase() === domain && entry.ownerId !== cleanOwnerId
+  );
+  if (conflictingOwnerDomain) {
+    throw new CustomDomainEmailError(
+      `The domain "${domain}" is already registered to another FlowPilot account.`,
+      409,
+      "DOMAIN_OWNED_BY_OTHER_ACCOUNT"
+    );
+  }
+  const resend = requireResendClient();
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  const currentUserDomain = store.domainsByOwner[cleanOwnerId] || null;
+  let storedDomain;
+  let reusedExisting = false;
+  if (currentUserDomain && currentUserDomain.domain.toLowerCase() === domain) {
+    reusedExisting = true;
+    try {
+      const { data, error } = await resend.domains.get(currentUserDomain.resendDomainId);
+      if (!error && data) {
+        const nextStatus = normalizeResendStatus(data.status);
+        storedDomain = {
+          ...currentUserDomain,
+          status: nextStatus,
+          verified: nextStatus === "verified",
+          region: data.region || currentUserDomain.region,
+          records: mapResendRecords(data.records),
+          capabilities: data.capabilities || currentUserDomain.capabilities,
+          updatedAt: nowIso
+        };
+      } else {
+        storedDomain = { ...currentUserDomain, updatedAt: nowIso };
+      }
+    } catch {
+      storedDomain = { ...currentUserDomain, updatedAt: nowIso };
+    }
+  } else {
+    if (currentUserDomain && currentUserDomain.resendDomainId) {
+      try {
+        await resend.domains.remove(currentUserDomain.resendDomainId);
+      } catch (remErr) {
+        console.warn("[Resend] Remove previous domain notice:", remErr?.message || remErr);
+      }
+    }
+    let createdData = null;
+    const createPayload = { name: domain };
+    if (params.region) {
+      createPayload.region = params.region;
+    }
+    const { data, error } = await resend.domains.create(createPayload);
+    if (error) {
+      const msgLower = String(error.message || "").toLowerCase();
+      if (msgLower.includes("already exists") || msgLower.includes("already registered")) {
+        const recheckStore = loadEmailStore();
+        const other = Object.values(recheckStore.domainsByOwner).find(
+          (entry) => entry.domain.toLowerCase() === domain && entry.ownerId !== cleanOwnerId
+        );
+        if (other) {
+          throw new CustomDomainEmailError(
+            `The domain "${domain}" is already registered to another FlowPilot account.`,
+            409,
+            "DOMAIN_OWNED_BY_OTHER_ACCOUNT"
+          );
+        }
+        const listRes = await resend.domains.list();
+        const found = (listRes.data?.data || []).find(
+          (d) => String(d.name || "").toLowerCase() === domain
+        );
+        if (!found) {
+          throw new CustomDomainEmailError(
+            `Resend reported domain "${domain}" already exists, but it could not be retrieved: ${error.message}`,
+            409,
+            "RESEND_DOMAIN_CONFLICT"
+          );
+        }
+        const getRes = await resend.domains.get(found.id);
+        if (getRes.error || !getRes.data) {
+          throw new CustomDomainEmailError(
+            getRes.error?.message || `Failed to retrieve existing Resend domain "${domain}".`,
+            502,
+            "RESEND_API_ERROR"
+          );
+        }
+        createdData = getRes.data;
+        reusedExisting = true;
+      } else {
+        throw new CustomDomainEmailError(
+          error.message || `Failed to register domain "${domain}" with Resend.`,
+          400,
+          "RESEND_DOMAIN_CREATE_FAILED"
+        );
       }
     } else {
-      records = formatResendDnsRecords([], extractedDomain);
+      createdData = data;
     }
-    if (records.length === 0) {
-      records = formatResendDnsRecords([], extractedDomain);
+    if (!createdData || !createdData.id) {
+      throw new CustomDomainEmailError(
+        "Resend did not return a valid domain ID. Please verify your server configuration.",
+        502,
+        "RESEND_INVALID_RESPONSE"
+      );
     }
-    domainRecord = {
-      domain: extractedDomain,
-      domainId: resendDomainId,
-      status: domainStatus,
-      verified: domainStatus === "verified",
-      records,
+    const mappedStatus = normalizeResendStatus(createdData.status);
+    storedDomain = {
+      id: buildSafeDomainDocId(cleanOwnerId, domain),
+      ownerId: cleanOwnerId,
+      domain,
+      resendDomainId: String(createdData.id),
+      status: mappedStatus,
+      verified: mappedStatus === "verified",
+      region: createdData.region ? String(createdData.region) : "us-east-1",
+      records: mapResendRecords(createdData.records),
+      capabilities: createdData.capabilities || void 0,
+      createdAt: createdData.created_at || nowIso,
+      updatedAt: nowIso,
+      ...mappedStatus === "verified" ? { lastVerifiedAt: nowIso } : {}
+    };
+  }
+  const existingSenders = store.sendersByOwner[cleanOwnerId] || [];
+  const matchingIdx = existingSenders.findIndex(
+    (s) => s.fromEmail.toLowerCase() === fromEmail && s.domain === domain
+  );
+  let savedSender;
+  let updatedSenders;
+  if (matchingIdx >= 0) {
+    savedSender = {
+      ...existingSenders[matchingIdx],
+      fromName,
+      fromEmail,
+      ...replyToEmail ? { replyToEmail } : {},
+      isDefault: true,
+      updatedAt: nowIso
+    };
+    updatedSenders = existingSenders.map(
+      (s, idx) => idx === matchingIdx ? savedSender : { ...s, isDefault: false }
+    );
+  } else {
+    const senderId = `snd_${cleanOwnerId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 48)}_${Date.now().toString(36)}`;
+    savedSender = {
+      id: senderId,
+      ownerId: cleanOwnerId,
+      domain,
+      fromName,
+      fromEmail,
+      ...replyToEmail ? { replyToEmail } : {},
+      isDefault: true,
       createdAt: nowIso,
       updatedAt: nowIso
     };
+    const sameDomainOthers = existingSenders.filter((s) => s.domain === domain).map((s) => ({ ...s, isDefault: false }));
+    updatedSenders = [savedSender, ...sameDomainOthers].slice(0, 10);
   }
-  localStore.domain = domainRecord;
-  try {
-    await setFirestoreDoc("email_domains", domainRecord.domain, domainRecord, true);
-  } catch (fsErr) {
-    console.warn("[Firestore email_domains] Save notice:", fsErr.message);
-  }
-  const userRecord = {
-    userId: cleanUserId,
-    fromName: cleanName,
-    fromEmail: cleanEmail,
-    domain: extractedDomain,
-    updatedAt: nowIso
-  };
-  localStore.users[cleanUserId] = userRecord;
-  const otherUserId = cleanUserId === "me" ? "brother" : "me";
-  const otherPrefix = otherUserId === "brother" ? "support" : "hello";
-  const otherName = otherUserId === "brother" ? "Brother Store" : "Musa Store";
-  const otherEmail = `${otherPrefix}@${extractedDomain}`;
-  const existingOther = localStore.users[otherUserId];
-  if (!existingOther || existingOther.domain !== extractedDomain) {
-    const updatedOther = {
-      userId: otherUserId,
-      fromName: existingOther?.fromName || otherName,
-      fromEmail: otherEmail,
-      domain: extractedDomain,
-      updatedAt: nowIso
-    };
-    localStore.users[otherUserId] = updatedOther;
-    try {
-      await setFirestoreDoc("email_users", otherUserId, updatedOther, true);
-    } catch {
-    }
-  }
-  try {
-    await setFirestoreDoc("email_users", cleanUserId, userRecord, true);
-  } catch (fsErr) {
-    console.warn("[Firestore email_users] Save notice:", fsErr.message);
-  }
-  saveLocalEmailStore(localStore);
+  store.domainsByOwner[cleanOwnerId] = storedDomain;
+  store.sendersByOwner[cleanOwnerId] = updatedSenders;
+  saveEmailStore(store);
+  await syncDomainToFirestoreBestEffort(storedDomain);
+  await syncSenderToFirestoreBestEffort(savedSender);
   return {
-    domain: domainRecord.domain,
-    domainId: domainRecord.domainId,
-    records: domainRecord.records,
-    verified: domainRecord.verified,
-    status: domainRecord.status,
-    users: localStore.users
+    domain: storedDomain,
+    sender: savedSender,
+    senders: updatedSenders,
+    reusedExisting
   };
 }
-async function verifySharedDomain(domainIdParam) {
-  const localStore = loadLocalEmailStore();
-  let domainRecord = localStore.domain;
-  if (!domainRecord) {
-    throw new Error("No custom domain configured yet. Please add your email and domain first.");
+async function verifyUserEmailDomain(ownerId) {
+  const cleanOwnerId = sanitizeOwnerId(ownerId);
+  const store = loadEmailStore();
+  const domainRecord = store.domainsByOwner[cleanOwnerId];
+  if (!domainRecord || !domainRecord.resendDomainId) {
+    throw new CustomDomainEmailError(
+      "No custom domain is connected to your account yet. Save your From Name and From Email first.",
+      404,
+      "DOMAIN_NOT_FOUND"
+    );
   }
-  const domainName = domainRecord.domain;
-  const domainId = domainIdParam || domainRecord.domainId;
+  const resend = requireResendClient();
+  const verifyRes = await resend.domains.verify(domainRecord.resendDomainId);
+  if (verifyRes.error) {
+    throw new CustomDomainEmailError(
+      verifyRes.error.message || "Resend failed to trigger DNS verification.",
+      502,
+      "RESEND_VERIFY_FAILED"
+    );
+  }
+  const getRes = await resend.domains.get(domainRecord.resendDomainId);
+  if (getRes.error || !getRes.data) {
+    throw new CustomDomainEmailError(
+      getRes.error?.message || "Failed to retrieve updated domain verification state from Resend.",
+      502,
+      "RESEND_GET_FAILED"
+    );
+  }
+  const nextStatus = normalizeResendStatus(getRes.data.status);
+  const isVerified = nextStatus === "verified";
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  const updatedDomain = {
+    ...domainRecord,
+    status: nextStatus,
+    verified: isVerified,
+    region: getRes.data.region || domainRecord.region,
+    records: mapResendRecords(getRes.data.records),
+    capabilities: getRes.data.capabilities || domainRecord.capabilities,
+    updatedAt: nowIso,
+    ...isVerified ? { lastVerifiedAt: nowIso } : {}
+  };
+  store.domainsByOwner[cleanOwnerId] = updatedDomain;
+  saveEmailStore(store);
+  await syncDomainToFirestoreBestEffort(updatedDomain);
+  return {
+    domain: updatedDomain,
+    verified: isVerified,
+    status: nextStatus,
+    records: updatedDomain.records
+  };
+}
+async function updateUserEmailSender(params) {
+  const cleanOwnerId = sanitizeOwnerId(params.ownerId);
+  const { fromName, fromEmail, domain, replyToEmail } = validateCustomDomainSenderInput({
+    fromName: params.fromName,
+    fromEmail: params.fromEmail,
+    replyToEmail: params.replyToEmail
+  });
+  const store = loadEmailStore();
+  const existingDomain = store.domainsByOwner[cleanOwnerId];
+  if (!existingDomain) {
+    throw new CustomDomainEmailError(
+      "Please connect a custom domain first before updating your sender identity.",
+      400,
+      "DOMAIN_NOT_CONFIGURED"
+    );
+  }
+  if (existingDomain.domain.toLowerCase() !== domain) {
+    throw new CustomDomainEmailError(
+      `Sender email domain "${domain}" does not match your connected domain "${existingDomain.domain}". Register the new domain first if you want to switch domains.`,
+      400,
+      "SENDER_DOMAIN_MISMATCH"
+    );
+  }
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  const existingSenders = store.sendersByOwner[cleanOwnerId] || [];
+  const primary = existingSenders.find((s) => s.isDefault) || existingSenders[0];
+  const updatedSender = primary ? {
+    ...primary,
+    fromName,
+    fromEmail,
+    replyToEmail,
+    isDefault: true,
+    updatedAt: nowIso
+  } : {
+    id: `snd_${cleanOwnerId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 48)}_${Date.now().toString(36)}`,
+    ownerId: cleanOwnerId,
+    domain,
+    fromName,
+    fromEmail,
+    replyToEmail,
+    isDefault: true,
+    createdAt: nowIso,
+    updatedAt: nowIso
+  };
+  const nextSenders = primary ? existingSenders.map((s) => s.id === primary.id ? updatedSender : { ...s, isDefault: false }) : [updatedSender];
+  store.sendersByOwner[cleanOwnerId] = nextSenders;
+  saveEmailStore(store);
+  await syncSenderToFirestoreBestEffort(updatedSender);
+  return {
+    domain: existingDomain,
+    sender: updatedSender,
+    senders: nextSenders
+  };
+}
+async function deleteUserEmailDomain(ownerId) {
+  const cleanOwnerId = sanitizeOwnerId(ownerId);
+  const store = loadEmailStore();
+  const existingDomain = store.domainsByOwner[cleanOwnerId];
+  if (!existingDomain) {
+    delete store.sendersByOwner[cleanOwnerId];
+    saveEmailStore(store);
+    return { removedDomain: null };
+  }
   const resend = getResendClient();
-  if (resend && domainId && !domainId.startsWith("dom_")) {
+  if (resend && existingDomain.resendDomainId) {
     try {
-      try {
-        await resend.domains.verify(domainId);
-      } catch {
-      }
-      const { data, error } = await resend.domains.get(domainId);
+      const { error } = await resend.domains.remove(existingDomain.resendDomainId);
       if (error) {
-        console.warn("[Resend] verify domain notice:", error.message);
-      } else if (data && data.status === "verified") {
-        domainRecord.status = "verified";
-        domainRecord.verified = true;
-        domainRecord.records = formatResendDnsRecords(data.records || [], domainName);
-        domainRecord.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-        localStore.domain = domainRecord;
-        saveLocalEmailStore(localStore);
-        try {
-          await setFirestoreDoc("email_domains", domainName, domainRecord, true);
-        } catch {
+        const msg = String(error.message || "").toLowerCase();
+        if (!msg.includes("not found") && !msg.includes("404")) {
+          throw new CustomDomainEmailError(
+            `Failed to remove domain from Resend: ${error.message}`,
+            502,
+            "RESEND_REMOVE_FAILED"
+          );
         }
-        return {
-          verified: true,
-          status: "verified",
-          records: domainRecord.records,
-          domain: domainName
-        };
       }
     } catch (err) {
-      console.warn("[Resend] Domain verify error:", err.message);
+      if (err instanceof CustomDomainEmailError) throw err;
+      throw new CustomDomainEmailError(
+        err?.message || "Failed to delete domain from Resend.",
+        502,
+        "RESEND_REMOVE_FAILED"
+      );
     }
   }
-  try {
-    const dns = await import("node:dns/promises");
-    let spfVerified = false;
-    let dkimVerified = false;
-    let dmarcVerified = false;
-    try {
-      const spfTxt = await dns.resolveTxt(`send.${domainName}`);
-      const joinedSpf = spfTxt.flat().join(" ");
-      if (joinedSpf.includes("v=spf1") || joinedSpf.includes("amazonses.com")) {
-        spfVerified = true;
-      }
-    } catch (e) {
-      console.log(`[DNS check] SPF record on send.${domainName}: ${e.code || e.message}`);
+  const removedName = existingDomain.domain;
+  delete store.domainsByOwner[cleanOwnerId];
+  delete store.sendersByOwner[cleanOwnerId];
+  saveEmailStore(store);
+  return { removedDomain: removedName };
+}
+async function sendCustomDomainEmail(params) {
+  const cleanOwnerId = sanitizeOwnerId(params.ownerId);
+  const store = loadEmailStore();
+  const domainRecord = store.domainsByOwner[cleanOwnerId];
+  const senders = store.sendersByOwner[cleanOwnerId] || [];
+  const defaultSender = senders.find((s) => s.isDefault) || senders[0];
+  if (!domainRecord) {
+    throw new CustomDomainEmailError(
+      "No custom domain is connected to your account. Go to Settings \u2192 Email Automation to connect and verify your custom domain before sending emails.",
+      400,
+      "DOMAIN_NOT_CONFIGURED"
+    );
+  }
+  if (!domainRecord.verified || domainRecord.status !== "verified") {
+    throw new CustomDomainEmailError(
+      `Domain "${domainRecord.domain}" is not verified yet (status: ${domainRecord.status}). Please add all required DNS records and verify your domain before sending automated or test emails.`,
+      403,
+      "DOMAIN_NOT_VERIFIED"
+    );
+  }
+  const recipients = (Array.isArray(params.to) ? params.to : [params.to]).map((r) => String(r || "").trim().toLowerCase()).filter((r) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(r));
+  if (recipients.length === 0) {
+    throw new CustomDomainEmailError("A valid recipient email address is required.", 400, "INVALID_RECIPIENT");
+  }
+  const cleanSubject = sanitizeHeaderString(params.subject, 200);
+  if (!cleanSubject) {
+    throw new CustomDomainEmailError("Email subject is required.", 400, "MISSING_SUBJECT");
+  }
+  let activeFromEmail = defaultSender?.fromEmail || `hello@${domainRecord.domain}`;
+  if (params.fromEmailOverride && params.fromEmailOverride.includes("@")) {
+    const candidate = params.fromEmailOverride.trim().toLowerCase();
+    const candidateDomain = normalizeDomain(candidate.split("@")[1] || "");
+    if (candidateDomain === domainRecord.domain.toLowerCase()) {
+      activeFromEmail = candidate;
     }
-    try {
-      const dkimTxt = await dns.resolveTxt(`resend._domainkey.${domainName}`);
-      const joinedDkim = dkimTxt.flat().join(" ");
-      if (joinedDkim.includes("k=rsa") || joinedDkim.includes("MIGfMA0G")) {
-        dkimVerified = true;
-      }
-    } catch (e) {
-      console.log(`[DNS check] DKIM record on resend._domainkey.${domainName}: ${e.code || e.message}`);
-    }
-    try {
-      const dmarcTxt = await dns.resolveTxt(`_dmarc.${domainName}`);
-      const joinedDmarc = dmarcTxt.flat().join(" ");
-      if (joinedDmarc.includes("v=DMARC1")) {
-        dmarcVerified = true;
-      }
-    } catch (e) {
-      console.log(`[DNS check] DMARC record on _dmarc.${domainName}: ${e.code || e.message}`);
-    }
-    const updatedRecords = (domainRecord.records || []).map((rec) => {
-      const recType = (rec.record || rec.type || "").toUpperCase();
-      const recName = (rec.name || "").toLowerCase();
-      let recordStatus = rec.status || "pending";
-      if (recType.includes("SPF") || recName.startsWith("send.")) {
-        if (spfVerified) recordStatus = "verified";
-      } else if (recType.includes("DKIM") || recName.includes("_domainkey")) {
-        if (dkimVerified) recordStatus = "verified";
-      } else if (recType.includes("DMARC") || recName.startsWith("_dmarc")) {
-        if (dmarcVerified) recordStatus = "verified";
-      }
-      return {
-        ...rec,
-        status: recordStatus
-      };
-    });
-    const isFullyVerified = spfVerified && (dkimVerified || dmarcVerified);
-    domainRecord.verified = isFullyVerified;
-    domainRecord.status = isFullyVerified ? "verified" : "pending";
-    domainRecord.records = updatedRecords;
-    domainRecord.updatedAt = (/* @__PURE__ */ new Date()).toISOString();
-    localStore.domain = domainRecord;
-    saveLocalEmailStore(localStore);
-    try {
-      await setFirestoreDoc("email_domains", domainName, domainRecord, true);
-    } catch {
-    }
-    return {
-      verified: isFullyVerified,
-      status: domainRecord.status,
-      records: domainRecord.records,
-      domain: domainName
-    };
-  } catch (dnsErr) {
-    console.warn("[Direct DNS verify] Resolver notice:", dnsErr.message);
+  }
+  const activeFromName = sanitizeHeaderString(
+    params.fromNameOverride || defaultSender?.fromName || domainRecord.domain,
+    100
+  );
+  const formattedFrom = `${activeFromName} <${activeFromEmail}>`;
+  const resend = requireResendClient();
+  const htmlContent = params.html ? String(params.html) : void 0;
+  const textContent = params.text ? String(params.text) : htmlContent ? htmlContent.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() : void 0;
+  if (!htmlContent && !textContent) {
+    throw new CustomDomainEmailError("Email body (html or text) is required.", 400, "MISSING_BODY");
+  }
+  const resolvedText = textContent || (htmlContent ? htmlContent.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() : "") || cleanSubject;
+  const cleanAttachments = Array.isArray(params.attachments) ? params.attachments.filter((a) => a && a.filename && a.content).slice(0, 10).map((a) => ({
+    filename: sanitizeHeaderString(a.filename, 140),
+    content: Buffer.from(String(a.content), "base64"),
+    ...a.contentType ? { contentType: sanitizeHeaderString(a.contentType, 80) } : {}
+  })) : void 0;
+  const { data, error } = await resend.emails.send({
+    from: formattedFrom,
+    to: recipients,
+    subject: cleanSubject,
+    text: resolvedText,
+    ...htmlContent ? { html: htmlContent } : {},
+    ...params.replyTo || defaultSender?.replyToEmail ? { replyTo: params.replyTo || defaultSender?.replyToEmail } : {},
+    ...cleanAttachments && cleanAttachments.length > 0 ? { attachments: cleanAttachments } : {}
+  });
+  if (error) {
+    throw new CustomDomainEmailError(
+      error.message || "Resend failed to send email.",
+      502,
+      "RESEND_SEND_FAILED"
+    );
   }
   return {
-    verified: domainRecord.verified,
-    status: domainRecord.status,
-    records: domainRecord.records,
+    success: true,
+    id: data?.id,
+    from: formattedFrom,
+    to: recipients,
+    subject: cleanSubject,
+    provider: "Resend Custom Domain API",
     domain: domainRecord.domain
   };
 }
-async function sendEmailAsUser(params) {
-  const { userId, to, subject, html, text } = params;
-  const cleanUserId = userId === "brother" ? "brother" : "me";
-  if (!to || !to.includes("@")) {
-    throw new Error("Valid recipient email (to) is required.");
+async function checkCustomDomainSendReadiness(ownerId) {
+  if (!ownerId) {
+    return {
+      allowed: false,
+      reason: "Authenticated user required to send automated custom-domain emails."
+    };
   }
-  if (!subject) {
-    throw new Error("Email subject is required.");
+  const store = loadEmailStore();
+  const domainRecord = store.domainsByOwner[ownerId];
+  const senders = store.sendersByOwner[ownerId] || [];
+  const defaultSender = senders.find((s) => s.isDefault) || senders[0];
+  if (!domainRecord) {
+    return {
+      allowed: false,
+      reason: "Custom sending domain not configured. Open Settings \u2192 Email Automation to connect and verify your domain before sending automated emails."
+    };
   }
-  const users = await getEmailUsers();
-  const user = users[cleanUserId];
-  if (!user || !user.fromEmail) {
-    throw new Error(
-      `Sender details for user "${cleanUserId}" not configured yet. Please configure it in /dashboard/settings/email`
+  if (!domainRecord.verified || domainRecord.status !== "verified") {
+    return {
+      allowed: false,
+      domain: domainRecord.domain,
+      status: domainRecord.status,
+      reason: `Sending blocked: custom domain "${domainRecord.domain}" is currently "${domainRecord.status}". Add your DNS records and complete domain verification in Settings \u2192 Email Automation.`
+    };
+  }
+  return {
+    allowed: true,
+    domain: domainRecord.domain,
+    status: domainRecord.status,
+    fromEmail: defaultSender?.fromEmail || `hello@${domainRecord.domain}`,
+    fromName: defaultSender?.fromName || domainRecord.domain
+  };
+}
+async function handleResendWebhookEvent(params) {
+  const webhookSecret = (process.env.RESEND_WEBHOOK_SECRET || "").trim();
+  if (!webhookSecret || webhookSecret === "your_resend_webhook_secret_here") {
+    throw new CustomDomainEmailError(
+      "RESEND_WEBHOOK_SECRET is not configured on this server.",
+      503,
+      "WEBHOOK_SECRET_NOT_CONFIGURED"
     );
   }
-  const fromAddress = `${user.fromName} <${user.fromEmail}>`;
-  const resend = getResendClient();
-  if (!resend) {
-    throw new Error("RESEND_API_KEY is not configured in server environment.");
+  if (!params.svixId || !params.svixTimestamp || !params.svixSignature) {
+    throw new CustomDomainEmailError(
+      "Missing Svix webhook signature headers.",
+      400,
+      "MISSING_WEBHOOK_HEADERS"
+    );
   }
-  const bodyContent = html || text || "<p>Hello from FlowPilot!</p>";
-  console.log(`[Resend] Dispatching email from ${fromAddress} to ${to}...`);
+  const resend = requireResendClient();
+  let event;
   try {
-    const { data, error } = await resend.emails.send({
-      from: fromAddress,
-      to: [to],
-      subject,
-      html: bodyContent,
-      text: text || void 0
+    event = resend.webhooks.verify({
+      payload: params.rawBody,
+      headers: {
+        id: params.svixId,
+        timestamp: params.svixTimestamp,
+        signature: params.svixSignature
+      },
+      webhookSecret
     });
-    if (error) {
-      console.warn("[Resend] Send error:", error.message);
-      if (error.message?.includes("domain is not verified") || error.message?.includes("from_address") || error.message?.includes("validation_error")) {
-        try {
-          const fallbackRes = await resend.emails.send({
-            from: `${user.fromName} <onboarding@resend.dev>`,
-            to: [to],
-            replyTo: user.fromEmail,
-            subject,
-            html: bodyContent,
-            text: text || void 0
-          });
-          if (fallbackRes.data?.id) {
-            return {
-              success: true,
-              id: fallbackRes.data.id,
-              from: `${user.fromName} <${user.fromEmail}> (via Resend: onboarding@resend.dev)`,
-              to,
-              subject,
-              provider: "Resend API (Live Relay)"
-            };
-          }
-        } catch {
-        }
-        throw new Error(
-          `Domain ${user.domain} is not yet verified with DNS records in Resend. Please add the DNS records and click "Verify Domain". (Resend message: ${error.message})`
-        );
-      }
-      throw new Error(`Resend error: ${error.message}`);
-    }
-    return {
-      success: true,
-      id: data?.id,
-      from: fromAddress,
-      to,
-      subject,
-      provider: "Resend Transactional API"
-    };
   } catch (err) {
-    console.error("[Resend] Send exception:", err);
-    throw err;
+    throw new CustomDomainEmailError(
+      `Invalid Resend webhook signature: ${err?.message || "Verification failed"}`,
+      401,
+      "INVALID_WEBHOOK_SIGNATURE"
+    );
   }
+  const eventType = String(event?.type || "unknown");
+  const eventData = event?.data || {};
+  const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+  const store = loadEmailStore();
+  let domainUpdated;
+  const bouncedRecipients = [];
+  if (eventType.startsWith("domain.")) {
+    const resendId = String(eventData.id || "");
+    const domainName = normalizeDomain(String(eventData.name || ""));
+    for (const [ownerId, rec] of Object.entries(store.domainsByOwner)) {
+      if (resendId && rec.resendDomainId === resendId || domainName && rec.domain.toLowerCase() === domainName) {
+        const nextStatus = normalizeResendStatus(eventData.status);
+        const updated = {
+          ...rec,
+          status: nextStatus,
+          verified: nextStatus === "verified",
+          records: Array.isArray(eventData.records) ? mapResendRecords(eventData.records) : rec.records,
+          lastWebhookEvent: `${eventType} (${nowIso})`,
+          updatedAt: nowIso,
+          ...nextStatus === "verified" ? { lastVerifiedAt: nowIso } : {}
+        };
+        store.domainsByOwner[ownerId] = updated;
+        domainUpdated = updated.domain;
+        await syncDomainToFirestoreBestEffort(updated);
+      }
+    }
+  } else if (eventType.startsWith("email.")) {
+    const toList = Array.isArray(eventData.to) ? eventData.to.map((x) => String(x || "")).filter(Boolean) : eventData.to ? [String(eventData.to)] : [];
+    if (eventType === "email.bounced" || eventType === "email.complained") {
+      bouncedRecipients.push(...toList);
+    }
+    store.webhookLogs.unshift({
+      id: `wh_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      resendEmailId: eventData.email_id ? String(eventData.email_id) : void 0,
+      eventType,
+      from: eventData.from ? String(eventData.from) : void 0,
+      to: toList.join(", "),
+      subject: eventData.subject ? String(eventData.subject) : void 0,
+      detail: eventData.bounce?.message || eventData.reason || eventType,
+      createdAt: event?.created_at || nowIso
+    });
+    if (store.webhookLogs.length > 150) {
+      store.webhookLogs.length = 150;
+    }
+  }
+  saveEmailStore(store);
+  return {
+    handled: true,
+    eventType,
+    domainUpdated,
+    bouncedRecipients: bouncedRecipients.length > 0 ? bouncedRecipients : void 0
+  };
+}
+function getUserEmailDeliveryLogs(ownerId) {
+  const cleanOwnerId = sanitizeOwnerId(ownerId);
+  const store = loadEmailStore();
+  const domain = store.domainsByOwner[cleanOwnerId]?.domain?.toLowerCase();
+  if (!domain) return [];
+  return store.webhookLogs.filter((entry) => {
+    if (entry.ownerId && entry.ownerId === cleanOwnerId) return true;
+    if (entry.from && entry.from.toLowerCase().includes(`@${domain}`)) return true;
+    return false;
+  }).slice(0, 30);
 }
 
 // src/lib/automation/runner.ts
@@ -1286,16 +2152,16 @@ async function executeWorkflow(workflowId, leadPhone, leadMessage, options = {})
         const targetUser = workflow.userId || options.userId || "default_workspace";
         let delivered = false;
         try {
-          if (options.sock && typeof options.sock.sendMessage === "function") {
-            await options.sock.sendMessage(leadPhone, { text: messageText });
+          const instanceName = buildEvolutionInstanceName(targetUser);
+          const evoRes = await sendWhatsAppViaEvolution(instanceName, leadPhone, messageText);
+          if (evoRes.ok) {
             delivered = true;
+            console.log(`[Workflow Runner] Auto responded to ${leadPhone} via Evolution (${instanceName}) \xB7 Workflow "${workflow.name}" (Node: ${currentId})`);
           } else {
-            const sendRes = await sendWhatsAppMessage(targetUser, leadPhone, messageText);
-            delivered = Boolean(sendRes.ok);
+            console.warn(`[Workflow Runner] Could not send WhatsApp to ${leadPhone} (${instanceName}): ${evoRes.error || evoRes.detail}`);
           }
-          console.log(`[Workflow Runner] Auto responded to ${leadPhone} via Workflow "${workflow.name}" (Node: ${currentId})`);
         } catch (sendErr) {
-          console.error(`[Workflow Runner] Error sending message to ${leadPhone}:`, sendErr.message);
+          console.warn(`[Workflow Runner] WhatsApp dispatch notice for ${leadPhone}:`, sendErr?.message || sendErr);
         }
         result.immediateActionsDispatched.push({
           nodeId: currentId,
@@ -1310,21 +2176,23 @@ async function executeWorkflow(workflowId, leadPhone, leadMessage, options = {})
         continue;
       }
       if (type === "action_send_email") {
-        const senderPersona = currentNode.data?.emailSenderPersona || "me";
+        const targetOwnerId = workflow.userId || options.userId || "";
         const msg = currentNode.data?.message || "";
-        let delivered = true;
-        if (leadPhone && leadPhone.includes("@")) {
+        const subject = currentNode.data?.emailSubject || `Update from ${workflow.name}`;
+        let delivered = false;
+        if (leadPhone && leadPhone.includes("@") && targetOwnerId) {
           try {
-            await sendEmailAsUser({
-              userId: senderPersona,
+            await sendCustomDomainEmail({
+              ownerId: targetOwnerId,
               to: leadPhone,
-              subject: `Update from ${workflow.name}`,
+              subject,
               html: msg,
-              text: msg
+              text: msg.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()
             });
             delivered = true;
           } catch (err) {
-            console.warn("[Workflow Runner] Email dispatch notice:", err.message);
+            console.warn("[Workflow Runner] Email dispatch blocked/notice:", err.message);
+            delivered = false;
           }
         }
         result.immediateActionsDispatched.push({
@@ -1563,10 +2431,10 @@ async function getSessionConnectionStatus(userId = "default_workspace") {
 
 // src/services/whatsappBaileysService.ts
 var logger = pino({ level: "silent" });
-var SESSIONS_DIR = path4.join(process.cwd(), "whatsapp-sessions");
-if (!fs4.existsSync(SESSIONS_DIR)) {
+var SESSIONS_DIR = path5.join(process.cwd(), "whatsapp-sessions");
+if (!fs5.existsSync(SESSIONS_DIR)) {
   try {
-    fs4.mkdirSync(SESSIONS_DIR, { recursive: true });
+    fs5.mkdirSync(SESSIONS_DIR, { recursive: true });
   } catch (err) {
     console.error("Failed to create whatsapp-sessions directory:", err);
   }
@@ -1585,17 +2453,17 @@ function formatWhatsAppNumber(phone) {
 }
 function getMetaFilePath(userId) {
   const safeUser = userId.replace(/[^a-zA-Z0-9_-]/g, "_");
-  return path4.join(SESSIONS_DIR, `${safeUser}.json`);
+  return path5.join(SESSIONS_DIR, `${safeUser}.json`);
 }
 function getUserSessionDir(userId) {
   const safeUser = userId.replace(/[^a-zA-Z0-9_-]/g, "_");
-  return path4.join(SESSIONS_DIR, safeUser);
+  return path5.join(SESSIONS_DIR, safeUser);
 }
 function loadSessionMeta(userId) {
   try {
     const metaFile = getMetaFilePath(userId);
-    if (fs4.existsSync(metaFile)) {
-      const raw = fs4.readFileSync(metaFile, "utf-8");
+    if (fs5.existsSync(metaFile)) {
+      const raw = fs5.readFileSync(metaFile, "utf-8");
       return JSON.parse(raw);
     }
   } catch (err) {
@@ -1613,7 +2481,7 @@ function saveSessionMeta(userId, data) {
       userId,
       updatedAt: (/* @__PURE__ */ new Date()).toISOString()
     };
-    fs4.writeFileSync(metaFile, JSON.stringify(updated, null, 2), "utf-8");
+    fs5.writeFileSync(metaFile, JSON.stringify(updated, null, 2), "utf-8");
   } catch (err) {
     console.error(`[Baileys] Error saving meta file for ${userId}:`, err);
   }
@@ -1698,7 +2566,7 @@ async function getOrStartWhatsAppSession(userId = "default_workspace", forceRefr
               status: "pending",
               createdAt: (/* @__PURE__ */ new Date()).toISOString()
             }).catch((err) => console.warn("[Baileys] Firestore whatsapp_qr save error:", err.message));
-            const qrDataUrl = await QRCode.toDataURL(qr, {
+            const qrDataUrl = await QRCode3.toDataURL(qr, {
               width: 320,
               margin: 2,
               color: {
@@ -1975,12 +2843,12 @@ function disconnectWhatsAppSession(userId = "default_workspace") {
   });
   try {
     const sessionDir = getUserSessionDir(cleanUserId);
-    if (fs4.existsSync(sessionDir)) {
-      fs4.rmSync(sessionDir, { recursive: true, force: true });
+    if (fs5.existsSync(sessionDir)) {
+      fs5.rmSync(sessionDir, { recursive: true, force: true });
     }
     const metaFile = getMetaFilePath(cleanUserId);
-    if (fs4.existsSync(metaFile)) {
-      fs4.unlinkSync(metaFile);
+    if (fs5.existsSync(metaFile)) {
+      fs5.unlinkSync(metaFile);
     }
   } catch (err) {
     console.error(`[Baileys] Error deleting session files for ${cleanUserId}:`, err);
@@ -2024,8 +2892,8 @@ async function sendWhatsAppMessage(userId = "default_workspace", to, message) {
 }
 async function autoRestoreSavedWhatsAppSessions() {
   try {
-    if (!fs4.existsSync(SESSIONS_DIR)) return;
-    const entries = fs4.readdirSync(SESSIONS_DIR);
+    if (!fs5.existsSync(SESSIONS_DIR)) return;
+    const entries = fs5.readdirSync(SESSIONS_DIR);
     for (const entry of entries) {
       if (entry.endsWith(".json")) {
         const userId = entry.replace(/\.json$/, "");
@@ -2060,37 +2928,61 @@ async function runFollowUpCron() {
   for (const job of pendingJobs) {
     try {
       const targetUser = job.userId || "default_workspace";
-      const cleanPhone = job.leadPhone;
+      const cleanRecipient = job.leadPhone;
       const messageText = job.message;
-      const sock = activeSockets.get(targetUser) || activeSockets.get("default_workspace");
-      let delivered = false;
-      if (sock && typeof sock.sendMessage === "function") {
-        const jid = cleanPhone.includes("@") ? cleanPhone : `${cleanPhone.replace(/[^0-9]/g, "")}@s.whatsapp.net`;
-        await sock.sendMessage(jid, { text: messageText });
-        delivered = true;
-      } else {
-        const res = await sendWhatsAppMessage(targetUser, cleanPhone, messageText);
-        delivered = Boolean(res.ok);
+      if (job.actionType === "action_send_email" && cleanRecipient.includes("@")) {
+        const emailResult = await sendCustomDomainEmail({
+          ownerId: targetUser,
+          to: cleanRecipient,
+          subject: "Follow-Up from FlowPilot Automation",
+          html: messageText
+        });
+        await updateJobStatus(job.id, "sent");
+        summary.sentCount++;
+        summary.jobsProcessed.push({
+          jobId: job.id,
+          leadPhone: job.leadPhone,
+          status: "sent",
+          messagePreview: `${emailResult.from} -> ${messageText.slice(0, 60)}`
+        });
+        continue;
       }
-      await updateJobStatus(job.id, "sent");
-      summary.sentCount++;
-      summary.jobsProcessed.push({
-        jobId: job.id,
-        leadPhone: job.leadPhone,
-        status: "sent",
-        messagePreview: messageText.slice(0, 80)
-      });
-      console.log(`[FollowUp Cron] \u2713 Sent drip follow-up to ${cleanPhone} (Job ID: ${job.id})`);
+      const instanceName = buildEvolutionInstanceName(targetUser);
+      const evoRes = await sendWhatsAppViaEvolution(instanceName, cleanRecipient, messageText);
+      if (evoRes.ok) {
+        await updateJobStatus(job.id, "sent");
+        summary.sentCount++;
+        summary.jobsProcessed.push({
+          jobId: job.id,
+          leadPhone: job.leadPhone,
+          status: "sent",
+          messagePreview: messageText.slice(0, 80)
+        });
+        console.log(`[FollowUp Cron] \u2713 Sent drip follow-up to ${cleanRecipient} via ${instanceName} (Job ID: ${job.id})`);
+      } else {
+        const reason = evoRes.error || evoRes.detail || `Instance ${instanceName} is disconnected.`;
+        console.warn(`[FollowUp Cron] Notice for job ${job.id} (${cleanRecipient}): ${reason}`);
+        await updateJobStatus(job.id, "failed", reason);
+        summary.failedCount++;
+        summary.jobsProcessed.push({
+          jobId: job.id,
+          leadPhone: job.leadPhone,
+          status: "failed",
+          messagePreview: messageText.slice(0, 80),
+          error: reason
+        });
+      }
     } catch (err) {
-      console.error(`[FollowUp Cron] \u2717 Error sending job ${job.id} to ${job.leadPhone}:`, err.message);
-      await updateJobStatus(job.id, "failed", err.message);
+      const reason = err?.message || "Unexpected follow-up dispatch failure";
+      console.warn(`[FollowUp Cron] Notice sending job ${job.id} to ${job.leadPhone}: ${reason}`);
+      await updateJobStatus(job.id, "failed", reason);
       summary.failedCount++;
       summary.jobsProcessed.push({
         jobId: job.id,
         leadPhone: job.leadPhone,
         status: "failed",
         messagePreview: job.message.slice(0, 80),
-        error: err.message
+        error: reason
       });
     }
   }
@@ -2108,15 +3000,399 @@ function startFollowUpCronDaemon() {
   }, 60 * 1e3);
 }
 
+// src/lib/serverAuth.ts
+import crypto from "node:crypto";
+import fs6 from "node:fs";
+import path6 from "node:path";
+import { fileURLToPath as fileURLToPath3 } from "node:url";
+import { getAuth as getAuth2 } from "firebase-admin/auth";
+var __filename3 = fileURLToPath3(import.meta.url);
+var __dirname3 = path6.dirname(__filename3);
+var DATA_DIR3 = path6.join(__dirname3, "../../.data");
+var SESSION_SECRET_PATH = path6.join(DATA_DIR3, ".session_secret");
+var cachedSecret = null;
+function getSessionSigningSecret() {
+  if (cachedSecret) return cachedSecret;
+  const envSecret = (process.env.FLOWPILOT_SESSION_SECRET || process.env.SESSION_SECRET || "").trim();
+  if (envSecret && envSecret !== "change_this_to_a_long_random_secret") {
+    cachedSecret = envSecret;
+    return cachedSecret;
+  }
+  try {
+    if (!fs6.existsSync(DATA_DIR3)) {
+      fs6.mkdirSync(DATA_DIR3, { recursive: true });
+    }
+    if (fs6.existsSync(SESSION_SECRET_PATH)) {
+      const existing = fs6.readFileSync(SESSION_SECRET_PATH, "utf-8").trim();
+      if (existing.length >= 32) {
+        cachedSecret = existing;
+        return cachedSecret;
+      }
+    }
+    const generated = crypto.randomBytes(48).toString("hex");
+    fs6.writeFileSync(SESSION_SECRET_PATH, generated, { encoding: "utf-8", mode: 384 });
+    cachedSecret = generated;
+    return cachedSecret;
+  } catch {
+    cachedSecret = crypto.randomBytes(48).toString("hex");
+    return cachedSecret;
+  }
+}
+function toBase64Url(input) {
+  const buf = typeof input === "string" ? Buffer.from(input, "utf-8") : input;
+  return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function fromBase64Url(input) {
+  const padded = input.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((input.length + 3) % 4);
+  return Buffer.from(padded, "base64").toString("utf-8");
+}
+function signFlowPilotSessionToken(params) {
+  const cleanUid = String(params.uid || "").trim();
+  const cleanEmail = String(params.email || "").trim().toLowerCase();
+  const nowSec = Math.floor(Date.now() / 1e3);
+  const exp = nowSec + (params.ttlSeconds || 60 * 60 * 24 * 7);
+  const payload = JSON.stringify({
+    uid: cleanUid,
+    email: cleanEmail,
+    iat: nowSec,
+    exp
+  });
+  const encodedPayload = toBase64Url(payload);
+  const sig = crypto.createHmac("sha256", getSessionSigningSecret()).update(encodedPayload).digest();
+  return `fp_sess.${encodedPayload}.${toBase64Url(sig)}`;
+}
+function verifyFlowPilotSessionToken(token) {
+  try {
+    const clean = String(token || "").trim();
+    if (!clean.startsWith("fp_sess.")) return null;
+    const parts = clean.split(".");
+    if (parts.length !== 3) return null;
+    const [, encodedPayload, encodedSig] = parts;
+    if (!encodedPayload || !encodedSig) return null;
+    const expectedSig = crypto.createHmac("sha256", getSessionSigningSecret()).update(encodedPayload).digest();
+    const expectedEncoded = toBase64Url(expectedSig);
+    const a = Buffer.from(encodedSig, "utf-8");
+    const b = Buffer.from(expectedEncoded, "utf-8");
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      return null;
+    }
+    const decoded = JSON.parse(fromBase64Url(encodedPayload));
+    if (!decoded || typeof decoded.uid !== "string" || !decoded.uid) return null;
+    if (typeof decoded.exp !== "number" || decoded.exp < Math.floor(Date.now() / 1e3)) {
+      return null;
+    }
+    return {
+      uid: decoded.uid,
+      email: typeof decoded.email === "string" ? decoded.email : "",
+      emailVerified: true,
+      authSource: "flowpilot_session"
+    };
+  } catch {
+    return null;
+  }
+}
+function extractBearerToken(req) {
+  const authHeader = String(req.headers.authorization || "").trim();
+  if (authHeader.toLowerCase().startsWith("bearer ")) {
+    return authHeader.slice(7).trim();
+  }
+  const sessionHeader = String(req.headers["x-flowpilot-session"] || "").trim();
+  if (sessionHeader) return sessionHeader;
+  return "";
+}
+async function verifyAuthenticatedRequest(req) {
+  const token = extractBearerToken(req);
+  if (!token || token === "fp_local_session_token") {
+    return null;
+  }
+  if (token.startsWith("fp_sess.")) {
+    return verifyFlowPilotSessionToken(token);
+  }
+  try {
+    const decoded = await getAuth2(getAdminApp()).verifyIdToken(token);
+    if (decoded && decoded.uid) {
+      return {
+        uid: decoded.uid,
+        email: String(decoded.email || "").toLowerCase(),
+        emailVerified: Boolean(decoded.email_verified),
+        authSource: "firebase_id_token"
+      };
+    }
+  } catch {
+    const fallbackHeader = String(req.headers["x-flowpilot-session"] || "").trim();
+    if (fallbackHeader.startsWith("fp_sess.")) {
+      return verifyFlowPilotSessionToken(fallbackHeader);
+    }
+    if (fallbackHeader && fallbackHeader !== "fp_local_session_token") {
+      try {
+        const decodedFallback = await getAuth2(getAdminApp()).verifyIdToken(fallbackHeader);
+        if (decodedFallback && decodedFallback.uid) {
+          return {
+            uid: decodedFallback.uid,
+            email: String(decodedFallback.email || "").toLowerCase(),
+            emailVerified: Boolean(decodedFallback.email_verified),
+            authSource: "firebase_id_token"
+          };
+        }
+      } catch {
+        return null;
+      }
+    }
+  }
+  return null;
+}
+
+// src/lib/webhookGatewayService.ts
+import fs7 from "fs";
+import path7 from "path";
+import { fileURLToPath as fileURLToPath4 } from "url";
+var __filename4 = fileURLToPath4(import.meta.url);
+var __dirname4 = path7.dirname(__filename4);
+var DATA_DIR4 = path7.join(__dirname4, "../../.data");
+var STORE_PATH = path7.join(DATA_DIR4, "webhook_gateway_store.json");
+var DEFAULT_MAPPINGS = {
+  emailPath: "email",
+  namePath: "name",
+  phonePath: "phone",
+  companyPath: "company",
+  amountPath: "amount",
+  tagsPath: "tags",
+  targetList: "General Contacts"
+};
+var DEFAULT_TOKEN = "flowpilot_sec_7x9q2m1k8p4w";
+var cachedStore = null;
+function ensureDataDir3() {
+  try {
+    if (!fs7.existsSync(DATA_DIR4)) {
+      fs7.mkdirSync(DATA_DIR4, { recursive: true });
+    }
+  } catch {
+  }
+}
+function loadStore() {
+  if (cachedStore) return cachedStore;
+  ensureDataDir3();
+  const fallback = {
+    token: process.env.FLOWPILOT_WEBHOOK_SECRET || DEFAULT_TOKEN,
+    isEnabled: true,
+    mappings: DEFAULT_MAPPINGS,
+    logs: []
+  };
+  if (fs7.existsSync(STORE_PATH)) {
+    try {
+      const raw = fs7.readFileSync(STORE_PATH, "utf-8");
+      const parsed = JSON.parse(raw);
+      cachedStore = {
+        token: parsed.token || fallback.token,
+        isEnabled: parsed.isEnabled !== void 0 ? parsed.isEnabled : true,
+        mappings: { ...DEFAULT_MAPPINGS, ...parsed.mappings || {} },
+        logs: Array.isArray(parsed.logs) ? parsed.logs.slice(0, 100) : []
+      };
+      return cachedStore;
+    } catch {
+    }
+  }
+  cachedStore = fallback;
+  return cachedStore;
+}
+function saveStore() {
+  if (!cachedStore) return;
+  ensureDataDir3();
+  try {
+    fs7.writeFileSync(STORE_PATH, JSON.stringify(cachedStore, null, 2), "utf-8");
+  } catch (err) {
+    console.warn("[Webhook Gateway] Notice: Could not flush store to disk:", err);
+  }
+}
+function getNestedValue(obj, pathStr) {
+  if (!obj || typeof obj !== "object" || !pathStr) return void 0;
+  const parts = pathStr.split(".");
+  let current = obj;
+  for (const part of parts) {
+    if (current === null || current === void 0) return void 0;
+    current = current[part];
+  }
+  return current;
+}
+function detectWebhookSource(headers, body) {
+  const ua = String(headers["user-agent"] || "").toLowerCase();
+  const stripeSig = headers["stripe-signature"];
+  const shopifyTopic = headers["x-shopify-topic"];
+  const githubEvent = headers["x-github-event"];
+  const typeformSig = headers["typeform-signature"];
+  if (stripeSig || ua.includes("stripe") || body && body.object === "event" && body.data) {
+    const ev = body?.type || "stripe.event";
+    return { source: "Stripe", event: ev };
+  }
+  if (shopifyTopic || ua.includes("shopify") || body && (body.line_items || body.order_number)) {
+    const ev = shopifyTopic || (body?.id ? "orders/create" : "shopify.webhook");
+    return { source: "Shopify", event: String(ev) };
+  }
+  if (ua.includes("zapier")) {
+    const ev = body?.event || body?.action || body?.type || "zapier.trigger";
+    return { source: "Zapier", event: String(ev) };
+  }
+  if (ua.includes("make.com") || ua.includes("integromat")) {
+    const ev = body?.event || body?.scenario || "make.scenario";
+    return { source: "Make (Integromat)", event: String(ev) };
+  }
+  if (typeformSig || ua.includes("typeform") || body?.form_response) {
+    return { source: "Typeform", event: body?.form_response?.form_id ? `form_${body.form_response.form_id}` : "form_submission" };
+  }
+  if (body && (body.event_type || body.resource_type === "sale")) {
+    return { source: "PayPal", event: String(body.event_type || "paypal.payment") };
+  }
+  if (githubEvent) {
+    return { source: "GitHub", event: String(githubEvent) };
+  }
+  if (ua.includes("curl")) {
+    return { source: "cURL / Terminal", event: body?.event || body?.type || "custom_request" };
+  }
+  const genericEv = body?.event || body?.type || body?.action || body?.topic || "inbound_payload";
+  return { source: "Custom / API", event: String(genericEv) };
+}
+function extractFieldsFromPayload(body, mappings) {
+  if (!body || typeof body !== "object") {
+    return {};
+  }
+  let email = getNestedValue(body, mappings.emailPath);
+  let name = getNestedValue(body, mappings.namePath);
+  let phone = getNestedValue(body, mappings.phonePath);
+  let company = getNestedValue(body, mappings.companyPath);
+  let amount = getNestedValue(body, mappings.amountPath);
+  let rawTags = getNestedValue(body, mappings.tagsPath);
+  if (!email) {
+    email = body.email || body.customer_email || body.client_email || body.user_email || body.customer?.email || body.lead?.email || body.data?.object?.customer_details?.email || body.data?.object?.email || body.data?.object?.receipt_email || body.data?.customer?.email || body.order?.customer?.email || body.payer?.payer_info?.email;
+  }
+  if (!name) {
+    const shopifyName = body.order?.customer?.first_name ? `${body.order.customer.first_name} ${body.order.customer.last_name || ""}`.trim() : void 0;
+    name = body.fullName || body.full_name || body.name || body.customer_name || body.customer?.name || body.lead?.name || body.data?.object?.customer_details?.name || shopifyName || (body.firstName ? `${body.firstName} ${body.lastName || ""}`.trim() : void 0) || (body.first_name ? `${body.first_name} ${body.last_name || ""}`.trim() : void 0);
+  }
+  if (!phone) {
+    phone = body.phone || body.phoneNumber || body.phone_number || body.whatsapp || body.mobile || body.customer?.phone || body.data?.object?.customer_details?.phone || body.order?.customer?.phone || body.order?.billing_address?.phone;
+  }
+  if (!company) {
+    company = body.company || body.organization || body.org_name || body.customer?.company || body.order?.billing_address?.company;
+  }
+  if (amount === void 0 || amount === null) {
+    const rawAmt = body.amount || body.total || body.total_price || body.amount_total || body.data?.object?.amount_total || body.data?.object?.amount;
+    if (rawAmt !== void 0 && rawAmt !== null) {
+      const num = Number(rawAmt);
+      if (!isNaN(num)) {
+        amount = num > 500 && (body.data?.object?.currency || body.currency) ? num / 100 : num;
+      }
+    }
+  }
+  const tags = [];
+  if (Array.isArray(rawTags)) {
+    tags.push(...rawTags.map(String));
+  } else if (typeof rawTags === "string" && rawTags.trim()) {
+    tags.push(...rawTags.split(/[;,]/).map((t) => t.trim()).filter(Boolean));
+  }
+  const detectedEvent = body.event || body.type || body.action;
+  if (detectedEvent && typeof detectedEvent === "string") {
+    tags.push(detectedEvent.replace(/[^a-zA-Z0-9_\-]/g, "_").slice(0, 32));
+  }
+  return {
+    fullName: typeof name === "string" ? name.trim().slice(0, 100) : void 0,
+    email: typeof email === "string" && email.includes("@") ? email.trim().toLowerCase().slice(0, 150) : void 0,
+    phone: typeof phone === "string" ? phone.trim().slice(0, 40) : void 0,
+    company: typeof company === "string" ? company.trim().slice(0, 100) : void 0,
+    amount: typeof amount === "number" && !isNaN(amount) ? amount : void 0,
+    tags: Array.from(new Set(tags)).filter(Boolean),
+    listName: mappings.targetList || "General Contacts",
+    stage: amount && amount > 0 ? "customer" : "lead"
+  };
+}
+function getWebhookGatewayConfig() {
+  const store = loadStore();
+  return {
+    token: store.token,
+    isEnabled: store.isEnabled,
+    mappings: store.mappings,
+    totalLogs: store.logs.length
+  };
+}
+function updateWebhookGatewayConfig(updates) {
+  const store = loadStore();
+  if (updates.token) store.token = String(updates.token).trim();
+  if (updates.isEnabled !== void 0) store.isEnabled = Boolean(updates.isEnabled);
+  if (updates.mappings) store.mappings = { ...store.mappings, ...updates.mappings };
+  saveStore();
+  return store;
+}
+function generateNewWebhookToken() {
+  const store = loadStore();
+  const rand = Math.random().toString(36).substring(2, 14);
+  const newToken = `flowpilot_sec_${rand}`;
+  store.token = newToken;
+  saveStore();
+  return newToken;
+}
+function getWebhookLogs(limit = 50) {
+  const store = loadStore();
+  return store.logs.slice(0, limit);
+}
+function clearWebhookLogs() {
+  const store = loadStore();
+  store.logs = [];
+  saveStore();
+}
+function recordAndProcessWebhook(params) {
+  const store = loadStore();
+  const { source, event } = detectWebhookSource(params.headers, params.body);
+  const extracted = extractFieldsFromPayload(params.body, store.mappings);
+  const latencyMs = Math.max(1, Math.round(Date.now() - params.startTimeMs));
+  let actionTaken = "Payload parsed and queued for CRM sync.";
+  if (extracted.email || extracted.phone) {
+    actionTaken = `Extracted contact ${extracted.fullName || extracted.email || extracted.phone} (${extracted.tags?.join(", ") || "no tags"})`;
+  } else {
+    actionTaken = "Payload recorded; no contact email or phone identified.";
+  }
+  const logEntry = {
+    id: `whlog_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+    url: params.url || "/api/webhook/gateway",
+    source,
+    event,
+    status: params.statusCode || 200,
+    latencyMs,
+    method: params.method || "POST",
+    ip: params.ip || "127.0.0.1",
+    userAgent: params.userAgent || "Unknown Agent",
+    headers: params.headers,
+    query: params.query,
+    body: params.body,
+    parsedFields: extracted,
+    actionTaken,
+    isSimulated: Boolean(params.isSimulated)
+  };
+  store.logs.unshift(logEntry);
+  if (store.logs.length > 100) {
+    store.logs.pop();
+  }
+  saveStore();
+  return {
+    success: true,
+    status: logEntry.status,
+    log: logEntry,
+    extracted
+  };
+}
+function getWebhookLogById(id) {
+  const store = loadStore();
+  return store.logs.find((l) => l.id === id);
+}
+
 // serverCore.ts
-var __filename2 = fileURLToPath2(import.meta.url);
-var __dirname2 = path5.dirname(__filename2);
-var DATA_DIR3 = path5.join(__dirname2, ".data");
-var ACCOUNTS_STORE_PATH = path5.join(DATA_DIR3, "accounts_store.json");
-var WORKSPACES_STORE_PATH = path5.join(DATA_DIR3, "workspaces_store.json");
-var WHATSAPP_ACCOUNTS_STORE_PATH = path5.join(DATA_DIR3, "whatsapp_accounts_store.json");
-var WHATSAPP_TEMPLATES_STORE_PATH = path5.join(DATA_DIR3, "whatsapp_templates_store.json");
-var PUBLISHED_FORMS_STORE_PATH = path5.join(DATA_DIR3, "published_forms_store.json");
+var __filename5 = fileURLToPath5(import.meta.url);
+var __dirname5 = path8.dirname(__filename5);
+var DATA_DIR5 = path8.join(__dirname5, ".data");
+var ACCOUNTS_STORE_PATH = path8.join(DATA_DIR5, "accounts_store.json");
+var WORKSPACES_STORE_PATH = path8.join(DATA_DIR5, "workspaces_store.json");
+var WHATSAPP_ACCOUNTS_STORE_PATH = path8.join(DATA_DIR5, "whatsapp_accounts_store.json");
+var WHATSAPP_TEMPLATES_STORE_PATH = path8.join(DATA_DIR5, "whatsapp_templates_store.json");
+var PUBLISHED_FORMS_STORE_PATH = path8.join(DATA_DIR5, "published_forms_store.json");
 var serverAccountsByEmail = /* @__PURE__ */ new Map();
 var serverAccountsByUid = /* @__PURE__ */ new Map();
 var serverWorkspaceSnapshotsByUid = /* @__PURE__ */ new Map();
@@ -2158,11 +3434,11 @@ function deleteWhatsAppTemplateFromDatabase(wabaId, name) {
   return list.length !== filtered.length;
 }
 function flushWhatsAppTemplatesStoreToDisk() {
-  ensureDataDir2();
+  ensureDataDir4();
   try {
     const all = [];
     serverWhatsAppTemplatesByWaba.forEach((list) => all.push(...list));
-    fs5.writeFileSync(WHATSAPP_TEMPLATES_STORE_PATH, JSON.stringify(all, null, 2), "utf-8");
+    fs8.writeFileSync(WHATSAPP_TEMPLATES_STORE_PATH, JSON.stringify(all, null, 2), "utf-8");
   } catch {
   }
 }
@@ -2193,26 +3469,26 @@ function saveWhatsAppAccountToDatabase(record) {
   flushWhatsAppAccountsStoreToDisk();
 }
 function flushWhatsAppAccountsStoreToDisk() {
-  ensureDataDir2();
+  ensureDataDir4();
   try {
     const all = Array.from(serverWhatsAppAccountsById.values());
-    fs5.writeFileSync(WHATSAPP_ACCOUNTS_STORE_PATH, JSON.stringify(all, null, 2), "utf-8");
+    fs8.writeFileSync(WHATSAPP_ACCOUNTS_STORE_PATH, JSON.stringify(all, null, 2), "utf-8");
   } catch {
   }
 }
-function ensureDataDir2() {
+function ensureDataDir4() {
   try {
-    if (!fs5.existsSync(DATA_DIR3)) {
-      fs5.mkdirSync(DATA_DIR3, { recursive: true });
+    if (!fs8.existsSync(DATA_DIR5)) {
+      fs8.mkdirSync(DATA_DIR5, { recursive: true });
     }
   } catch {
   }
 }
 function loadPersistentStoresFromDisk() {
-  ensureDataDir2();
+  ensureDataDir4();
   try {
-    if (fs5.existsSync(ACCOUNTS_STORE_PATH)) {
-      const raw = fs5.readFileSync(ACCOUNTS_STORE_PATH, "utf-8");
+    if (fs8.existsSync(ACCOUNTS_STORE_PATH)) {
+      const raw = fs8.readFileSync(ACCOUNTS_STORE_PATH, "utf-8");
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
         for (const acc of parsed) {
@@ -2227,8 +3503,8 @@ function loadPersistentStoresFromDisk() {
   } catch {
   }
   try {
-    if (fs5.existsSync(WORKSPACES_STORE_PATH)) {
-      const raw = fs5.readFileSync(WORKSPACES_STORE_PATH, "utf-8");
+    if (fs8.existsSync(WORKSPACES_STORE_PATH)) {
+      const raw = fs8.readFileSync(WORKSPACES_STORE_PATH, "utf-8");
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === "object") {
         for (const [uid, snap] of Object.entries(parsed)) {
@@ -2241,8 +3517,8 @@ function loadPersistentStoresFromDisk() {
   } catch {
   }
   try {
-    if (fs5.existsSync(WHATSAPP_ACCOUNTS_STORE_PATH)) {
-      const raw = fs5.readFileSync(WHATSAPP_ACCOUNTS_STORE_PATH, "utf-8");
+    if (fs8.existsSync(WHATSAPP_ACCOUNTS_STORE_PATH)) {
+      const raw = fs8.readFileSync(WHATSAPP_ACCOUNTS_STORE_PATH, "utf-8");
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
         for (const wa of parsed) {
@@ -2259,8 +3535,8 @@ function loadPersistentStoresFromDisk() {
   } catch {
   }
   try {
-    if (fs5.existsSync(WHATSAPP_TEMPLATES_STORE_PATH)) {
-      const raw = fs5.readFileSync(WHATSAPP_TEMPLATES_STORE_PATH, "utf-8");
+    if (fs8.existsSync(WHATSAPP_TEMPLATES_STORE_PATH)) {
+      const raw = fs8.readFileSync(WHATSAPP_TEMPLATES_STORE_PATH, "utf-8");
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
         for (const tpl of parsed) {
@@ -2273,8 +3549,8 @@ function loadPersistentStoresFromDisk() {
   } catch {
   }
   try {
-    if (fs5.existsSync(PUBLISHED_FORMS_STORE_PATH)) {
-      const raw = fs5.readFileSync(PUBLISHED_FORMS_STORE_PATH, "utf-8");
+    if (fs8.existsSync(PUBLISHED_FORMS_STORE_PATH)) {
+      const raw = fs8.readFileSync(PUBLISHED_FORMS_STORE_PATH, "utf-8");
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
         for (const pf of parsed) {
@@ -2323,39 +3599,39 @@ function loadPersistentStoresFromDisk() {
   }
 }
 function flushAccountsStoreToDisk() {
-  ensureDataDir2();
+  ensureDataDir4();
   try {
     const allAccounts = Array.from(serverAccountsByEmail.values());
-    fs5.writeFileSync(ACCOUNTS_STORE_PATH, JSON.stringify(allAccounts, null, 2), "utf-8");
+    fs8.writeFileSync(ACCOUNTS_STORE_PATH, JSON.stringify(allAccounts, null, 2), "utf-8");
   } catch {
   }
 }
 function flushWorkspacesStoreToDisk() {
-  ensureDataDir2();
+  ensureDataDir4();
   try {
     const obj = {};
     serverWorkspaceSnapshotsByUid.forEach((val, key) => {
       obj[key] = val;
     });
-    fs5.writeFileSync(WORKSPACES_STORE_PATH, JSON.stringify(obj), "utf-8");
+    fs8.writeFileSync(WORKSPACES_STORE_PATH, JSON.stringify(obj), "utf-8");
   } catch {
   }
 }
 function flushPublishedFormsStoreToDisk() {
-  ensureDataDir2();
+  ensureDataDir4();
   try {
     const all = Array.from(serverPublishedFormsBySlug.values());
-    fs5.writeFileSync(PUBLISHED_FORMS_STORE_PATH, JSON.stringify(all, null, 2), "utf-8");
+    fs8.writeFileSync(PUBLISHED_FORMS_STORE_PATH, JSON.stringify(all, null, 2), "utf-8");
   } catch {
   }
 }
 function hashAccountPassword(password, email) {
   const salt = email.trim().toLowerCase();
-  return crypto.createHash("sha256").update(`fp_salt_${salt}:${password}`).digest("hex");
+  return crypto2.createHash("sha256").update(`fp_salt_${salt}:${password}`).digest("hex");
 }
 function buildDeterministicUidForEmail(email) {
   const clean = email.trim().toLowerCase();
-  const hash = crypto.createHash("sha256").update(`fp_uid_${clean}`).digest("hex").slice(0, 24);
+  const hash = crypto2.createHash("sha256").update(`fp_uid_${clean}`).digest("hex").slice(0, 24);
   return `usr_${hash}`;
 }
 function generateSixDigitVerificationCode() {
@@ -2539,30 +3815,49 @@ function buildDirectLaunchUrl(channel, to, subject, body) {
   return `sms:${cleanSmsPhone}?body=${encodeURIComponent(body)}`;
 }
 async function sendWhatsApp(params) {
+  const targetUser = params.userId || "default_workspace";
+  const instance = params.instanceName || buildEvolutionInstanceName(targetUser);
   try {
-    const targetUser = params.userId || "default_workspace";
-    const result = await sendWhatsAppMessage(targetUser, params.to, params.body);
-    return {
-      deliveredViaApi: true,
-      provider: "WhatsApp QR Connect (Baileys)",
-      detail: result.detail,
-      messageId: result.messageId
-    };
+    const evoResult = await sendWhatsAppViaEvolution(instance, params.to, params.body);
+    if (evoResult.ok) {
+      return {
+        deliveredViaApi: true,
+        provider: "Evolution API (v2.3.5)",
+        detail: evoResult.detail,
+        messageId: evoResult.messageId
+      };
+    }
+    try {
+      const fallbackResult = await sendWhatsAppMessage(targetUser, params.to, params.body);
+      return {
+        deliveredViaApi: true,
+        provider: "WhatsApp QR (Fallback Socket)",
+        detail: fallbackResult.detail,
+        messageId: fallbackResult.messageId
+      };
+    } catch {
+      return {
+        deliveredViaApi: false,
+        provider: "Evolution API (v2.3.5)",
+        detail: evoResult.error || evoResult.detail
+      };
+    }
   } catch (err) {
-    console.warn("[sendWhatsApp] Baileys socket error:", err.message);
+    console.warn("[sendWhatsApp] Evolution API send error:", err?.message || err);
     const formatted = formatWhatsAppNumber(params.to);
     return {
       deliveredViaApi: false,
-      provider: "WhatsApp QR Connect",
-      detail: err.message || `Dispatched to linked WhatsApp device (+${formatted})`
+      provider: "Evolution API (v2.3.5)",
+      detail: err?.message || `Dispatched to WhatsApp (+${formatted})`
     };
   }
 }
 async function dispatchEmailGateway(params) {
   const formattedFrom = params.fromEmail.includes("<") ? params.fromEmail : `${params.senderName || "FlowPilot"} <${params.fromEmail}>`;
   const mode = params.emailConnector?.providerMode || "builtin_relay";
+  const isAccountVerification = params.source === "account_verification";
   const cleanGmailToken = (params.gmailAccessToken || "").trim();
-  if (cleanGmailToken && (mode === "gmail_oauth" || mode === "builtin_relay")) {
+  if (cleanGmailToken && (mode === "gmail_oauth" || isAccountVerification)) {
     try {
       const mimeLines = [
         `From: ${formattedFrom}`,
@@ -2598,63 +3893,8 @@ async function dispatchEmailGateway(params) {
     } catch {
     }
   }
-  const resendKey = (params.emailConnector?.resendApiKey || process.env.RESEND_API_KEY || "").trim();
-  if ((mode === "resend_api" || resendKey) && resendKey && resendKey !== "MY_RESEND_API_KEY") {
-    try {
-      const res = await fetch("https://api.resend.com/emails", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${resendKey}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          from: formattedFrom,
-          to: [params.to],
-          reply_to: params.replyToEmail || params.fromEmail,
-          subject: params.subject || `Message from ${params.senderName}`,
-          text: params.body
-        })
-      });
-      if (res.ok) {
-        return {
-          deliveredViaApi: true,
-          provider: "Resend Transactional Email Gateway (Live)",
-          detail: `Delivered via Resend API \xB7 From: ${formattedFrom} \u2192 To: ${params.to}`
-        };
-      }
-      const fallbackRes = await fetch("https://api.resend.com/emails", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${resendKey}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          from: `${params.senderName || "FlowPilot Security"} <onboarding@resend.dev>`,
-          to: [params.to],
-          reply_to: params.replyToEmail || params.fromEmail,
-          subject: params.subject || `Message from ${params.senderName}`,
-          text: params.body
-        })
-      });
-      if (fallbackRes.ok) {
-        return {
-          deliveredViaApi: true,
-          provider: "Resend Transactional Email Gateway (Live)",
-          detail: `Delivered via Resend API \xB7 To: ${params.to}`
-        };
-      }
-    } catch {
-    }
-    if (mode === "resend_api") {
-      return {
-        deliveredViaApi: true,
-        provider: "Resend Transactional Email Gateway (Connected)",
-        detail: `Dispatched via Resend Email Connector \xB7 From: ${formattedFrom} \u2192 To: ${params.to}`
-      };
-    }
-  }
   const sendgridKey = (params.emailConnector?.sendgridApiKey || process.env.SENDGRID_API_KEY || "").trim();
-  if ((mode === "sendgrid_api" || sendgridKey) && sendgridKey && sendgridKey !== "MY_SENDGRID_API_KEY") {
+  if ((mode === "sendgrid_api" || isAccountVerification && sendgridKey) && sendgridKey && sendgridKey !== "MY_SENDGRID_API_KEY") {
     try {
       const res = await fetch("https://api.sendgrid.com/v3/mail/send", {
         method: "POST",
@@ -2679,21 +3919,12 @@ async function dispatchEmailGateway(params) {
       }
     } catch {
     }
-    if (mode === "sendgrid_api") {
-      return {
-        deliveredViaApi: true,
-        provider: "SendGrid Email Gateway (Connected)",
-        detail: `Dispatched via SendGrid Email Connector \xB7 From: ${formattedFrom} \u2192 To: ${params.to}`
-      };
-    }
   }
   const smtpHost = (params.emailConnector?.smtpHost || process.env.SMTP_HOST || "").trim();
-  const smtpPort = Number(
-    params.emailConnector?.smtpPort || process.env.SMTP_PORT || 587
-  );
+  const smtpPort = Number(params.emailConnector?.smtpPort || process.env.SMTP_PORT || 587);
   const smtpUser = (params.emailConnector?.smtpUser || process.env.SMTP_USER || "").trim();
   const smtpPass = (params.emailConnector?.smtpPass || process.env.SMTP_PASS || "").trim();
-  if ((mode === "smtp" || smtpHost && smtpUser && smtpPass) && smtpHost && smtpUser && smtpPass) {
+  if ((mode === "smtp" || isAccountVerification && smtpHost && smtpUser && smtpPass) && smtpHost && smtpUser && smtpPass) {
     try {
       const transporter = nodemailer.createTransport({
         host: smtpHost,
@@ -2719,19 +3950,77 @@ async function dispatchEmailGateway(params) {
       };
     } catch {
     }
-    if (mode === "smtp") {
-      return {
-        deliveredViaApi: true,
-        provider: `SMTP Email Gateway (${smtpHost})`,
-        detail: `Dispatched via SMTP Connector (${smtpHost}) \xB7 To: ${params.to}`
-      };
-    }
   }
-  return {
-    deliveredViaApi: true,
-    provider: "FlowPilot Multi-Provider Email Gateway",
-    detail: `Dispatched to recipient email inbox (${params.to})`
-  };
+  if (isAccountVerification) {
+    const serverResendKey = (process.env.RESEND_API_KEY || "").trim();
+    if (serverResendKey && serverResendKey !== "your_resend_api_key_here") {
+      try {
+        const res = await fetch("https://api.resend.com/emails", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${serverResendKey}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            from: `${params.senderName || "FlowPilot Security"} <onboarding@resend.dev>`,
+            to: [params.to],
+            reply_to: params.replyToEmail || params.fromEmail,
+            subject: params.subject || "FlowPilot Verification Code",
+            text: params.body
+          })
+        });
+        if (res.ok) {
+          return {
+            deliveredViaApi: true,
+            provider: "FlowPilot Security Verification Relay",
+            detail: `Verification email delivered to ${params.to}`
+          };
+        }
+      } catch {
+      }
+    }
+    return {
+      deliveredViaApi: true,
+      provider: "FlowPilot Account Security Relay",
+      detail: `Dispatched verification instructions to ${params.to}`
+    };
+  }
+  const readiness = await checkCustomDomainSendReadiness(params.ownerId || "");
+  if (!readiness.allowed) {
+    return {
+      deliveredViaApi: false,
+      blocked: true,
+      errorCode: "DOMAIN_NOT_VERIFIED",
+      provider: "Custom Domain Verification Gate (Blocked)",
+      detail: readiness.reason || "Blocked: Custom domain is not verified. Verify your DNS records in Settings \u2192 Email Automation."
+    };
+  }
+  try {
+    const sendResult = await sendCustomDomainEmail({
+      ownerId: params.ownerId,
+      to: params.to,
+      subject: params.subject || `Message from ${readiness.fromName || params.senderName}`,
+      html: params.html || params.body,
+      text: params.body.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim() || params.body,
+      replyTo: params.replyToEmail,
+      attachments: params.attachments,
+      fromEmailOverride: params.fromEmail,
+      fromNameOverride: params.senderName
+    });
+    return {
+      deliveredViaApi: true,
+      provider: sendResult.provider,
+      detail: `Delivered via ${sendResult.provider} (ID: ${sendResult.id || "ok"}) \xB7 From: ${sendResult.from} \u2192 To: ${params.to}`
+    };
+  } catch (err) {
+    return {
+      deliveredViaApi: false,
+      blocked: true,
+      errorCode: err instanceof CustomDomainEmailError ? err.code : "RESEND_SEND_FAILED",
+      provider: "Custom Domain Email Gate",
+      detail: err?.message || "Failed to send via verified custom domain."
+    };
+  }
 }
 async function dispatchSmsGateway(params) {
   const mode = params.smsConnector?.providerMode || "builtin_relay";
@@ -2893,7 +4182,9 @@ async function executeUnifiedServerDispatch(params) {
       subject: cleanSubject,
       body: cleanBody,
       gmailAccessToken: params.gmailAccessToken,
-      emailConnector: params.emailConnector
+      emailConnector: params.emailConnector,
+      ownerId: params.userId,
+      source: params.source
     });
   } else {
     dispatchResult = await dispatchSmsGateway({
@@ -2908,7 +4199,7 @@ async function executeUnifiedServerDispatch(params) {
     params.webhookUrl || process.env.OUTBOUND_WEBHOOK_URL || ""
   ).trim();
   let webhookDelivered = false;
-  if (targetWebhook && /^https?:\/\//i.test(targetWebhook)) {
+  if (!dispatchResult.blocked && targetWebhook && /^https?:\/\//i.test(targetWebhook)) {
     try {
       const whRes = await fetch(targetWebhook, {
         method: "POST",
@@ -2939,7 +4230,7 @@ async function executeUnifiedServerDispatch(params) {
   const receipt = {
     receiptId: `rcpt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     channel: cleanChannel,
-    status: dispatchResult.deliveredViaApi || webhookDelivered ? "delivered" : "dispatched_relay",
+    status: dispatchResult.blocked ? "failed" : dispatchResult.deliveredViaApi || webhookDelivered ? "delivered" : "dispatched_relay",
     providerUsed: webhookDelivered ? `${dispatchResult.provider} + Webhook Bridge` : dispatchResult.provider,
     fromIdentity: cleanFrom,
     senderName: params.senderName,
@@ -3070,12 +4361,12 @@ async function processScheduledAutomationJobs() {
           smsConnector: job.smsConnector,
           emailConnector: job.emailConnector
         });
-        job.status = "dispatched";
+        job.status = receipt.status === "failed" ? "failed" : "dispatched";
         job.processedAt = (/* @__PURE__ */ new Date()).toISOString();
         job.receiptId = receipt.receiptId;
         job.providerUsed = receipt.providerUsed;
         job.directLaunchUrl = receipt.directLaunchUrl;
-        job.statusReason = `Dispatched after ${job.delaySeconds}s delay via ${receipt.providerUsed} (List Kill Switch verified clear)`;
+        job.statusReason = receipt.status === "failed" ? receipt.detailMessage : `Dispatched after ${job.delaySeconds}s delay via ${receipt.providerUsed} (List Kill Switch verified clear)`;
       }
     }
   } finally {
@@ -3098,7 +4389,14 @@ function getSchedulerSummary() {
 async function startServer() {
   const app2 = express();
   const PORT = Number(process.env.PORT) || 3e3;
-  app2.use(express.json({ limit: "10mb" }));
+  app2.use(
+    express.json({
+      limit: "10mb",
+      verify: (req, _res, buf) => {
+        req.rawBody = buf.toString("utf-8");
+      }
+    })
+  );
   app2.use(express.urlencoded({ extended: true, limit: "10mb" }));
   setInterval(() => {
     processScheduledAutomationJobs().catch(() => {
@@ -3147,6 +4445,7 @@ async function startServer() {
   });
   const handleDeliverMessageRoute = async (req, res) => {
     try {
+      const authUser = await verifyAuthenticatedRequest(req);
       const authHeader = String(req.headers.authorization || "").trim();
       const bearerToken = authHeader.toLowerCase().startsWith("bearer ") ? authHeader.slice(7).trim() : "";
       const {
@@ -3176,6 +4475,8 @@ async function startServer() {
         });
         return;
       }
+      const resolvedOwnerUid = authUser?.uid || String(userId || "").trim() || void 0;
+      const safeGmailToken = gmailAccessToken || (bearerToken && !bearerToken.startsWith("fp_sess.") && authUser?.authSource !== "firebase_id_token" ? bearerToken : "");
       const receipt = await executeUnifiedServerDispatch({
         channel: cleanChannel,
         to,
@@ -3188,14 +4489,16 @@ async function startServer() {
         listName,
         source,
         webhookUrl,
-        gmailAccessToken: String(gmailAccessToken || bearerToken || "").trim(),
-        userId: String(userId || "").trim() || void 0,
+        gmailAccessToken: String(safeGmailToken || "").trim(),
+        userId: resolvedOwnerUid,
         whatsappConnector,
         smsConnector,
         emailConnector
       });
-      res.json({
-        ok: true,
+      const httpStatus = receipt.status === "failed" ? receipt.detailMessage?.toLowerCase().includes("domain") || receipt.detailMessage?.toLowerCase().includes("verified") ? 403 : 422 : 200;
+      res.status(httpStatus).json({
+        ok: receipt.status !== "failed",
+        ...receipt.status === "failed" ? { error: receipt.detailMessage } : {},
         receipt
       });
     } catch (err) {
@@ -3218,6 +4521,7 @@ async function startServer() {
   });
   app2.post("/api/scheduler/enqueue", async (req, res) => {
     try {
+      const authUser = await verifyAuthenticatedRequest(req);
       const authHeader = String(req.headers.authorization || "").trim();
       const bearerToken = authHeader.toLowerCase().startsWith("bearer ") ? authHeader.slice(7).trim() : "";
       const rawJobs = Array.isArray(req.body?.jobs) ? req.body.jobs : req.body?.job ? [req.body.job] : [req.body];
@@ -3244,6 +4548,7 @@ async function startServer() {
         });
         const newJob = {
           id: `sched_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          userId: authUser?.uid || String(item.userId || req.headers["x-user-id"] || "").trim() || void 0,
           automationId: String(item.automationId || "auto_live"),
           automationName: String(item.automationName || "Automation Sequence"),
           stepId: String(item.stepId || "step_delayed"),
@@ -3267,7 +4572,9 @@ async function startServer() {
           subject: String(item.subject || `Follow-Up from ${item.senderName || "FlowPilot"}`),
           body: String(item.body || "Checking in on your progress!"),
           webhookUrl: String(item.webhookUrl || "").trim() || void 0,
-          gmailAccessToken: String(item.gmailAccessToken || bearerToken || "").trim() || void 0,
+          gmailAccessToken: String(
+            item.gmailAccessToken || (bearerToken && !bearerToken.startsWith("fp_sess.") && authUser?.authSource !== "firebase_id_token" ? bearerToken : "")
+          ).trim() || void 0,
           whatsappConnector: item.whatsappConnector || void 0,
           smsConnector: item.smsConnector || void 0,
           emailConnector: item.emailConnector || void 0,
@@ -3400,12 +4707,12 @@ async function startServer() {
           smsConnector: job.smsConnector,
           emailConnector: job.emailConnector
         });
-        job.status = "dispatched";
+        job.status = receipt.status === "failed" ? "failed" : "dispatched";
         job.processedAt = (/* @__PURE__ */ new Date()).toISOString();
         job.receiptId = receipt.receiptId;
         job.providerUsed = receipt.providerUsed;
         job.directLaunchUrl = receipt.directLaunchUrl;
-        job.statusReason = `Dispatched immediately via ${receipt.providerUsed} (List Kill Switch verified clear)`;
+        job.statusReason = receipt.status === "failed" ? receipt.detailMessage : `Dispatched immediately via ${receipt.providerUsed} (List Kill Switch verified clear)`;
       }
       res.json({
         ok: true,
@@ -3684,13 +4991,48 @@ async function startServer() {
       });
     }
   });
-  app2.get("/api/whatsapp/status", async (req, res) => {
+  const handleLegacyWhatsAppStatus = async (req, res) => {
+    res.setHeader("Content-Type", "application/json");
     try {
       const userId = String(req.query.userId || req.headers["x-user-id"] || "default_workspace").trim();
+      const instanceName = String(req.query.instanceName || "").trim() || void 0;
+      if (userId && userId !== "default_workspace") {
+        try {
+          const evoStatus = await getEvolutionConnectionStatus({ userId, instanceName });
+          if (evoStatus.ok) {
+            const phone = evoStatus.ownerJid ? evoStatus.ownerJid.split("@")[0].replace(/[^0-9+]/g, "") : "";
+            res.json({
+              success: true,
+              ok: true,
+              connected: evoStatus.status === "open",
+              status: evoStatus.status,
+              instanceName: evoStatus.instanceName,
+              userId: evoStatus.userId,
+              qrCode: evoStatus.qrCode,
+              pairingCode: evoStatus.pairingCode,
+              qrPending: evoStatus.qrPending,
+              upstreamCount: evoStatus.upstreamCount,
+              ownerJid: evoStatus.ownerJid,
+              profileName: evoStatus.profileName,
+              disconnectionReasonCode: evoStatus.disconnectionReasonCode,
+              detail: evoStatus.detail,
+              checkedAt: evoStatus.checkedAt,
+              phoneNumber: phone,
+              number: phone,
+              account: evoStatus.status === "open" ? { display_phone_number: phone, verified_name: evoStatus.profileName || "" } : void 0,
+              updatedAt: evoStatus.checkedAt
+            });
+            return;
+          }
+        } catch {
+        }
+      }
       const sessionDoc = await getFirestoreDoc("whatsapp_sessions", userId);
       if (sessionDoc) {
         const phone = sessionDoc.number || sessionDoc.phoneNumber || "";
         res.json({
+          success: true,
+          ok: true,
           connected: Boolean(sessionDoc.connected),
           phoneNumber: phone,
           number: phone,
@@ -3701,6 +5043,8 @@ async function startServer() {
       }
       const status = getWhatsAppSessionStatus(userId);
       res.json({
+        success: true,
+        ok: true,
         connected: Boolean(status.connected),
         phoneNumber: status.number || "",
         number: status.number || "",
@@ -3708,39 +5052,452 @@ async function startServer() {
         reconnectAttempts: status.reconnectAttempts || 0
       });
     } catch (err) {
-      res.status(500).json({ connected: false, phoneNumber: "", number: "", error: err.message });
+      res.status(500).json({ success: false, ok: false, connected: false, phoneNumber: "", number: "", error: err.message });
     }
-  });
+  };
+  app2.get("/api/whatsapp/status", handleLegacyWhatsAppStatus);
+  app2.get("/api/auth/whatsapp/status", handleLegacyWhatsAppStatus);
   const handleWhatsAppDisconnect = async (req, res) => {
+    res.setHeader("Content-Type", "application/json");
     try {
       const userId = String(req.body?.userId || req.headers["x-user-id"] || "default_workspace").trim();
+      const instanceName = req.body?.instanceName ? String(req.body.instanceName).trim() : void 0;
+      if (userId && userId !== "default_workspace") {
+        const evoRes = await disconnectEvolutionConnection({ userId, instanceName });
+        try {
+          disconnectWhatsAppSession(userId);
+        } catch {
+        }
+        res.json({
+          success: evoRes.ok,
+          ok: evoRes.ok,
+          instanceName: evoRes.instanceName,
+          status: "close",
+          message: evoRes.ok ? "WhatsApp session disconnected and logged out successfully" : evoRes.error,
+          error: evoRes.error
+        });
+        return;
+      }
       await disconnectWhatsAppSession(userId);
-      res.json({ ok: true, message: "WhatsApp session disconnected and logged out successfully" });
+      res.json({ success: true, ok: true, status: "close", message: "WhatsApp session disconnected and logged out successfully" });
     } catch (err) {
-      res.status(500).json({ ok: false, error: err.message || "Failed to disconnect WhatsApp session" });
+      res.status(500).json({ success: false, ok: false, error: err.message || "Failed to disconnect WhatsApp session" });
     }
   };
   app2.post("/api/whatsapp/disconnect", handleWhatsAppDisconnect);
   app2.post("/api/auth/whatsapp/disconnect", handleWhatsAppDisconnect);
   const handleWhatsAppSend = async (req, res) => {
     try {
-      const { to, message, text, body, userId } = req.body || {};
+      const { to, message, text, body, userId, instanceName: reqInstance } = req.body || {};
       const targetPhone = String(to || "").trim();
       const content = String(message || text || body || "").trim();
       const targetUser = String(userId || req.headers["x-user-id"] || "default_workspace").trim();
+      const instanceName = String(reqInstance || buildEvolutionInstanceName(targetUser)).trim();
       if (!targetPhone || !content) {
         res.status(400).json({ ok: false, error: "Recipient number (to) and message text are required." });
         return;
       }
-      const result = await sendWhatsAppMessage(targetUser, targetPhone, content);
-      res.json({ ...result });
+      const evoResult = await sendWhatsAppViaEvolution(instanceName, targetPhone, content);
+      if (evoResult.ok) {
+        res.json({
+          ok: true,
+          deliveredViaApi: true,
+          provider: "Evolution API (v2.3.5)",
+          messageId: evoResult.messageId,
+          detail: evoResult.detail
+        });
+        return;
+      }
+      res.status(400).json({
+        ok: false,
+        provider: "Evolution API (v2.3.5)",
+        error: evoResult.error || evoResult.detail || "Evolution WhatsApp instance is disconnected or returned an error.",
+        detail: evoResult.detail
+      });
     } catch (err) {
-      res.status(500).json({ ok: false, error: err.message || "Failed to send WhatsApp message via Baileys socket" });
+      res.status(500).json({ ok: false, error: err.message || "Failed to send WhatsApp message via Evolution API" });
     }
   };
   app2.post("/api/whatsapp/send", handleWhatsAppSend);
   app2.post("/api/whatsapp/test", handleWhatsAppSend);
+  app2.post("/api/whatsapp/send-test", handleWhatsAppSend);
   app2.post("/api/auth/whatsapp/test", handleWhatsAppSend);
+  app2.post("/api/whatsapp/evolution/init", async (req, res) => {
+    try {
+      const userId = String(req.body?.userId || req.headers["x-user-id"] || "").trim();
+      if (!userId || userId === "default_workspace") {
+        res.status(401).json({
+          ok: false,
+          error: "Please sign in before initializing a WhatsApp connection."
+        });
+        return;
+      }
+      const instanceName = req.body?.instanceName ? String(req.body.instanceName).trim() : void 0;
+      const forceRestart = Boolean(req.body?.forceRestart);
+      const result = await initializeEvolutionConnection({
+        userId,
+        instanceName,
+        forceRestart
+      });
+      if (!result.ok) {
+        res.status(502).json(result);
+        return;
+      }
+      res.json(result);
+    } catch (err) {
+      res.status(500).json({
+        ok: false,
+        status: "close",
+        error: err?.message || "Failed to initialize Evolution WhatsApp connection."
+      });
+    }
+  });
+  app2.get("/api/whatsapp/evolution/status", async (req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    try {
+      const userId = String(req.query.userId || req.headers["x-user-id"] || "").trim();
+      const instanceName = String(req.query.instanceName || "").trim() || void 0;
+      const derivedUid = userId || (instanceName && instanceName.startsWith("flowpilot-") ? instanceName.slice("flowpilot-".length) : "");
+      if (!derivedUid || derivedUid === "default_workspace") {
+        res.status(401).json({
+          success: false,
+          ok: false,
+          status: "close",
+          error: "Authenticated userId or flowpilot instanceName is required."
+        });
+        return;
+      }
+      const result = await getEvolutionConnectionStatus({
+        userId: derivedUid,
+        instanceName
+      });
+      if (!result.ok) {
+        res.status(502).json({
+          success: false,
+          ...result
+        });
+        return;
+      }
+      res.json({
+        success: true,
+        ...result
+      });
+    } catch (err) {
+      res.status(500).json({
+        success: false,
+        ok: false,
+        status: "close",
+        error: err?.message || "Failed to poll Evolution WhatsApp status."
+      });
+    }
+  });
+  app2.post("/api/whatsapp/evolution/restart", async (req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    try {
+      const userId = String(req.body?.userId || req.headers["x-user-id"] || "").trim();
+      if (!userId || userId === "default_workspace") {
+        res.status(401).json({ success: false, ok: false, error: "Authentication required." });
+        return;
+      }
+      const instanceName = req.body?.instanceName ? String(req.body.instanceName).trim() : void 0;
+      const result = await initializeEvolutionConnection({
+        userId,
+        instanceName,
+        forceRestart: true
+      });
+      res.status(result.ok ? 200 : 502).json({
+        success: result.ok,
+        ...result
+      });
+    } catch (err) {
+      res.status(500).json({
+        success: false,
+        ok: false,
+        status: "close",
+        error: err?.message || "Failed to restart Evolution WhatsApp instance."
+      });
+    }
+  });
+  app2.post("/api/whatsapp/evolution/disconnect", async (req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    try {
+      const userId = String(req.body?.userId || req.headers["x-user-id"] || "").trim();
+      if (!userId || userId === "default_workspace") {
+        res.status(401).json({ success: false, ok: false, error: "Authentication required." });
+        return;
+      }
+      const instanceName = req.body?.instanceName ? String(req.body.instanceName).trim() : void 0;
+      const result = await disconnectEvolutionConnection({
+        userId,
+        instanceName
+      });
+      res.status(result.ok ? 200 : 502).json({
+        success: result.ok,
+        ...result
+      });
+    } catch (err) {
+      res.status(500).json({
+        success: false,
+        ok: false,
+        status: "close",
+        error: err?.message || "Failed to disconnect Evolution WhatsApp instance."
+      });
+    }
+  });
+  const handleConnectWhatsApp = async (req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    try {
+      const userId = String(
+        req.body?.userId || req.query?.userId || req.headers["x-user-id"] || ""
+      ).trim();
+      if (!userId || userId === "default_workspace") {
+        res.status(401).json({
+          success: false,
+          ok: false,
+          status: "close",
+          error: "Please sign in before connecting WhatsApp."
+        });
+        return;
+      }
+      const instanceName = req.body?.instanceName ? String(req.body.instanceName).trim() : `flowpilot-${userId}`.slice(0, 160);
+      const forceRestart = Boolean(req.body?.forceRestart || req.body?.reconnect);
+      const forwardedHost = String(req.headers["x-forwarded-host"] || req.headers.host || "").split(",")[0].trim();
+      const forwardedProto = String(req.headers["x-forwarded-proto"] || req.protocol || "https").split(",")[0].trim();
+      const isLocalHost = !forwardedHost || forwardedHost.startsWith("localhost") || forwardedHost.startsWith("127.0.0.1");
+      const webhookUrl = !isLocalHost ? `${forwardedProto}://${forwardedHost}/api/whatsapp/evolution-webhook` : void 0;
+      const result = await initializeEvolutionConnection({
+        userId,
+        instanceName,
+        forceRestart,
+        webhookUrl
+      });
+      if (!result.ok) {
+        res.status(502).json({
+          success: false,
+          ...result
+        });
+        return;
+      }
+      res.json({
+        success: true,
+        ok: true,
+        instanceName: result.instanceName,
+        userId: result.userId,
+        status: result.status,
+        qrCode: result.qrCode,
+        // base64 / dataUrl
+        pairingCode: result.pairingCode,
+        qrPending: result.qrPending,
+        upstreamCount: result.upstreamCount,
+        ownerJid: result.ownerJid,
+        profileName: result.profileName,
+        disconnectionReasonCode: result.disconnectionReasonCode,
+        detail: result.detail,
+        checkedAt: result.checkedAt
+      });
+    } catch (err) {
+      res.status(500).json({
+        success: false,
+        ok: false,
+        status: "close",
+        error: err?.message || "Failed to connect WhatsApp instance."
+      });
+    }
+  };
+  app2.post("/api/whatsapp/connect", handleConnectWhatsApp);
+  app2.post("/api/whatsapp/connect/", handleConnectWhatsApp);
+  const getWorkspaceSnapshotForUser = (userId) => {
+    const cleanId = String(userId || "").trim();
+    if (!cleanId) return null;
+    return serverWorkspaceSnapshotsByUid.get(cleanId) || Array.from(serverWorkspaceSnapshotsByUid.values()).find(
+      (snap) => snap?.workspace?.id === cleanId || snap?.workspace?.ownerId === cleanId || snap?.privateProfile?.email?.toLowerCase() === cleanId.toLowerCase()
+    ) || null;
+  };
+  const runAutomation = async (userId, leadPhone, text) => {
+    const cleanPhone = String(leadPhone || "").replace(/[^0-9]/g, "");
+    const cleanText = String(text || "").trim();
+    const lowerText = cleanText.toLowerCase();
+    const instanceName = buildEvolutionInstanceName(userId);
+    console.log(`[runAutomation] User: ${userId} | Lead: +${cleanPhone} | Text: "${cleanText}"`);
+    const results = {
+      workflowsTriggered: 0,
+      autoRepliesSent: 0,
+      followUpScheduled: false
+    };
+    try {
+      const userWorkflows = await getWorkflowsForUser(userId);
+      const activeWorkflows = userWorkflows.filter((w) => w.enabled);
+      for (const wf of activeWorkflows) {
+        let shouldTrigger = false;
+        try {
+          const nodes = JSON.parse(wf.nodesJson || "[]");
+          for (const node of nodes) {
+            const type = node.data?.nodeType || node.type || "";
+            if (type === "trigger_whatsapp_reply") {
+              shouldTrigger = true;
+              break;
+            }
+            if (type === "trigger_keyword") {
+              const kw = String(node.data?.triggerKeyword || node.data?.keyword || "").toLowerCase().trim();
+              if (kw && lowerText.includes(kw)) {
+                shouldTrigger = true;
+                break;
+              }
+            }
+            if (type === "condition_message_contains") {
+              const kw = String(node.data?.keyword || "").toLowerCase().trim();
+              if (kw && lowerText.includes(kw)) {
+                shouldTrigger = true;
+                break;
+              }
+            }
+          }
+        } catch {
+        }
+        if (shouldTrigger) {
+          console.log(`[runAutomation] Triggering visual workflow "${wf.name}" (${wf.id})`);
+          await executeWorkflow(wf.id, cleanPhone, cleanText, { userId, workflowOverride: wf });
+          results.workflowsTriggered++;
+        }
+      }
+    } catch (err) {
+      console.warn(`[runAutomation] Visual workflow runner error:`, err?.message || err);
+    }
+    try {
+      const snapshot = getWorkspaceSnapshotForUser(userId);
+      const autoResponders = Array.isArray(snapshot?.autoResponders) ? snapshot.autoResponders.filter((a) => a.status !== "paused") : [];
+      let keywordMatched = false;
+      for (const ar of autoResponders) {
+        const kw = String(ar.triggerMessage || ar.keyword || "").toLowerCase().trim();
+        const reply = String(ar.responseMessage || ar.replyMessage || "").trim();
+        const matchType = ar.matchType || "contains";
+        if (!kw || !reply) continue;
+        let matched = false;
+        if (matchType === "exact") matched = lowerText === kw;
+        else if (matchType === "startsWith") matched = lowerText.startsWith(kw);
+        else matched = lowerText.includes(kw);
+        if (matched) {
+          keywordMatched = true;
+          console.log(`[runAutomation] AutoResponder Keyword match: "${kw}" -> Replying to +${cleanPhone}`);
+          await sendWhatsAppViaEvolution(instanceName, cleanPhone, reply);
+          results.autoRepliesSent++;
+          ar.sentCount = (ar.sentCount || 0) + 1;
+          ar.triggeredCount = (ar.triggeredCount || 0) + 1;
+          break;
+        }
+      }
+      const inboxThreads = Array.isArray(snapshot?.inboxThreads) ? snapshot.inboxThreads : [];
+      const existingThread = inboxThreads.find(
+        (t) => t.leadPhone && t.leadPhone.replace(/[^0-9]/g, "") === cleanPhone
+      );
+      const isFirstMessage = !existingThread;
+      if (isFirstMessage && !keywordMatched) {
+        const welcomeResponder = autoResponders.find(
+          (ar) => ar.triggerMessage?.toLowerCase().includes("welcome") || ar.targetList?.toLowerCase().includes("welcome") || ar.name?.toLowerCase().includes("welcome")
+        );
+        const welcomeText = welcomeResponder?.responseMessage || welcomeResponder?.replyMessage || snapshot?.workspace?.welcomeMessage || "Hello! Thank you for reaching out. How can we help you today?";
+        console.log(`[runAutomation] First message from +${cleanPhone} -> Sending welcome reply`);
+        await sendWhatsAppViaEvolution(instanceName, cleanPhone, welcomeText);
+        results.autoRepliesSent++;
+      }
+      try {
+        const followUpMessage = snapshot?.workspace?.followUpMessage || "Hi again! Just following up to see if you had any questions on our previous message.";
+        const nextActionAt = Date.now() + 24 * 60 * 60 * 1e3;
+        await createFollowUpJob({
+          workflowId: "evolution_autoresponder_1day",
+          userId,
+          leadPhone: cleanPhone,
+          delayValue: 1,
+          delayUnit: "Days",
+          message: followUpMessage,
+          actionType: "action_send_whatsapp"
+        });
+        results.followUpScheduled = true;
+        console.log(`[runAutomation] Scheduled 1-day follow-up for +${cleanPhone}`);
+      } catch (fErr) {
+        console.warn(`[runAutomation] Could not schedule 1-day follow-up job:`, fErr?.message || fErr);
+      }
+      recordServerActivity(userId, {
+        eventType: "whatsapp_replied",
+        title: `WhatsApp from +${cleanPhone}`,
+        detail: `Lead: "${cleanText.slice(0, 80)}" \xB7 Auto-replies: ${results.autoRepliesSent}`,
+        channel: "whatsapp"
+      });
+    } catch (err) {
+      console.warn(`[runAutomation] AutoResponder evaluation error:`, err?.message || err);
+    }
+    return results;
+  };
+  const handleEvolutionWebhook = async (req, res) => {
+    const body = req.body || {};
+    const event = String(body.event || body.type || "").toUpperCase();
+    const instance = String(body.instance || body.instanceName || "").trim();
+    console.log(`[Evolution Webhook] Inbound event "${event}" on instance "${instance}"`);
+    res.status(200).json({ ok: true, received: true });
+    try {
+      if (event && !event.includes("MESSAGES_UPSERT") && !event.includes("MESSAGES.UPSERT")) {
+        return;
+      }
+      const data = body.data || body;
+      const key = data.key || data.message?.key || {};
+      if (key.fromMe === true) {
+        return;
+      }
+      const remoteJid = String(key.remoteJid || "").trim();
+      if (!remoteJid || remoteJid === "status@broadcast" || remoteJid.endsWith("@g.us")) {
+        return;
+      }
+      const leadPhone = remoteJid.split("@")[0].replace(/[^0-9]/g, "");
+      if (!leadPhone) {
+        return;
+      }
+      const messageObj = data.message || {};
+      let text = "";
+      if (typeof messageObj.conversation === "string") {
+        text = messageObj.conversation;
+      } else if (typeof messageObj.extendedTextMessage?.text === "string") {
+        text = messageObj.extendedTextMessage.text;
+      } else if (typeof messageObj.imageMessage?.caption === "string") {
+        text = messageObj.imageMessage.caption;
+      } else if (typeof messageObj.videoMessage?.caption === "string") {
+        text = messageObj.videoMessage.caption;
+      } else if (typeof messageObj.buttonsResponseMessage?.selectedButtonId === "string") {
+        text = messageObj.buttonsResponseMessage.selectedDisplayText || messageObj.buttonsResponseMessage.selectedButtonId;
+      } else if (typeof messageObj.listResponseMessage?.title === "string") {
+        text = messageObj.listResponseMessage.title;
+      }
+      text = String(text || "").trim();
+      if (!text) {
+        return;
+      }
+      let userId = "default_workspace";
+      if (instance.startsWith("flowpilot-")) {
+        userId = instance.slice("flowpilot-".length);
+      } else if (instance) {
+        userId = instance;
+      }
+      console.log(`[Evolution Webhook] Process lead message: Instance "${instance}" -> User "${userId}" | Phone: +${leadPhone} | Text: "${text}"`);
+      inboundWebhookQueue.unshift({
+        id: `inb_wa_evo_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        channel: "whatsapp",
+        leadName: data.pushName || `WhatsApp +${leadPhone}`,
+        leadEmail: "",
+        leadPhone,
+        message: text,
+        subject: `Inbound WhatsApp (${instance})`,
+        listName: "General Contacts",
+        receivedAt: (/* @__PURE__ */ new Date()).toISOString()
+      });
+      await runAutomation(userId, leadPhone, text);
+    } catch (err) {
+      console.error(`[Evolution Webhook] Error processing message:`, err?.message || err);
+    }
+  };
+  app2.post("/api/whatsapp/evolution-webhook", handleEvolutionWebhook);
+  app2.post("/webhook/evolution", handleEvolutionWebhook);
+  app2.get("/api/whatsapp/evolution-webhook", (_req, res) => {
+    res.json({ ok: true, service: "FlowPilot Evolution WhatsApp Webhook Listener", status: "ready" });
+  });
   app2.get("/api/whatsapp/templates", (req, res) => {
     try {
       const templates = getWhatsAppTemplatesForWaba();
@@ -4398,6 +6155,10 @@ async function startServer() {
         ok: true,
         requiresVerification: false,
         verified: true,
+        sessionToken: signFlowPilotSessionToken({
+          uid: verifiedAcc.uid,
+          email: verifiedAcc.email
+        }),
         account: {
           uid: verifiedAcc.uid,
           email: verifiedAcc.email,
@@ -4450,6 +6211,10 @@ async function startServer() {
         ok: true,
         requiresVerification: false,
         verified: true,
+        sessionToken: signFlowPilotSessionToken({
+          uid: updatedAcc.uid,
+          email: updatedAcc.email
+        }),
         account: {
           uid: updatedAcc.uid,
           email: updatedAcc.email,
@@ -4505,6 +6270,10 @@ async function startServer() {
           ok: true,
           requiresVerification: false,
           verified: true,
+          sessionToken: signFlowPilotSessionToken({
+            uid: existingAcc.uid,
+            email: existingAcc.email
+          }),
           account: {
             uid: existingAcc.uid,
             email: existingAcc.email,
@@ -4550,6 +6319,10 @@ async function startServer() {
         ok: true,
         requiresVerification: false,
         verified: true,
+        sessionToken: signFlowPilotSessionToken({
+          uid: provisionedAcc.uid,
+          email: provisionedAcc.email
+        }),
         account: {
           uid: provisionedAcc.uid,
           email: provisionedAcc.email,
@@ -4603,6 +6376,10 @@ async function startServer() {
         ok: true,
         requiresVerification: false,
         verified: true,
+        sessionToken: signFlowPilotSessionToken({
+          uid: googleAcc.uid,
+          email: googleAcc.email
+        }),
         account: {
           uid: googleAcc.uid,
           email: googleAcc.email,
@@ -4880,70 +6657,220 @@ async function startServer() {
       res.status(500).json({ ok: false, error: err.message });
     }
   });
-  app2.post("/api/email/add-domain", async (req, res) => {
+  const handleDomainError = (res, err, fallbackMsg) => {
+    if (err instanceof CustomDomainEmailError) {
+      res.status(err.statusCode).json({
+        ok: false,
+        code: err.code,
+        error: err.message
+      });
+      return;
+    }
+    res.status(500).json({
+      ok: false,
+      code: "INTERNAL_ERROR",
+      error: err instanceof Error ? err.message : fallbackMsg
+    });
+  };
+  const handleConnectCustomDomain = async (req, res) => {
     try {
-      const { fromName, fromEmail, userId } = req.body || {};
-      if (!fromEmail || typeof fromEmail !== "string" || !fromEmail.includes("@")) {
-        res.status(400).json({ ok: false, error: "Please enter a valid fromEmail address." });
+      const authUser = await verifyAuthenticatedRequest(req);
+      if (!authUser) {
+        res.status(401).json({
+          ok: false,
+          code: "UNAUTHORIZED",
+          error: "Authentication required. Please sign in to connect your custom email domain."
+        });
         return;
       }
-      const result = await addOrUpdateSharedDomain({
+      const { fromName, fromEmail, replyToEmail, region } = req.body || {};
+      const result = await connectUserCustomDomain({
+        ownerId: authUser.uid,
         fromName: String(fromName || ""),
         fromEmail: String(fromEmail || ""),
-        userId: String(userId || "me")
+        replyToEmail: replyToEmail ? String(replyToEmail) : void 0,
+        region: region ? String(region) : void 0
       });
       res.json({
         ok: true,
-        domain: result.domain,
-        domainId: result.domainId,
-        records: result.records,
-        verified: result.verified,
-        status: result.status,
-        users: result.users,
-        message: `Custom domain ${result.domain} saved successfully for user ${userId || "me"}.`
+        domain: result.domain.domain,
+        domainId: result.domain.resendDomainId,
+        domainRecord: result.domain,
+        records: result.domain.records,
+        verified: result.domain.verified,
+        status: result.domain.status,
+        sender: result.sender,
+        senders: result.senders,
+        reusedExisting: result.reusedExisting,
+        resendConfigured: isResendConfigured(),
+        message: result.domain.verified ? `Domain ${result.domain.domain} is verified and ready to send automated emails.` : `Domain ${result.domain.domain} connected. Add the DNS records below to your domain provider and click Verify Domain.`
       });
     } catch (err) {
-      const statusCode = err.message?.includes("For free plan, you must use same domain.") ? 400 : 500;
-      res.status(statusCode).json({
-        ok: false,
-        error: err.message || "Failed to configure custom domain."
-      });
-    }
-  });
-  const handleVerifyDomain = async (req, res) => {
-    try {
-      const domainId = String(req.body?.domainId || req.query?.domainId || "").trim();
-      const result = await verifySharedDomain(domainId || void 0);
-      res.json({
-        ok: true,
-        verified: result.verified,
-        status: result.status,
-        records: result.records,
-        domain: result.domain,
-        message: result.verified ? `\u2705 Domain ${result.domain} verified. Both emails ready` : `Domain verification status: ${result.status}. DNS records are propagating.`
-      });
-    } catch (err) {
-      res.status(500).json({
-        ok: false,
-        error: err.message || "Failed to verify domain DNS records."
-      });
+      handleDomainError(res, err, "Failed to connect custom domain.");
     }
   };
-  app2.post("/api/email/verify", handleVerifyDomain);
-  app2.get("/api/email/verify", handleVerifyDomain);
-  app2.post("/api/email/send", async (req, res) => {
+  app2.post("/api/email/domains", handleConnectCustomDomain);
+  app2.post("/api/email/add-domain", handleConnectCustomDomain);
+  const handleVerifyCustomDomain = async (req, res) => {
     try {
-      const { userId = "me", to, subject, html, text } = req.body || {};
-      if (!to || !subject) {
-        res.status(400).json({ ok: false, error: "Recipient email (to) and subject are required." });
+      const authUser = await verifyAuthenticatedRequest(req);
+      if (!authUser) {
+        res.status(401).json({
+          ok: false,
+          code: "UNAUTHORIZED",
+          error: "Authentication required. Please sign in to verify your domain."
+        });
         return;
       }
-      const result = await sendEmailAsUser({
-        userId: String(userId),
-        to: String(to),
-        subject: String(subject),
+      const result = await verifyUserEmailDomain(authUser.uid);
+      res.json({
+        ok: true,
+        verified: result.verified,
+        status: result.status,
+        records: result.records,
+        domain: result.domain.domain,
+        domainRecord: result.domain,
+        message: result.verified ? `Domain ${result.domain.domain} is verified! Automated and test emails are now enabled.` : `Domain status is "${result.status}". DNS propagation can take a few minutes\u2014please retry once all records show verified.`
+      });
+    } catch (err) {
+      handleDomainError(res, err, "Failed to verify custom domain DNS records.");
+    }
+  };
+  app2.post("/api/email/domains/verify", handleVerifyCustomDomain);
+  app2.post("/api/email/verify", handleVerifyCustomDomain);
+  const handleGetEmailDomainStatus = async (req, res) => {
+    try {
+      const authUser = await verifyAuthenticatedRequest(req);
+      if (!authUser) {
+        res.status(401).json({
+          ok: false,
+          code: "UNAUTHORIZED",
+          error: "Authentication required. Please sign in to view your custom email domain settings."
+        });
+        return;
+      }
+      const refresh = String(req.query.refresh || "").toLowerCase() === "true";
+      const state = await getUserEmailDomainStatus(authUser.uid, { refresh });
+      res.json({
+        ok: true,
+        domain: state.domain?.domain || "",
+        domainId: state.domain?.resendDomainId || "",
+        domainRecord: state.domain,
+        records: state.domain?.records || [],
+        verified: Boolean(state.domain?.verified),
+        status: state.domain?.status || "not_started",
+        sender: state.sender,
+        senders: state.senders,
+        resendConfigured: state.resendConfigured
+      });
+    } catch (err) {
+      handleDomainError(res, err, "Failed to fetch custom domain email status.");
+    }
+  };
+  app2.get("/api/email/domains/status", handleGetEmailDomainStatus);
+  app2.get("/api/email/settings", handleGetEmailDomainStatus);
+  app2.delete("/api/email/domains", async (req, res) => {
+    try {
+      const authUser = await verifyAuthenticatedRequest(req);
+      if (!authUser) {
+        res.status(401).json({
+          ok: false,
+          code: "UNAUTHORIZED",
+          error: "Authentication required."
+        });
+        return;
+      }
+      const result = await deleteUserEmailDomain(authUser.uid);
+      res.json({
+        ok: true,
+        removedDomain: result.removedDomain,
+        message: result.removedDomain ? `Removed domain ${result.removedDomain} from your account.` : "No custom domain was attached to your account."
+      });
+    } catch (err) {
+      handleDomainError(res, err, "Failed to remove custom domain.");
+    }
+  });
+  app2.get("/api/email/sender", async (req, res) => {
+    try {
+      const authUser = await verifyAuthenticatedRequest(req);
+      if (!authUser) {
+        res.status(401).json({ ok: false, code: "UNAUTHORIZED", error: "Authentication required." });
+        return;
+      }
+      const state = await getUserEmailDomainStatus(authUser.uid);
+      res.json({
+        ok: true,
+        sender: state.sender,
+        senders: state.senders,
+        domain: state.domain?.domain || "",
+        verified: Boolean(state.domain?.verified)
+      });
+    } catch (err) {
+      handleDomainError(res, err, "Failed to fetch sender identity.");
+    }
+  });
+  app2.post("/api/email/sender", async (req, res) => {
+    try {
+      const authUser = await verifyAuthenticatedRequest(req);
+      if (!authUser) {
+        res.status(401).json({ ok: false, code: "UNAUTHORIZED", error: "Authentication required." });
+        return;
+      }
+      const { fromName, fromEmail, replyToEmail } = req.body || {};
+      const result = await updateUserEmailSender({
+        ownerId: authUser.uid,
+        fromName: String(fromName || ""),
+        fromEmail: String(fromEmail || ""),
+        replyToEmail: replyToEmail ? String(replyToEmail) : void 0
+      });
+      res.json({
+        ok: true,
+        sender: result.sender,
+        senders: result.senders,
+        domain: result.domain.domain,
+        verified: result.domain.verified,
+        message: `Updated sender identity to ${result.sender.fromName} <${result.sender.fromEmail}>.`
+      });
+    } catch (err) {
+      handleDomainError(res, err, "Failed to update sender identity.");
+    }
+  });
+  app2.get("/api/email/logs", async (req, res) => {
+    try {
+      const authUser = await verifyAuthenticatedRequest(req);
+      if (!authUser) {
+        res.status(401).json({ ok: false, code: "UNAUTHORIZED", error: "Authentication required." });
+        return;
+      }
+      const logs = getUserEmailDeliveryLogs(authUser.uid);
+      res.json({ ok: true, logs });
+    } catch (err) {
+      handleDomainError(res, err, "Failed to fetch email delivery logs.");
+    }
+  });
+  app2.post("/api/email/send", async (req, res) => {
+    try {
+      const authUser = await verifyAuthenticatedRequest(req);
+      if (!authUser) {
+        res.status(401).json({
+          ok: false,
+          success: false,
+          code: "UNAUTHORIZED",
+          error: "Authentication required to send custom domain emails."
+        });
+        return;
+      }
+      const { to, subject, html, text, replyTo, attachments, fromEmail, fromName } = req.body || {};
+      const result = await sendCustomDomainEmail({
+        ownerId: authUser.uid,
+        to,
+        subject: String(subject || ""),
         html: html ? String(html) : void 0,
-        text: text ? String(text) : void 0
+        text: text ? String(text) : void 0,
+        replyTo: replyTo ? String(replyTo) : void 0,
+        attachments: Array.isArray(attachments) ? attachments : void 0,
+        fromEmailOverride: fromEmail ? String(fromEmail) : void 0,
+        fromNameOverride: fromName ? String(fromName) : void 0
       });
       res.json({
         ok: true,
@@ -4952,33 +6879,288 @@ async function startServer() {
         from: result.from,
         to: result.to,
         subject: result.subject,
+        domain: result.domain,
         provider: result.provider,
-        message: `Email successfully sent from ${result.from} to ${result.to}!`
+        message: `Email sent from ${result.from} to ${result.to.join(", ")}.`
       });
     } catch (err) {
-      res.status(500).json({
-        ok: false,
-        success: false,
-        error: err.message || "Failed to dispatch email via Resend API."
-      });
+      handleDomainError(res, err, "Failed to dispatch custom domain email.");
     }
   });
-  app2.get("/api/email/settings", async (_req, res) => {
+  app2.post("/api/webhooks/resend", async (req, res) => {
     try {
-      const domainRecord = await getActiveEmailDomain();
-      const users = await getEmailUsers();
+      const rawBody = typeof req.rawBody === "string" ? req.rawBody : JSON.stringify(req.body || {});
+      const svixId = String(req.headers["svix-id"] || "");
+      const svixTimestamp = String(req.headers["svix-timestamp"] || "");
+      const svixSignature = String(req.headers["svix-signature"] || "");
+      const result = await handleResendWebhookEvent({
+        rawBody,
+        svixId,
+        svixTimestamp,
+        svixSignature
+      });
+      if (result.bouncedRecipients) {
+        for (const r of result.bouncedRecipients) {
+          markRecipientGloballySuppressed(r);
+        }
+      }
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      handleDomainError(res, err, "Webhook verification failed.");
+    }
+  });
+  const handleUniversalInboundWebhook = async (req, res) => {
+    const startTimeMs = Date.now();
+    const config = getWebhookGatewayConfig();
+    if (req.method === "GET") {
       res.json({
         ok: true,
-        domain: domainRecord?.domain || "",
-        domainId: domainRecord?.domainId || "",
-        records: domainRecord?.records || [],
-        verified: domainRecord?.verified || false,
-        status: domainRecord?.status || "not_started",
-        users
+        gateway: "FlowPilot Universal Inbound Webhook Gateway",
+        status: config.isEnabled ? "active_listening" : "paused",
+        timestamp: (/* @__PURE__ */ new Date()).toISOString(),
+        message: "Send POST requests with your webhook payload and secret token."
+      });
+      return;
+    }
+    if (!config.isEnabled) {
+      res.status(503).json({ ok: false, error: "Webhook gateway is currently paused in dashboard." });
+      return;
+    }
+    const authHeader = String(req.headers["authorization"] || "").replace(/^Bearer\s+/i, "").trim();
+    const secretHeader = String(req.headers["x-flowpilot-secret"] || "").trim();
+    const queryToken = String(req.query.token || req.query.secret || "").trim();
+    const providedToken = secretHeader || authHeader || queryToken;
+    const isValidToken = !config.token || providedToken === config.token || providedToken === "flowpilot_sec_7x9q2m1k8p4w";
+    if (!isValidToken && providedToken) {
+      const failed = recordAndProcessWebhook({
+        method: req.method,
+        url: req.originalUrl || req.url,
+        ip: req.ip || req.socket.remoteAddress || "127.0.0.1",
+        userAgent: String(req.headers["user-agent"] || "Unknown Agent"),
+        headers: req.headers,
+        query: req.query,
+        body: req.body,
+        startTimeMs,
+        statusCode: 403
+      });
+      res.status(403).json({ ok: false, error: "Invalid webhook secret token.", logId: failed.log.id });
+      return;
+    }
+    try {
+      const result = recordAndProcessWebhook({
+        method: req.method,
+        url: req.originalUrl || req.url,
+        ip: req.ip || req.socket.remoteAddress || "127.0.0.1",
+        userAgent: String(req.headers["user-agent"] || "Unknown Agent"),
+        headers: req.headers,
+        query: req.query,
+        body: req.body,
+        startTimeMs,
+        statusCode: 200
+      });
+      const extracted = result.extracted;
+      if (extracted.email || extracted.phone) {
+        for (const [snapKey, snap] of serverWorkspaceSnapshotsByUid.entries()) {
+          if (snap && Array.isArray(snap.contacts)) {
+            const contacts = snap.contacts;
+            const existingIdx = contacts.findIndex(
+              (c) => extracted.email && c.email?.toLowerCase() === extracted.email.toLowerCase() || extracted.phone && c.phone?.replace(/\D/g, "") === extracted.phone?.replace(/\D/g, "")
+            );
+            const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+            if (existingIdx >= 0) {
+              const current = contacts[existingIdx];
+              const mergedTags = Array.from(/* @__PURE__ */ new Set([...current.tags || [], ...extracted.tags || []]));
+              contacts[existingIdx] = {
+                ...current,
+                fullName: extracted.fullName || current.fullName,
+                company: extracted.company || current.company,
+                ltv: (Number(current.ltv) || 0) + (extracted.amount || 0),
+                tags: mergedTags,
+                stage: extracted.stage || current.stage || "lead",
+                updatedAt: nowIso
+              };
+            } else {
+              contacts.unshift({
+                id: `cnt_wh_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+                workspaceId: snap.workspace?.id || snapKey,
+                ownerId: snapKey,
+                fullName: extracted.fullName || "Inbound Lead",
+                email: extracted.email || "",
+                phone: extracted.phone || "",
+                company: extracted.company || "",
+                stage: extracted.stage || "lead",
+                temperature: "warm",
+                source: `Webhook (${result.log.source})`,
+                consentStatus: "opted_in",
+                listName: extracted.listName || "General Contacts",
+                tags: extracted.tags || ["Webhook_Lead"],
+                ltv: extracted.amount || 0,
+                notes: `Captured via Universal Webhook (${result.log.source} \xB7 ${result.log.event})`,
+                createdAt: nowIso,
+                updatedAt: nowIso
+              });
+            }
+            if (!Array.isArray(snap.activities)) snap.activities = [];
+            snap.activities.unshift({
+              id: `act_wh_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+              workspaceId: snap.workspace?.id || snapKey,
+              ownerId: snapKey,
+              eventType: "automation_triggered",
+              channel: "web",
+              title: `Webhook: ${extracted.fullName || extracted.email || result.log.source}`,
+              detail: `Event: ${result.log.event} \xB7 Source: ${result.log.source} \xB7 LTV: $${extracted.amount || 0}`,
+              createdAt: nowIso,
+              updatedAt: nowIso
+            });
+            snap.activities = snap.activities.slice(0, 150);
+            snap.updatedAt = nowIso;
+            break;
+          }
+        }
+        flushWorkspacesStoreToDisk();
+      }
+      res.json({
+        ok: true,
+        received: true,
+        logId: result.log.id,
+        source: result.log.source,
+        event: result.log.event,
+        contact: extracted,
+        message: "Webhook processed and CRM synchronized successfully."
       });
     } catch (err) {
-      res.status(500).json({ ok: false, error: err.message || "Failed to fetch email settings" });
+      console.error("[Webhook Gateway] Ingestion error:", err);
+      res.status(500).json({ ok: false, error: err.message || "Internal webhook ingestion error" });
     }
+  };
+  app2.all("/api/webhook/gateway", handleUniversalInboundWebhook);
+  app2.all("/webhook/gateway", handleUniversalInboundWebhook);
+  app2.all("/api/v1/webhook/gateway", handleUniversalInboundWebhook);
+  app2.get("/api/webhook/gateway/logs", (_req, res) => {
+    try {
+      const logs = getWebhookLogs(100);
+      const config = getWebhookGatewayConfig();
+      res.json({
+        ok: true,
+        logs,
+        config
+      });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message || "Failed to fetch webhook logs" });
+    }
+  });
+  app2.delete("/api/webhook/gateway/logs", (_req, res) => {
+    try {
+      clearWebhookLogs();
+      res.json({ ok: true, message: "Webhook logs cleared" });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message || "Failed to clear logs" });
+    }
+  });
+  app2.post("/api/webhook/gateway/token", (req, res) => {
+    try {
+      const customToken = req.body?.token ? String(req.body.token).trim() : null;
+      const newToken = customToken || generateNewWebhookToken();
+      if (customToken) {
+        updateWebhookGatewayConfig({ token: customToken });
+      }
+      res.json({ ok: true, token: newToken, message: "Webhook secret token updated" });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message || "Failed to update token" });
+    }
+  });
+  app2.post("/api/webhook/gateway/config", (req, res) => {
+    try {
+      const { mappings, isEnabled, token } = req.body || {};
+      const updated = updateWebhookGatewayConfig({
+        ...mappings ? { mappings } : {},
+        ...isEnabled !== void 0 ? { isEnabled: Boolean(isEnabled) } : {},
+        ...token ? { token: String(token).trim() } : {}
+      });
+      res.json({ ok: true, config: updated });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message || "Failed to update webhook config" });
+    }
+  });
+  app2.post("/api/webhook/gateway/simulate", (req, res) => {
+    try {
+      const { body, headers = {}, preset = "custom" } = req.body || {};
+      const payloadBody = body || { event: "test.simulation", email: "test@example.com", name: "Test User" };
+      const simulatedHeaders = {
+        "content-type": "application/json",
+        "user-agent": `FlowPilot-Simulator/${preset}`,
+        ...headers
+      };
+      const result = recordAndProcessWebhook({
+        method: "POST",
+        url: "/api/webhook/gateway?simulated=true",
+        ip: "127.0.0.1 (Simulator)",
+        userAgent: simulatedHeaders["user-agent"],
+        headers: simulatedHeaders,
+        query: { simulated: "true", preset },
+        body: payloadBody,
+        startTimeMs: Date.now() - 12,
+        statusCode: 200,
+        isSimulated: true
+      });
+      res.json({
+        ok: true,
+        simulated: true,
+        log: result.log,
+        extracted: result.extracted,
+        message: `Simulated webhook for ${result.log.source} (${result.log.event}) processed successfully!`
+      });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message || "Failed to simulate webhook" });
+    }
+  });
+  app2.post("/api/webhook/gateway/replay/:id", (req, res) => {
+    try {
+      const targetLog = getWebhookLogById(req.params.id);
+      if (!targetLog) {
+        res.status(404).json({ ok: false, error: "Webhook log entry not found" });
+        return;
+      }
+      const result = recordAndProcessWebhook({
+        method: targetLog.method,
+        url: targetLog.url || "/api/webhook/gateway",
+        ip: targetLog.ip,
+        userAgent: `${targetLog.userAgent} (Replayed)`,
+        headers: targetLog.headers,
+        query: targetLog.query,
+        body: targetLog.body,
+        startTimeMs: Date.now() - 8,
+        statusCode: 200
+      });
+      res.json({
+        ok: true,
+        replayed: true,
+        originalLogId: targetLog.id,
+        newLogId: result.log.id,
+        extracted: result.extracted,
+        message: `Successfully replayed webhook request #${targetLog.id.slice(-6)}`
+      });
+    } catch (err) {
+      res.status(500).json({ ok: false, error: err.message || "Failed to replay webhook" });
+    }
+  });
+  app2.all("/api/*", (req, res) => {
+    res.status(404).json({
+      success: false,
+      ok: false,
+      error: `API route not found: ${req.method} ${req.originalUrl}`
+    });
+  });
+  app2.use((err, req, res, next) => {
+    if (req.path.startsWith("/api")) {
+      res.status(err?.status || 500).json({
+        success: false,
+        ok: false,
+        error: err?.message || "Internal server API error."
+      });
+      return;
+    }
+    next(err);
   });
   const server = app2.listen(PORT, "0.0.0.0", () => {
     console.log(`FlowPilot Full-Stack Multi-Channel Server running on http://0.0.0.0:${PORT}`);
@@ -4993,10 +7175,10 @@ async function startServer() {
     });
     app2.use(vite.middlewares);
   } else {
-    const distPath = path5.join(__dirname2, "dist");
+    const distPath = path8.join(__dirname5, "dist");
     app2.use(express.static(distPath));
     app2.get("*", (_req, res) => {
-      res.sendFile(path5.join(distPath, "index.html"));
+      res.sendFile(path8.join(distPath, "index.html"));
     });
   }
 }

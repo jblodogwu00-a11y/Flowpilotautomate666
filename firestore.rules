@@ -476,6 +476,47 @@ service cloud.firestore {
       data.updatedAt is timestamp;
     }
 
+    function isValidEmailDomain(data) {
+      return data.keys().hasAll([
+        'ownerId', 'domain', 'resendDomainId', 'status', 'verified', 'recordsJson',
+        'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'ownerId', 'domain', 'resendDomainId', 'status', 'verified', 'recordsJson',
+        'region', 'createdAt', 'updatedAt'
+      ]) &&
+      data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId == request.auth.uid &&
+      data.domain is string && data.domain.size() >= 3 && data.domain.size() <= 120 &&
+      data.resendDomainId is string && data.resendDomainId.size() >= 1 && data.resendDomainId.size() <= 128 &&
+      data.status is string && data.status.size() <= 32 && data.status in ['not_started', 'pending', 'verified', 'failed', 'temporary_failure'] &&
+      data.verified is bool &&
+      data.recordsJson is string && data.recordsJson.size() >= 2 && data.recordsJson.size() <= 16000 &&
+      (!('region' in data) || (data.region is string && data.region.size() <= 32)) &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidEmailSender(data) {
+      return data.keys().hasAll([
+        'ownerId', 'domain', 'fromName', 'fromEmail', 'isDefault',
+        'createdAt', 'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'ownerId', 'domain', 'fromName', 'fromEmail', 'replyToEmail', 'isDefault',
+        'createdAt', 'updatedAt'
+      ]) &&
+      data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.ownerId == request.auth.uid &&
+      data.domain is string && data.domain.size() >= 3 && data.domain.size() <= 120 &&
+      data.fromName is string && data.fromName.size() >= 1 && data.fromName.size() <= 100 &&
+      data.fromEmail is string && data.fromEmail.size() >= 3 && data.fromEmail.size() <= 150 &&
+      (!('replyToEmail' in data) || (data.replyToEmail is string && data.replyToEmail.size() <= 150)) &&
+      data.isDefault is bool &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
     // =========================================================================
     // 3. COLLECTION RULES
     // =========================================================================
@@ -1009,17 +1050,63 @@ service cloud.firestore {
       allow read, write: if isValidId(userId);
     }
 
-    // Custom Domain Email Automation (Free Resend Plan Compatible - Shared Domain for 2 Users)
-    match /email_domains/{domain} {
-      allow get: if isAdmin();
-      allow list: if false;
-      allow create, update, delete: if isAdmin();
+    // Custom Domain Email Automation (Per-Account Isolated Domain & Sender Records)
+    match /email_domains/{domainId} {
+      allow get: if isVerified() &&
+        isValidId(domainId) &&
+        (domainId == ('dom_' + request.auth.uid) || existing().ownerId == request.auth.uid || isAdmin());
+      allow list: if isVerified() && (existing().ownerId == request.auth.uid || isAdmin());
+      allow create: if isVerified() &&
+        isValidId(domainId) &&
+        (domainId == ('dom_' + request.auth.uid) || isAdmin()) &&
+        isValidEmailDomain(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isVerified() &&
+        isValidId(domainId) &&
+        isValidEmailDomain(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() || (
+            existing().ownerId == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'domain', 'resendDomainId', 'status', 'verified', 'recordsJson', 'region', 'updatedAt'
+            ])
+          )
+        );
+      allow delete: if isVerified() &&
+        isValidId(domainId) &&
+        (domainId == ('dom_' + request.auth.uid) || existing().ownerId == request.auth.uid || isAdmin());
     }
 
-    match /email_users/{userId} {
-      allow get: if isVerified() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
-      allow list: if false;
-      allow create, update, delete: if isAdmin();
+    match /email_senders/{senderId} {
+      allow get: if isVerified() &&
+        isValidId(senderId) &&
+        (senderId == ('snd_' + request.auth.uid) || existing().ownerId == request.auth.uid || isAdmin());
+      allow list: if isVerified() && (existing().ownerId == request.auth.uid || isAdmin());
+      allow create: if isVerified() &&
+        isValidId(senderId) &&
+        (senderId == ('snd_' + request.auth.uid) || isAdmin()) &&
+        isValidEmailSender(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isVerified() &&
+        isValidId(senderId) &&
+        isValidEmailSender(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() || (
+            existing().ownerId == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'domain', 'fromName', 'fromEmail', 'replyToEmail', 'isDefault', 'updatedAt'
+            ])
+          )
+        );
+      allow delete: if isVerified() &&
+        isValidId(senderId) &&
+        (senderId == ('snd_' + request.auth.uid) || existing().ownerId == request.auth.uid || isAdmin());
     }
 
     // Evolution API WhatsApp Connections (QR Connect State per Logged-In User)

@@ -4,7 +4,7 @@ import {
   UserPrivateProfile,
   resolveWorkspaceSenderIdentities,
 } from '../types';
-import { getGmailAccessToken, getConnectedGmailAddress } from '../firebase';
+import { getGmailAccessToken, getConnectedGmailAddress, getClientAuthHeaders } from '../firebase';
 import { sendEvolutionTextMessage } from '../lib/evolutionClient';
 import { htmlToPlainText, htmlToWhatsAppText } from '../utils/richMessageFormat';
 
@@ -143,7 +143,6 @@ export type SmsProviderMode =
 export type EmailProviderMode =
   | 'builtin_relay'
   | 'gmail_oauth'
-  | 'resend_api'
   | 'sendgrid_api'
   | 'smtp';
 
@@ -173,7 +172,6 @@ export interface SmsGatewayConnectorConfig {
 
 export interface EmailGatewayConnectorConfig {
   providerMode: EmailProviderMode;
-  resendApiKey?: string;
   sendgridApiKey?: string;
   smtpHost?: string;
   smtpPort?: number | string;
@@ -233,7 +231,6 @@ const DEFAULT_GATEWAY_RUNTIME_CONFIG: ChannelGatewayRuntimeConfig = {
   },
   email: {
     providerMode: 'builtin_relay',
-    resendApiKey: '',
     sendgridApiKey: '',
     smtpHost: '',
     smtpPort: 587,
@@ -368,14 +365,12 @@ export function getEmailProviderLabel(mode: EmailProviderMode): string {
   switch (mode) {
     case 'gmail_oauth':
       return 'Google Workspace Gmail API (OAuth Direct)';
-    case 'resend_api':
-      return 'Resend Transactional Email API (Live Connector)';
     case 'sendgrid_api':
       return 'SendGrid Email API (Live Connector)';
     case 'smtp':
       return 'SMTP Email Gateway (Connected)';
     default:
-      return 'FlowPilot Verified Email Relay + Direct Mail Bridge';
+      return 'FlowPilot Platform Custom Domain Email (Resend)';
   }
 }
 
@@ -671,13 +666,17 @@ export async function deliverChannelMessage(
   }
 
   try {
+    const authHeaders = await getClientAuthHeaders();
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
+      ...authHeaders,
     };
 
     if (gmailToken) {
       headers.Authorization = `Bearer ${gmailToken}`;
     }
+
+    const ownerUid = payload.workspace?.ownerId || getActiveGatewayAccountUid() || undefined;
 
     const res = await fetch('/api/messages/deliver', {
       method: 'POST',
@@ -688,6 +687,7 @@ export async function deliverChannelMessage(
         leadName: payload.leadName || 'Lead Contact',
         from: resolvedFrom,
         senderName,
+        userId: ownerUid,
         replyToEmail:
           payload.overrideReplyToEmail?.trim() ||
           payload.privateProfile?.replyToEmail ||
@@ -705,22 +705,48 @@ export async function deliverChannelMessage(
       }),
     });
 
-    if (res.ok) {
-      const data = await res.json();
-      if (data?.receipt) {
-        const receipt = data.receipt as MessageDeliveryReceipt;
-        saveReceiptToLocalHistory(receipt);
-        return receipt;
-      }
+    const data = await res.json().catch(() => null);
+    if (data?.receipt) {
+      const receipt = data.receipt as MessageDeliveryReceipt;
+      saveReceiptToLocalHistory(receipt);
+      return receipt;
+    }
+
+    if (!res.ok) {
+      const failedReceipt: MessageDeliveryReceipt = {
+        receiptId: `rcpt_blocked_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        channel: payload.channel,
+        status: 'failed',
+        providerUsed: getEmailProviderLabel(storedGateways.email.providerMode),
+        fromIdentity: resolvedFrom,
+        senderName,
+        toRecipient: cleanRecipient,
+        leadName: payload.leadName || 'Lead Contact',
+        ...(payload.channel === 'email' && payload.subject ? { subject: payload.subject } : {}),
+        bodyPreview: plainBodyPreview,
+        source: payload.source,
+        listName: payload.listName || 'General Contacts',
+        directLaunchUrl: buildDirectChannelUrl(
+          payload.channel,
+          cleanRecipient,
+          payload.subject || `Message from ${senderName}`,
+          formattedBody
+        ),
+        timestamp: new Date().toISOString(),
+        detailMessage:
+          data?.error || `Email delivery blocked by server (HTTP ${res.status}).`,
+      };
+      saveReceiptToLocalHistory(failedReceipt);
+      return failedReceipt;
     }
   } catch {
-    // Fallback to client-side relay receipt if backend unreachable
+    // Fallback to client-side relay receipt only if backend is unreachable
   }
 
   const fallbackReceipt: MessageDeliveryReceipt = {
     receiptId: `rcpt_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
     channel: payload.channel,
-    status: 'dispatched_relay',
+    status: payload.channel === 'email' && !gmailToken ? 'failed' : 'dispatched_relay',
     providerUsed:
       payload.channel === 'whatsapp'
         ? getWhatsAppProviderLabel(storedGateways.whatsapp.providerMode)
@@ -744,7 +770,10 @@ export async function deliverChannelMessage(
       formattedBody
     ),
     timestamp: new Date().toISOString(),
-    detailMessage: `Dispatched from ${resolvedFrom} (${senderName}) to ${cleanRecipient} via ${payload.channel.toUpperCase()}`,
+    detailMessage:
+      payload.channel === 'email' && !gmailToken
+        ? 'Email delivery server unavailable or domain unverified. Verify your custom domain in Settings → Email Automation.'
+        : `Dispatched from ${resolvedFrom} (${senderName}) to ${cleanRecipient} via ${payload.channel.toUpperCase()}`,
   };
 
   saveReceiptToLocalHistory(fallbackReceipt);
@@ -836,7 +865,11 @@ export async function enqueueScheduledAutomationJobs(
   });
 
   try {
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const authHeaders = await getClientAuthHeaders();
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      ...authHeaders,
+    };
     if (gmailToken) {
       headers.Authorization = `Bearer ${gmailToken}`;
     }

@@ -159,12 +159,22 @@ export const SystemDiagnosticsModal: React.FC<SystemDiagnosticsModalProps> = ({
       });
 
       setTestResults((prev) => [receipt, ...prev]);
-      await onLogActivity(
-        'campaign_sent',
-        `Live Diagnostics Test Delivered via ${channelToUse.toUpperCase()}`,
-        `Recipient: ${receipt.toRecipient} · Provider: ${receipt.providerUsed} · Receipt ID: ${receipt.receiptId}`,
-        'system'
-      );
+      if (receipt.status === 'failed') {
+        setTestError(receipt.detailMessage || receipt.bodyPreview || 'Channel dispatch blocked');
+        await onLogActivity(
+          'campaign_sent',
+          `Live Diagnostics Test Blocked via ${channelToUse.toUpperCase()}`,
+          `Recipient: ${receipt.toRecipient} · Reason: ${receipt.detailMessage || receipt.bodyPreview}`,
+          'system'
+        );
+      } else {
+        await onLogActivity(
+          'campaign_sent',
+          `Live Diagnostics Test Delivered via ${channelToUse.toUpperCase()}`,
+          `Recipient: ${receipt.toRecipient} · Provider: ${receipt.providerUsed} · Receipt ID: ${receipt.receiptId}`,
+          'system'
+        );
+      }
       await refreshSystemData();
     } catch (err) {
       setTestError(err instanceof Error ? err.message : 'Message dispatch failed');
@@ -899,7 +909,13 @@ export const SystemDiagnosticsModal: React.FC<SystemDiagnosticsModalProps> = ({
                             <span className="text-xs text-slate-500">({r.leadName})</span>
                           </div>
                           <div className="flex items-center gap-2">
-                            <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase bg-emerald-50 text-emerald-900 border border-emerald-200">
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-mono font-bold uppercase border ${
+                                r.status === 'failed'
+                                  ? 'bg-rose-50 text-rose-900 border-rose-200'
+                                  : 'bg-emerald-50 text-emerald-900 border-emerald-200'
+                              }`}
+                            >
                               Status: {r.status}
                             </span>
                             <span className="text-[11px] font-mono text-slate-400">
@@ -908,15 +924,21 @@ export const SystemDiagnosticsModal: React.FC<SystemDiagnosticsModalProps> = ({
                           </div>
                         </div>
 
-                        <div className="text-xs text-slate-600 bg-slate-50 p-2.5 rounded-lg font-mono">
-                          {r.bodyPreview}
+                        <div
+                          className={`text-xs p-2.5 rounded-lg font-mono ${
+                            r.status === 'failed'
+                              ? 'bg-rose-50 text-rose-800 border border-rose-200'
+                              : 'bg-slate-50 text-slate-600'
+                          }`}
+                        >
+                          {r.status === 'failed' ? r.detailMessage || r.bodyPreview : r.bodyPreview}
                         </div>
 
                         <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500 pt-1 border-t border-slate-100">
                           <div>
                             <strong>Provider:</strong> {r.providerUsed} · <strong>Sender:</strong> {r.senderName}
                           </div>
-                          {r.directLaunchUrl && (
+                          {r.directLaunchUrl && r.status !== 'failed' && (
                             <a
                               href={r.directLaunchUrl}
                               target="_blank"

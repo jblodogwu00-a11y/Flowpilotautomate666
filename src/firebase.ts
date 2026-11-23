@@ -32,6 +32,8 @@ import {
   WorkspaceSnapshot,
   getStoredActiveAccountSession,
   saveStoredActiveAccountSession,
+  getFlowPilotSessionToken,
+  clearFlowPilotSessionToken,
   isEmailVerifiedInLocalRegistry,
   syncAccountWithServer,
 } from './services/accountPersistenceService';
@@ -305,6 +307,29 @@ export function disconnectGmailToken(): void {
   notifyGmailTokenListeners();
 }
 
+export async function getClientAuthHeaders(): Promise<Record<string, string>> {
+  const headers: Record<string, string> = {};
+  try {
+    if (auth.currentUser) {
+      const idToken = await auth.currentUser.getIdToken();
+      if (idToken && idToken !== 'fp_local_session_token') {
+        headers.Authorization = `Bearer ${idToken}`;
+        headers['x-flowpilot-session'] = idToken;
+        return headers;
+      }
+    }
+  } catch {
+    // Fallback to server-signed FlowPilot session token
+  }
+
+  const sessionToken = getFlowPilotSessionToken();
+  if (sessionToken) {
+    headers.Authorization = `Bearer ${sessionToken}`;
+    headers['x-flowpilot-session'] = sessionToken;
+  }
+  return headers;
+}
+
 export enum OperationType {
   CREATE = 'create',
   UPDATE = 'update',
@@ -476,6 +501,7 @@ export async function signInWithEmailPassword(
 }
 
 export async function signOutUser(): Promise<void> {
+  clearFlowPilotSessionToken();
   await signOut(auth);
   saveStoredActiveAccountSession(null);
   notifyAuthSessionChanged(null, null);
@@ -861,6 +887,7 @@ export async function logOutUser(): Promise<void> {
   cachedAccessToken = null;
   connectedGmailEmail = null;
   notifyGmailTokenListeners();
+  clearFlowPilotSessionToken();
   saveStoredActiveAccountSession(null);
   try {
     await signOut(auth);

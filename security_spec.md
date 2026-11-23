@@ -10,6 +10,7 @@
 6. **Terminal State Locking Invariant**: Once a `TaskItem` reaches `status == 'completed'`, or an `Automation` / `CaptureAsset` / `ChatbotFlow` reaches `status == 'archived'`, subsequent non-admin updates are rejected.
 7. **Zero-Cost List Query Invariant**: Every `allow list` rule enforces `resource.data.ownerId == request.auth.uid` (or `resource.data.userId == request.auth.uid` for user-scoped WhatsApp records) without calling `get()` or `exists()`.
 8. **WhatsApp Connection Identity Invariant**: Every document in `/whatsapp_connections/{connectionId}` must match `userId == request.auth.uid`, valid `instanceName` matching `^[a-zA-Z0-9_\\-]+$`, strict `status in ['open', 'close', 'connecting']`, and server-enforced timestamps (`createdAt`, `updatedAt`).
+9. **Custom Domain Email Isolation Invariant**: Every document in `/email_domains/{domainId}` and `/email_senders/{senderId}` must enforce `ownerId == request.auth.uid`, immutable `ownerId` and `createdAt`, strict `status in ['not_started', 'pending', 'verified', 'failed', 'temporary_failure']`, bounded `recordsJson` (`<= 16000`), and server-enforced `request.time` timestamps.
 
 ---
 
@@ -28,4 +29,6 @@
 11. **Payload 11 (Cross-Tenant PII Read)**: Authenticated user `uid_attacker` attempts `get` on `/users/uid_victim/private/default`. -> **PERMISSION_DENIED**
 12. **Payload 12 (Unfiltered Cross-Tenant List Scraping)**: Authenticated user `uid_attacker` runs an unfiltered `list` query across `/contacts` or `/whatsapp_connections` without filtering ownership. -> **PERMISSION_DENIED**
 13. **Payload 13 (WhatsApp Connection Identity Spoofing & Status Poisoning)**: Authenticated user attempts to write `/whatsapp_connections/uid_victim` or set an invalid status (`status: "hacked"` or shadow field `isAdmin: true`). -> **PERMISSION_DENIED**
+14. **Payload 14 (Custom Domain Ownership Hijack & Status Poisoning)**: Authenticated user `uid_attacker` attempts to create or update `/email_domains/dom_uid_victim` or inject an invalid `status: "force_verified"` or shadow field `resendApiKey`. -> **PERMISSION_DENIED**
+
 

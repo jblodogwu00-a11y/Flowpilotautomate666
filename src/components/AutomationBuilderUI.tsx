@@ -453,9 +453,7 @@ const ActionNodeComponent = ({ data, selected }: NodeProps<FlowCustomNode>) => {
               {isEnd
                 ? 'No further follow-up'
                 : isEmail
-                ? data.emailSenderPersona === 'brother'
-                  ? 'From: support@passiveincome.work.gd'
-                  : 'From: hello@passiveincome.work.gd'
+                ? data.senderEmailPreview || 'From: Verified Custom Domain'
                 : 'Delivered via WhatsApp'}
             </p>
           </div>
@@ -1011,6 +1009,8 @@ export interface AutomationBuilderUIProps {
   ) => Promise<void>;
   onNavigateToLists?: () => void;
   onBackToDashboard?: () => void;
+  emailDomainStatus?: import('../utils/emailDomainValidation').EmailDomainStatusSummary | null;
+  onNavigateToEmailSettings?: () => void;
 }
 
 export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
@@ -1031,6 +1031,8 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
   onCreateList,
   onNavigateToLists,
   onBackToDashboard,
+  emailDomainStatus,
+  onNavigateToEmailSettings,
 }) => {
   // Mode: 'list' (Saved Workflows Hub) or 'canvas' (Visual Drag-and-Drop Builder)
   const [viewMode, setViewMode] = useState<'list' | 'canvas'>('list');
@@ -3058,21 +3060,55 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
                     </div>
 
                     {selectedNode.data.nodeType === 'action_send_email' && (
-                      <div className="p-3 bg-blue-50/70 rounded-xl border border-blue-200/80 space-y-2">
-                        <label className="block text-xs font-bold text-blue-900">
-                          Sender Persona
-                        </label>
-                        <select
-                          value={selectedNode.data.emailSenderPersona || 'me'}
-                          onChange={(e) => {
-                            const val = e.target.value;
-                            handleUpdateNodeData('emailSenderPersona', val);
-                          }}
-                          className="w-full px-3 py-2 bg-white border border-blue-300 rounded-lg text-xs font-semibold text-slate-900"
-                        >
-                          <option value="me">Primary (hello@passiveincome.work.gd)</option>
-                          <option value="brother">Support (support@passiveincome.work.gd)</option>
-                        </select>
+                      <div
+                        className={`p-3 rounded-xl border space-y-2 ${
+                          emailDomainStatus?.verified
+                            ? 'bg-emerald-50/70 border-emerald-200/80'
+                            : 'bg-amber-50/80 border-amber-200'
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="text-xs font-bold text-slate-900">
+                            Custom Domain Sender
+                          </span>
+                          <span
+                            className={`text-[11px] font-bold ${
+                              emailDomainStatus?.verified
+                                ? 'text-emerald-700'
+                                : 'text-amber-700'
+                            }`}
+                          >
+                            {emailDomainStatus?.verified
+                              ? 'Verified'
+                              : emailDomainStatus?.domain
+                              ? 'Pending DNS'
+                              : 'Not Connected'}
+                          </span>
+                        </div>
+
+                        {emailDomainStatus?.sender ? (
+                          <p className="text-[11px] font-mono text-slate-700 break-all">
+                            {emailDomainStatus.sender.fromName} &lt;
+                            {emailDomainStatus.sender.fromEmail}&gt;
+                          </p>
+                        ) : (
+                          <p className="text-[11px] text-amber-900">
+                            Automated workflow emails are blocked until you connect and verify your
+                            custom domain.
+                          </p>
+                        )}
+
+                        {!emailDomainStatus?.verified && onNavigateToEmailSettings && (
+                          <button
+                            type="button"
+                            onClick={onNavigateToEmailSettings}
+                            className="w-full py-1.5 px-3 text-[11px] font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-lg cursor-pointer"
+                          >
+                            {emailDomainStatus?.domain
+                              ? 'Complete DNS Verification'
+                              : 'Connect Custom Email Domain'}
+                          </button>
+                        )}
                       </div>
                     )}
 

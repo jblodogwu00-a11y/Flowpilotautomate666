@@ -176,4 +176,32 @@ export const DIRTY_DOZEN_TESTS: DirtyDozenTestCase[] = [
     },
     expectedResult: 'PERMISSION_DENIED',
   },
+  {
+    id: 15,
+    name: 'Identity Spoofing on EmailDomain Create',
+    operation: 'create',
+    path: '/email_domains/dom_uid_victim',
+    auth: { uid: 'uid_attacker', email: 'attacker@example.com', email_verified: true },
+    payload: {
+      ownerId: 'uid_victim',
+      domain: 'victim.com',
+      resendDomainId: 'dom_fake',
+      status: 'verified',
+      verified: true,
+      recordsJson: '[]',
+    },
+    expectedResult: 'PERMISSION_DENIED',
+  },
+  {
+    id: 16,
+    name: 'Shadow Field & Status Poisoning on EmailDomain Update',
+    operation: 'update',
+    path: '/email_domains/dom_uid_owner',
+    auth: { uid: 'uid_owner', email: 'owner@example.com', email_verified: true },
+    payload: {
+      status: 'force_verified',
+      resendApiKey: 're_shadow_key',
+    },
+    expectedResult: 'PERMISSION_DENIED',
+  },
 ];

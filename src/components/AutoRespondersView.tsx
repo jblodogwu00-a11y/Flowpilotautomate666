@@ -611,6 +611,13 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
       privateProfile,
     });
 
+    if (receipt.status === 'failed') {
+      setFeedbackBanner(
+        `${CHANNEL_LABELS[ar.channel]} delivery blocked: ${receipt.detailMessage}`
+      );
+      return;
+    }
+
     await onUpdateAutoResponder(ar.id, {
       name: ar.name,
       targetList: ar.targetList,
@@ -684,6 +691,7 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
     );
 
     let deliveryReceipt: MessageDeliveryReceipt | undefined;
+    let isDeliveryFailed = false;
 
     if (isMatch) {
       deliveryReceipt = await deliverChannelMessage({
@@ -710,6 +718,7 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
         privateProfile,
       });
 
+      isDeliveryFailed = deliveryReceipt?.status === 'failed';
       await onUpdateAutoResponder(testingResponder.id, {
         name: testingResponder.name,
         targetList: testingResponder.targetList,
@@ -720,15 +729,21 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
         ...(testingResponder.subjectLine ? { subjectLine: testingResponder.subjectLine } : {}),
         status: testingResponder.status,
         triggeredCount: (testingResponder.triggeredCount || 0) + 1,
-        sentCount: (testingResponder.sentCount || 0) + 1,
+        sentCount: (testingResponder.sentCount || 0) + (isDeliveryFailed ? 0 : 1),
       });
 
       await onLogActivity(
-        testingResponder.channel === 'whatsapp'
-          ? 'whatsapp_replied'
-          : 'automation_triggered',
-        `Auto-Pilot Reply Sent (${CHANNEL_LABELS[testingResponder.channel]}): ${testingResponder.name}`,
-        `Lead "${selectedTestLeadName}" (${deliveryReceipt.toRecipient}) in list "${testingResponder.targetList}" sent "${simulatedInboundText.slice(0, 60)}" → Delivered via ${deliveryReceipt.providerUsed} from ${deliveryReceipt.fromIdentity}.`,
+        isDeliveryFailed
+          ? 'automation_triggered'
+          : testingResponder.channel === 'whatsapp'
+            ? 'whatsapp_replied'
+            : 'automation_triggered',
+        isDeliveryFailed
+          ? `Auto-Pilot Reply Blocked (${CHANNEL_LABELS[testingResponder.channel]}): ${testingResponder.name}`
+          : `Auto-Pilot Reply Sent (${CHANNEL_LABELS[testingResponder.channel]}): ${testingResponder.name}`,
+        isDeliveryFailed
+          ? `Lead "${selectedTestLeadName}" (${deliveryReceipt.toRecipient}) matched trigger, but delivery was blocked: ${deliveryReceipt.detailMessage || deliveryReceipt.bodyPreview}`
+          : `Lead "${selectedTestLeadName}" (${deliveryReceipt.toRecipient}) in list "${testingResponder.targetList}" sent "${simulatedInboundText.slice(0, 60)}" → Delivered via ${deliveryReceipt.providerUsed} from ${deliveryReceipt.fromIdentity}.`,
         testingResponder.channel
       );
 
@@ -737,7 +752,7 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
           ? {
               ...prev,
               triggeredCount: (prev.triggeredCount || 0) + 1,
-              sentCount: (prev.sentCount || 0) + 1,
+              sentCount: (prev.sentCount || 0) + (isDeliveryFailed ? 0 : 1),
             }
           : null
       );
@@ -749,7 +764,8 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
         listName: testingResponder.targetList,
         channel: testingResponder.channel,
         leadMessage: simulatedInboundText.trim(),
-        autoResponseSent: isMatch ? htmlToPlainText(personalizedReply) : undefined,
+        autoResponseSent:
+          isMatch && !isDeliveryFailed ? htmlToPlainText(personalizedReply) : undefined,
         responderName: testingResponder.name,
       });
     }
@@ -2045,31 +2061,42 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
               </div>
             </form>
 
-            {simulationResult && (
+            {simulationResult && (() => {
+              const deliveryBlocked =
+                simulationResult.matched && simulationResult.receipt?.status === 'failed';
+              return (
               <div
                 className={`p-4 rounded-xl border space-y-2.5 ${
-                  simulationResult.matched
-                    ? 'bg-emerald-50 border-emerald-200'
-                    : 'bg-amber-50 border-amber-200'
+                  deliveryBlocked
+                    ? 'bg-rose-50 border-rose-200'
+                    : simulationResult.matched
+                      ? 'bg-emerald-50 border-emerald-200'
+                      : 'bg-amber-50 border-amber-200'
                 }`}
               >
                 <div className="flex items-center justify-between text-xs font-bold">
                   <span
                     className={
-                      simulationResult.matched ? 'text-emerald-900' : 'text-amber-900'
+                      deliveryBlocked
+                        ? 'text-rose-900'
+                        : simulationResult.matched
+                          ? 'text-emerald-900'
+                          : 'text-amber-900'
                     }
                   >
-                    {simulationResult.matched
-                      ? `✓ Trigger Matched! Auto-Response Delivered via ${CHANNEL_LABELS[simulationResult.channel]}`
-                      : '✕ Message Did Not Match Trigger Phrase'}
+                    {deliveryBlocked
+                      ? `✕ Trigger Matched, But ${CHANNEL_LABELS[simulationResult.channel]} Delivery Blocked`
+                      : simulationResult.matched
+                        ? `✓ Trigger Matched! Auto-Response Delivered via ${CHANNEL_LABELS[simulationResult.channel]}`
+                        : '✕ Message Did Not Match Trigger Phrase'}
                   </span>
                   <span className="text-slate-500 font-mono text-[11px]">
                     {simulationResult.timestamp}
                   </span>
                 </div>
                 {simulationResult.matched ? (
-                  <div className="p-3 rounded-lg bg-white border border-emerald-200 text-xs sm:text-sm text-slate-900 space-y-2">
-                    <div className="text-[11px] font-mono font-bold text-emerald-800 border-b border-slate-100 pb-1.5 space-y-0.5">
+                  <div className={`p-3 rounded-lg bg-white border text-xs sm:text-sm text-slate-900 space-y-2 ${deliveryBlocked ? 'border-rose-200' : 'border-emerald-200'}`}>
+                    <div className={`text-[11px] font-mono font-bold border-b border-slate-100 pb-1.5 space-y-0.5 ${deliveryBlocked ? 'text-rose-800' : 'text-emerald-800'}`}>
                       <div>From: {getChannelFromDisplay(simulationResult.channel)}</div>
                       {simulationResult.receipt && (
                         <div className="text-slate-600">
@@ -2079,7 +2106,13 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
                         </div>
                       )}
                     </div>
-                    {simulationResult.channel === 'whatsapp' ? (
+                    {deliveryBlocked ? (
+                      <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-xs text-rose-800 font-medium">
+                        {simulationResult.receipt?.detailMessage ||
+                          simulationResult.receipt?.bodyPreview ||
+                          'Custom domain verification is required before sending automated emails.'}
+                      </div>
+                    ) : simulationResult.channel === 'whatsapp' ? (
                       <div
                         className="leading-relaxed space-y-1 [&_strong]:font-bold [&_em]:italic"
                         dangerouslySetInnerHTML={{
@@ -2098,7 +2131,7 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
                         {htmlToPlainText(simulationResult.replySent)}
                       </div>
                     )}
-                    {simulationResult.receipt && (
+                    {simulationResult.receipt && !deliveryBlocked && (
                       <div className="pt-2 border-t border-slate-100 flex items-center justify-between gap-2">
                         <span className="text-[11px] text-emerald-800 font-semibold">
                           ✓ Dispatched through multi-channel gateway
@@ -2141,7 +2174,8 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
                   </div>
                 )}
               </div>
-            )}
+              );
+            })()}
           </div>
         </div>
       )}

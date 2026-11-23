@@ -1485,6 +1485,140 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "EmailDomain": {
+      "title": "EmailDomain",
+      "description": "Per-account custom email domain connected via centralized Resend Domains API.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "UID of the authenticated user owning this custom email domain.",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "domain": {
+          "type": "string",
+          "description": "Normalized custom domain name (e.g. musa.com).",
+          "maxLength": 120,
+          "minLength": 3
+        },
+        "resendDomainId": {
+          "type": "string",
+          "description": "Resend domain identifier returned by Resend Domains API.",
+          "maxLength": 128,
+          "minLength": 1
+        },
+        "status": {
+          "type": "string",
+          "description": "Current domain verification state from Resend.",
+          "enum": [
+            "not_started",
+            "pending",
+            "verified",
+            "failed",
+            "temporary_failure"
+          ]
+        },
+        "verified": {
+          "type": "boolean",
+          "description": "True only when the domain is verified in Resend for automated sending."
+        },
+        "recordsJson": {
+          "type": "string",
+          "description": "Serialized JSON array of dynamic DNS records returned by Resend.",
+          "maxLength": 16000,
+          "minLength": 2
+        },
+        "region": {
+          "type": "string",
+          "description": "Optional Resend sending region.",
+          "maxLength": 32,
+          "minLength": 0
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when the domain connection was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when the domain verification status was last updated."
+        }
+      },
+      "required": [
+        "ownerId",
+        "domain",
+        "resendDomainId",
+        "status",
+        "verified",
+        "recordsJson",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "EmailSender": {
+      "title": "EmailSender",
+      "description": "Per-account verified custom domain sender identity (From Name, From Email, Reply-To).",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "UID of the authenticated user owning this sender identity.",
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "domain": {
+          "type": "string",
+          "description": "Normalized custom domain associated with this sender identity.",
+          "maxLength": 120,
+          "minLength": 3
+        },
+        "fromName": {
+          "type": "string",
+          "description": "Display sender name seen by recipients.",
+          "maxLength": 100,
+          "minLength": 1
+        },
+        "fromEmail": {
+          "type": "string",
+          "description": "Custom domain email address used as From address.",
+          "maxLength": 150,
+          "minLength": 3
+        },
+        "replyToEmail": {
+          "type": "string",
+          "description": "Optional Reply-To email address.",
+          "maxLength": 150,
+          "minLength": 0
+        },
+        "isDefault": {
+          "type": "boolean",
+          "description": "Whether this sender is the default custom email sender for the account."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when the sender identity was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp when the sender identity was last updated."
+        }
+      },
+      "required": [
+        "ownerId",
+        "domain",
+        "fromName",
+        "fromEmail",
+        "isDefault",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -1555,6 +1689,14 @@
     "/whatsapp_connections/{connectionId}": {
       "schema": "WhatsAppConnection",
       "description": "Evolution API WhatsApp connection records keyed by user UID."
+    },
+    "/email_domains/{domainId}": {
+      "schema": "EmailDomain",
+      "description": "Per-account custom email domain configuration and dynamic Resend DNS records."
+    },
+    "/email_senders/{senderId}": {
+      "schema": "EmailSender",
+      "description": "Per-account custom domain email sender identity configuration."
     }
   }
 }

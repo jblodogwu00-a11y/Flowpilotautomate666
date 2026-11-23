@@ -56,8 +56,7 @@ export interface VerificationEmailDispatchInfo {
 }
 
 export interface VerificationEmailConnectorOverride {
-  providerMode?: 'builtin_relay' | 'gmail_oauth' | 'resend_api' | 'sendgrid_api' | 'smtp';
-  resendApiKey?: string;
+  providerMode?: 'builtin_relay' | 'gmail_oauth' | 'sendgrid_api' | 'smtp';
   sendgridApiKey?: string;
   smtpHost?: string;
   smtpPort?: number | string;
@@ -68,8 +67,45 @@ export interface VerificationEmailConnectorOverride {
 }
 
 const ACTIVE_SESSION_KEY = 'fp_active_account_session_v1';
+const FLOWPILOT_SESSION_TOKEN_KEY = 'fp_session_token_v1';
 const LOCAL_ACCOUNTS_REGISTRY_KEY = 'fp_local_accounts_registry_v1';
 const WORKSPACE_SNAPSHOT_PREFIX = 'fp_workspace_state_v1_';
+
+let inMemorySessionToken: string | null = null;
+
+export function saveFlowPilotSessionToken(token: string | null | undefined): void {
+  const clean = typeof token === 'string' ? token.trim() : '';
+  if (!clean) return;
+  inMemorySessionToken = clean;
+  try {
+    sessionStorage.setItem(FLOWPILOT_SESSION_TOKEN_KEY, clean);
+  } catch {
+    // Ignore sessionStorage errors
+  }
+}
+
+export function getFlowPilotSessionToken(): string | null {
+  if (inMemorySessionToken) return inMemorySessionToken;
+  try {
+    const stored = sessionStorage.getItem(FLOWPILOT_SESSION_TOKEN_KEY);
+    if (stored && stored.trim()) {
+      inMemorySessionToken = stored.trim();
+      return inMemorySessionToken;
+    }
+  } catch {
+    // Ignore sessionStorage errors
+  }
+  return null;
+}
+
+export function clearFlowPilotSessionToken(): void {
+  inMemorySessionToken = null;
+  try {
+    sessionStorage.removeItem(FLOWPILOT_SESSION_TOKEN_KEY);
+  } catch {
+    // Ignore sessionStorage errors
+  }
+}
 
 interface LocalRegistryAccount {
   uid: string;
@@ -119,6 +155,9 @@ export function saveStoredActiveAccountSession(
   try {
     if (!session || !session.emailVerified) {
       localStorage.removeItem(ACTIVE_SESSION_KEY);
+      if (!session) {
+        clearFlowPilotSessionToken();
+      }
     } else {
       localStorage.setItem(ACTIVE_SESSION_KEY, JSON.stringify(session));
       const clean = (session.email || '').trim().toLowerCase();
@@ -611,8 +650,6 @@ export async function syncAccountWithServer(params: {
   const effectiveEmailConnector: VerificationEmailConnectorOverride = {
     providerMode:
       params.emailConnector?.providerMode || storedGateway.email.providerMode,
-    resendApiKey:
-      params.emailConnector?.resendApiKey || storedGateway.email.resendApiKey,
     sendgridApiKey:
       params.emailConnector?.sendgridApiKey || storedGateway.email.sendgridApiKey,
     smtpHost: params.emailConnector?.smtpHost,
@@ -785,6 +822,9 @@ export async function syncAccountWithServer(params: {
   };
   saveLocalAccountsRegistry(registry);
   saveStoredActiveAccountSession(session);
+  if (typeof data.sessionToken === 'string' && data.sessionToken.trim()) {
+    saveFlowPilotSessionToken(data.sessionToken);
+  }
 
   const serverSnap = (data.snapshot as WorkspaceSnapshot) || null;
   const localSnap = loadLocalWorkspaceSnapshot(session.uid, session.email);

@@ -25,6 +25,7 @@ import {
 } from '../types';
 import omnichannelFlowImg from '../assets/images/classic_chronometer_flow_1791674881599.jpg';
 import classicHeroStudioImg from '../assets/images/classic_architectural_hero_1791674859192.jpg';
+import { EmailDomainStatusSummary } from '../utils/emailDomainValidation';
 
 interface DashboardOverviewProps {
   workspace: Workspace;
@@ -35,6 +36,7 @@ interface DashboardOverviewProps {
   chatbots: ChatbotFlow[];
   tasks: TaskItem[];
   activities: ActivityLog[];
+  emailDomainStatus?: EmailDomainStatusSummary | null;
   onNavigate: (tab: ActiveTab) => void;
   onQuickAction: (
     action:
@@ -58,6 +60,7 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
   chatbots,
   tasks,
   activities,
+  emailDomainStatus,
   onNavigate,
   onQuickAction,
   onOpenDiagnostics,
@@ -188,7 +191,12 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
                 Automations, Broadcasts &amp; Multi-Channel CRM
               </h2>
               <p className="text-xs text-slate-400">
-                Resend Custom Domain connected · WhatsApp Cloud API active · Real-time webhooks
+                {emailDomainStatus?.verified
+                  ? `Verified domain ${emailDomainStatus.domain}`
+                  : emailDomainStatus?.domain
+                  ? `Domain ${emailDomainStatus.domain} pending DNS verification`
+                  : 'Custom email domain not connected yet'}{' '}
+                · WhatsApp Cloud API · Real-time webhooks
               </p>
             </div>
           </div>
@@ -285,16 +293,50 @@ export const DashboardOverview: React.FC<DashboardOverviewProps> = ({
           <span className="font-mono text-[11px] font-medium text-amber-600 dark:text-amber-400">Paced</span>
         </div>
 
-        <div className="p-3.5 rounded-xl bg-white dark:bg-[#0D1322] border border-slate-200 dark:border-slate-800 flex items-center justify-between gap-3 shadow-xs">
+        <button
+          type="button"
+          onClick={() => onNavigate('email_domain')}
+          className="p-3.5 rounded-xl bg-white dark:bg-[#0D1322] border border-slate-200 dark:border-slate-800 hover:border-blue-400 flex items-center justify-between gap-3 shadow-xs text-left cursor-pointer transition-colors"
+        >
           <div className="flex items-center gap-2.5 min-w-0">
-            <span className="w-2 h-2 rounded-full bg-blue-500 shrink-0" />
+            <span
+              className={`w-2 h-2 rounded-full shrink-0 ${
+                emailDomainStatus?.verified
+                  ? 'bg-emerald-500'
+                  : emailDomainStatus?.domain
+                  ? 'bg-amber-500'
+                  : 'bg-slate-400'
+              }`}
+            />
             <div className="min-w-0">
-              <p className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate">Domain &amp; Delivery</p>
-              <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">passiveincome.work.gd · Verified</p>
+              <p className="text-xs font-semibold text-slate-900 dark:text-slate-100 truncate">
+                Domain &amp; Delivery
+              </p>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 truncate">
+                {emailDomainStatus?.domain
+                  ? `${emailDomainStatus.domain} · ${
+                      emailDomainStatus.verified ? 'Verified' : 'Pending DNS'
+                    }`
+                  : 'Connect custom domain'}
+              </p>
             </div>
           </div>
-          <span className="font-mono text-[11px] font-medium text-blue-600 dark:text-blue-400">Ready</span>
-        </div>
+          <span
+            className={`font-mono text-[11px] font-medium shrink-0 ${
+              emailDomainStatus?.verified
+                ? 'text-emerald-600 dark:text-emerald-400'
+                : emailDomainStatus?.domain
+                ? 'text-amber-600 dark:text-amber-400'
+                : 'text-blue-600 dark:text-blue-400'
+            }`}
+          >
+            {emailDomainStatus?.verified
+              ? 'Ready'
+              : emailDomainStatus?.domain
+              ? 'Verify'
+              : 'Setup'}
+          </span>
+        </button>
       </section>
 
       {/* Primary KPI Grid (Clean SaaS Cards) */}

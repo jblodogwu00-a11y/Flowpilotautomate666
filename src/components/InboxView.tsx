@@ -381,7 +381,9 @@ export const InboxView: React.FC<InboxViewProps> = ({
       setLastDeliveryReceipt(receipt);
       setReplyMessage('');
       setFeedbackBanner(
-        `Delivered via ${receipt.providerUsed}! From: ${receipt.fromIdentity} → To: ${receipt.toRecipient} (${activeThread.leadName}).`
+        receipt.status === 'failed'
+          ? `Email delivery blocked: ${receipt.detailMessage}`
+          : `Delivered via ${receipt.providerUsed}! From: ${receipt.fromIdentity} → To: ${receipt.toRecipient} (${activeThread.leadName}).`
       );
     } finally {
       setSendingReply(false);

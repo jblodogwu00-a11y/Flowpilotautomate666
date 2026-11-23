@@ -60,12 +60,23 @@ import {
   runFollowUpCron,
 } from './src/lib/automation/followupCron.js';
 import {
-  addOrUpdateSharedDomain,
-  verifySharedDomain,
-  sendEmailAsUser,
-  getActiveEmailDomain,
-  getEmailUsers,
+  connectUserCustomDomain,
+  verifyUserEmailDomain,
+  getUserEmailDomainStatus,
+  updateUserEmailSender,
+  deleteUserEmailDomain,
+  sendCustomDomainEmail,
+  checkCustomDomainSendReadiness,
+  handleResendWebhookEvent,
+  getUserEmailDeliveryLogs,
+  CustomDomainEmailError,
+  isResendConfigured,
+  type EmailAttachmentInput,
 } from './src/lib/customDomainEmail.js';
+import {
+  signFlowPilotSessionToken,
+  verifyAuthenticatedRequest,
+} from './src/lib/serverAuth.js';
 import {
   getWebhookGatewayConfig,
   updateWebhookGatewayConfig,
@@ -728,7 +739,6 @@ export interface RuntimeSmsConnector {
 
 export interface RuntimeEmailConnector {
   providerMode?: 'builtin_relay' | 'gmail_oauth' | 'resend_api' | 'sendgrid_api' | 'smtp';
-  resendApiKey?: string;
   sendgridApiKey?: string;
   smtpHost?: string;
   smtpPort?: number | string;
@@ -812,18 +822,29 @@ async function dispatchEmailGateway(params: {
   replyToEmail?: string;
   subject: string;
   body: string;
+  html?: string;
+  attachments?: EmailAttachmentInput[];
   gmailAccessToken?: string;
   emailConnector?: RuntimeEmailConnector;
-}): Promise<{ deliveredViaApi: boolean; provider: string; detail: string }> {
+  ownerId?: string;
+  source?: string;
+}): Promise<{
+  deliveredViaApi: boolean;
+  blocked?: boolean;
+  errorCode?: string;
+  provider: string;
+  detail: string;
+}> {
   const formattedFrom = params.fromEmail.includes('<')
     ? params.fromEmail
     : `${params.senderName || 'FlowPilot'} <${params.fromEmail}>`;
 
   const mode = params.emailConnector?.providerMode || 'builtin_relay';
+  const isAccountVerification = params.source === 'account_verification';
 
   // Priority 1: Connected Google Workspace / Gmail OAuth Token
   const cleanGmailToken = (params.gmailAccessToken || '').trim();
-  if (cleanGmailToken && (mode === 'gmail_oauth' || mode === 'builtin_relay')) {
+  if (cleanGmailToken && (mode === 'gmail_oauth' || isAccountVerification)) {
     try {
       const mimeLines = [
         `From: ${formattedFrom}`,
@@ -864,80 +885,21 @@ async function dispatchEmailGateway(params: {
         };
       }
     } catch {
-      // Fallback to Resend / SendGrid / Relay if token expired or network issue
+      // Fall through if Gmail token expired
     }
   }
 
-  // Priority 2: Resend API (per-user runtime key or server env key)
-  const resendKey = (
-    params.emailConnector?.resendApiKey ||
-    process.env.RESEND_API_KEY ||
-    ''
-  ).trim();
-  if ((mode === 'resend_api' || resendKey) && resendKey && resendKey !== 'MY_RESEND_API_KEY') {
-    try {
-      const res = await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${resendKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          from: formattedFrom,
-          to: [params.to],
-          reply_to: params.replyToEmail || params.fromEmail,
-          subject: params.subject || `Message from ${params.senderName}`,
-          text: params.body,
-        }),
-      });
-      if (res.ok) {
-        return {
-          deliveredViaApi: true,
-          provider: 'Resend Transactional Email Gateway (Live)',
-          detail: `Delivered via Resend API · From: ${formattedFrom} → To: ${params.to}`,
-        };
-      }
-      // Automatic fallback to Resend verified onboarding sender if custom domain isn't verified yet
-      const fallbackRes = await fetch('https://api.resend.com/emails', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${resendKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          from: `${params.senderName || 'FlowPilot Security'} <onboarding@resend.dev>`,
-          to: [params.to],
-          reply_to: params.replyToEmail || params.fromEmail,
-          subject: params.subject || `Message from ${params.senderName}`,
-          text: params.body,
-        }),
-      });
-      if (fallbackRes.ok) {
-        return {
-          deliveredViaApi: true,
-          provider: 'Resend Transactional Email Gateway (Live)',
-          detail: `Delivered via Resend API · To: ${params.to}`,
-        };
-      }
-    } catch {
-      // Fallback if sandbox key
-    }
-    if (mode === 'resend_api') {
-      return {
-        deliveredViaApi: true,
-        provider: 'Resend Transactional Email Gateway (Connected)',
-        detail: `Dispatched via Resend Email Connector · From: ${formattedFrom} → To: ${params.to}`,
-      };
-    }
-  }
-
-  // Priority 3: SendGrid API (per-user runtime key or server env key)
+  // Priority 2: Explicit SendGrid API (for account verification or SendGrid mode)
   const sendgridKey = (
     params.emailConnector?.sendgridApiKey ||
     process.env.SENDGRID_API_KEY ||
     ''
   ).trim();
-  if ((mode === 'sendgrid_api' || sendgridKey) && sendgridKey && sendgridKey !== 'MY_SENDGRID_API_KEY') {
+  if (
+    (mode === 'sendgrid_api' || (isAccountVerification && sendgridKey)) &&
+    sendgridKey &&
+    sendgridKey !== 'MY_SENDGRID_API_KEY'
+  ) {
     try {
       const res = await fetch('https://api.sendgrid.com/v3/mail/send', {
         method: 'POST',
@@ -961,40 +923,22 @@ async function dispatchEmailGateway(params: {
         };
       }
     } catch {
-      // Fallback to SMTP / Relay
-    }
-    if (mode === 'sendgrid_api') {
-      return {
-        deliveredViaApi: true,
-        provider: 'SendGrid Email Gateway (Connected)',
-        detail: `Dispatched via SendGrid Email Connector · From: ${formattedFrom} → To: ${params.to}`,
-      };
+      // Fallback
     }
   }
 
-  // Priority 4: Standard SMTP Transport (Nodemailer — supports Gmail SMTP, AWS SES, Postmark, Mailgun, Custom SMTP)
-  const smtpHost = (
-    params.emailConnector?.smtpHost ||
-    process.env.SMTP_HOST ||
-    ''
-  ).trim();
-  const smtpPort = Number(
-    params.emailConnector?.smtpPort ||
-    process.env.SMTP_PORT ||
-    587
-  );
-  const smtpUser = (
-    params.emailConnector?.smtpUser ||
-    process.env.SMTP_USER ||
-    ''
-  ).trim();
-  const smtpPass = (
-    params.emailConnector?.smtpPass ||
-    process.env.SMTP_PASS ||
-    ''
-  ).trim();
+  // Priority 3: Standard SMTP Transport
+  const smtpHost = (params.emailConnector?.smtpHost || process.env.SMTP_HOST || '').trim();
+  const smtpPort = Number(params.emailConnector?.smtpPort || process.env.SMTP_PORT || 587);
+  const smtpUser = (params.emailConnector?.smtpUser || process.env.SMTP_USER || '').trim();
+  const smtpPass = (params.emailConnector?.smtpPass || process.env.SMTP_PASS || '').trim();
 
-  if ((mode === 'smtp' || (smtpHost && smtpUser && smtpPass)) && smtpHost && smtpUser && smtpPass) {
+  if (
+    (mode === 'smtp' || (isAccountVerification && smtpHost && smtpUser && smtpPass)) &&
+    smtpHost &&
+    smtpUser &&
+    smtpPass
+  ) {
     try {
       const transporter = nodemailer.createTransport({
         host: smtpHost,
@@ -1019,22 +963,87 @@ async function dispatchEmailGateway(params: {
         detail: `Delivered via SMTP (${smtpHost}:${smtpPort}) · To: ${params.to}`,
       };
     } catch {
-      // Fallback if SMTP credentials unreachable
-    }
-    if (mode === 'smtp') {
-      return {
-        deliveredViaApi: true,
-        provider: `SMTP Email Gateway (${smtpHost})`,
-        detail: `Dispatched via SMTP Connector (${smtpHost}) · To: ${params.to}`,
-      };
+      // Continue
     }
   }
 
-  return {
-    deliveredViaApi: true,
-    provider: 'FlowPilot Multi-Provider Email Gateway',
-    detail: `Dispatched to recipient email inbox (${params.to})`,
-  };
+  // System Account Verification OTP Emails: use centralized Resend key (never blocked by user custom domain state)
+  if (isAccountVerification) {
+    const serverResendKey = (process.env.RESEND_API_KEY || '').trim();
+    if (serverResendKey && serverResendKey !== 'your_resend_api_key_here') {
+      try {
+        const res = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${serverResendKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            from: `${params.senderName || 'FlowPilot Security'} <onboarding@resend.dev>`,
+            to: [params.to],
+            reply_to: params.replyToEmail || params.fromEmail,
+            subject: params.subject || 'FlowPilot Verification Code',
+            text: params.body,
+          }),
+        });
+        if (res.ok) {
+          return {
+            deliveredViaApi: true,
+            provider: 'FlowPilot Security Verification Relay',
+            detail: `Verification email delivered to ${params.to}`,
+          };
+        }
+      } catch {
+        // Non-fatal for verification
+      }
+    }
+    return {
+      deliveredViaApi: true,
+      provider: 'FlowPilot Account Security Relay',
+      detail: `Dispatched verification instructions to ${params.to}`,
+    };
+  }
+
+  // All automated, campaign, autoresponder, and custom-domain sends MUST have a verified custom domain
+  const readiness = await checkCustomDomainSendReadiness(params.ownerId || '');
+  if (!readiness.allowed) {
+    return {
+      deliveredViaApi: false,
+      blocked: true,
+      errorCode: 'DOMAIN_NOT_VERIFIED',
+      provider: 'Custom Domain Verification Gate (Blocked)',
+      detail:
+        readiness.reason ||
+        'Blocked: Custom domain is not verified. Verify your DNS records in Settings → Email Automation.',
+    };
+  }
+
+  try {
+    const sendResult = await sendCustomDomainEmail({
+      ownerId: params.ownerId!,
+      to: params.to,
+      subject: params.subject || `Message from ${readiness.fromName || params.senderName}`,
+      html: params.html || params.body,
+      text: params.body.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim() || params.body,
+      replyTo: params.replyToEmail,
+      attachments: params.attachments,
+      fromEmailOverride: params.fromEmail,
+      fromNameOverride: params.senderName,
+    });
+    return {
+      deliveredViaApi: true,
+      provider: sendResult.provider,
+      detail: `Delivered via ${sendResult.provider} (ID: ${sendResult.id || 'ok'}) · From: ${sendResult.from} → To: ${params.to}`,
+    };
+  } catch (err: any) {
+    return {
+      deliveredViaApi: false,
+      blocked: true,
+      errorCode: err instanceof CustomDomainEmailError ? err.code : 'RESEND_SEND_FAILED',
+      provider: 'Custom Domain Email Gate',
+      detail: err?.message || 'Failed to send via verified custom domain.',
+    };
+  }
 }
 
 async function dispatchSmsGateway(params: {
@@ -1240,7 +1249,13 @@ async function executeUnifiedServerDispatch(params: {
     return suppressedReceipt;
   }
 
-  let dispatchResult: { deliveredViaApi: boolean; provider: string; detail: string };
+  let dispatchResult: {
+    deliveredViaApi: boolean;
+    blocked?: boolean;
+    errorCode?: string;
+    provider: string;
+    detail: string;
+  };
   if (cleanChannel === 'whatsapp') {
     dispatchResult = await sendWhatsApp({
       to: cleanTo,
@@ -1260,6 +1275,8 @@ async function executeUnifiedServerDispatch(params: {
       body: cleanBody,
       gmailAccessToken: params.gmailAccessToken,
       emailConnector: params.emailConnector,
+      ownerId: params.userId,
+      source: params.source,
     });
   } else {
     dispatchResult = await dispatchSmsGateway({
@@ -1271,12 +1288,12 @@ async function executeUnifiedServerDispatch(params: {
     });
   }
 
-  // Forward to Outbound Webhook Bridge (Zapier / Make / n8n / WhatsApp tool) if configured
+  // Forward to Outbound Webhook Bridge (Zapier / Make / n8n / WhatsApp tool) if configured and not blocked
   const targetWebhook = String(
     params.webhookUrl || process.env.OUTBOUND_WEBHOOK_URL || ''
   ).trim();
   let webhookDelivered = false;
-  if (targetWebhook && /^https?:\/\//i.test(targetWebhook)) {
+  if (!dispatchResult.blocked && targetWebhook && /^https?:\/\//i.test(targetWebhook)) {
     try {
       const whRes = await fetch(targetWebhook, {
         method: 'POST',
@@ -1313,10 +1330,11 @@ async function executeUnifiedServerDispatch(params: {
   const receipt: DeliveryReceiptRecord = {
     receiptId: `rcpt_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     channel: cleanChannel,
-    status:
-      dispatchResult.deliveredViaApi || webhookDelivered
-        ? 'delivered'
-        : 'dispatched_relay',
+    status: dispatchResult.blocked
+      ? 'failed'
+      : dispatchResult.deliveredViaApi || webhookDelivered
+      ? 'delivered'
+      : 'dispatched_relay',
     providerUsed: webhookDelivered
       ? `${dispatchResult.provider} + Webhook Bridge`
       : dispatchResult.provider,
@@ -1384,7 +1402,7 @@ export interface ScheduledAutomationJob {
   createdAt: string;
   scheduledFor: string;
   processedAt?: string;
-  status: 'queued' | 'dispatched' | 'halted_kill_switch' | 'cancelled';
+  status: 'queued' | 'dispatched' | 'halted_kill_switch' | 'cancelled' | 'failed';
   statusReason: string;
   matchedKillSwitchTag?: string;
   receiptId?: string;
@@ -1564,12 +1582,15 @@ async function processScheduledAutomationJobs(): Promise<void> {
           smsConnector: job.smsConnector,
           emailConnector: job.emailConnector,
         });
-        job.status = 'dispatched';
+        job.status = receipt.status === 'failed' ? 'failed' : 'dispatched';
         job.processedAt = new Date().toISOString();
         job.receiptId = receipt.receiptId;
         job.providerUsed = receipt.providerUsed;
         job.directLaunchUrl = receipt.directLaunchUrl;
-        job.statusReason = `Dispatched after ${job.delaySeconds}s delay via ${receipt.providerUsed} (List Kill Switch verified clear)`;
+        job.statusReason =
+          receipt.status === 'failed'
+            ? receipt.detailMessage
+            : `Dispatched after ${job.delaySeconds}s delay via ${receipt.providerUsed} (List Kill Switch verified clear)`;
       }
     }
   } finally {
@@ -1595,7 +1616,14 @@ async function startServer() {
   const app = express();
   const PORT = Number(process.env.PORT) || 3000;
 
-  app.use(express.json({ limit: '10mb' }));
+  app.use(
+    express.json({
+      limit: '10mb',
+      verify: (req, _res, buf) => {
+        (req as any).rawBody = buf.toString('utf-8');
+      },
+    })
+  );
   app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
   // Start the 24/7 Server Background Scheduler Worker (checks every 1.5s)
@@ -1673,6 +1701,7 @@ async function startServer() {
   // 3. Deliver a Message on Any Channel (WhatsApp, Email, or SMS)
   const handleDeliverMessageRoute = async (req: express.Request, res: express.Response) => {
     try {
+      const authUser = await verifyAuthenticatedRequest(req);
       const authHeader = String(req.headers.authorization || '').trim();
       const bearerToken = authHeader.toLowerCase().startsWith('bearer ')
         ? authHeader.slice(7).trim()
@@ -1709,6 +1738,13 @@ async function startServer() {
         return;
       }
 
+      const resolvedOwnerUid = authUser?.uid || String(userId || '').trim() || undefined;
+      const safeGmailToken =
+        gmailAccessToken ||
+        (bearerToken && !bearerToken.startsWith('fp_sess.') && authUser?.authSource !== 'firebase_id_token'
+          ? bearerToken
+          : '');
+
       const receipt = await executeUnifiedServerDispatch({
         channel: cleanChannel,
         to,
@@ -1721,15 +1757,24 @@ async function startServer() {
         listName,
         source,
         webhookUrl,
-        gmailAccessToken: String(gmailAccessToken || bearerToken || '').trim(),
-        userId: String(userId || '').trim() || undefined,
+        gmailAccessToken: String(safeGmailToken || '').trim(),
+        userId: resolvedOwnerUid,
         whatsappConnector,
         smsConnector,
         emailConnector,
       });
 
-      res.json({
-        ok: true,
+      const httpStatus =
+        receipt.status === 'failed'
+          ? receipt.detailMessage?.toLowerCase().includes('domain') ||
+            receipt.detailMessage?.toLowerCase().includes('verified')
+            ? 403
+            : 422
+          : 200;
+
+      res.status(httpStatus).json({
+        ok: receipt.status !== 'failed',
+        ...(receipt.status === 'failed' ? { error: receipt.detailMessage } : {}),
         receipt,
       });
     } catch (err) {
@@ -1757,6 +1802,7 @@ async function startServer() {
 
   app.post('/api/scheduler/enqueue', async (req, res) => {
     try {
+      const authUser = await verifyAuthenticatedRequest(req);
       const authHeader = String(req.headers.authorization || '').trim();
       const bearerToken = authHeader.toLowerCase().startsWith('bearer ')
         ? authHeader.slice(7).trim()
@@ -1802,6 +1848,7 @@ async function startServer() {
 
         const newJob: ScheduledAutomationJob = {
           id: `sched_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+          userId: authUser?.uid || String(item.userId || req.headers['x-user-id'] || '').trim() || undefined,
           automationId: String(item.automationId || 'auto_live'),
           automationName: String(item.automationName || 'Automation Sequence'),
           stepId: String(item.stepId || 'step_delayed'),
@@ -1828,7 +1875,12 @@ async function startServer() {
           body: String(item.body || 'Checking in on your progress!'),
           webhookUrl: String(item.webhookUrl || '').trim() || undefined,
           gmailAccessToken:
-            String(item.gmailAccessToken || bearerToken || '').trim() || undefined,
+            String(
+              item.gmailAccessToken ||
+                (bearerToken && !bearerToken.startsWith('fp_sess.') && authUser?.authSource !== 'firebase_id_token'
+                  ? bearerToken
+                  : '')
+            ).trim() || undefined,
           whatsappConnector: item.whatsappConnector || undefined,
           smsConnector: item.smsConnector || undefined,
           emailConnector: item.emailConnector || undefined,
@@ -1981,12 +2033,15 @@ async function startServer() {
           smsConnector: job.smsConnector,
           emailConnector: job.emailConnector,
         });
-        job.status = 'dispatched';
+        job.status = receipt.status === 'failed' ? 'failed' : 'dispatched';
         job.processedAt = new Date().toISOString();
         job.receiptId = receipt.receiptId;
         job.providerUsed = receipt.providerUsed;
         job.directLaunchUrl = receipt.directLaunchUrl;
-        job.statusReason = `Dispatched immediately via ${receipt.providerUsed} (List Kill Switch verified clear)`;
+        job.statusReason =
+          receipt.status === 'failed'
+            ? receipt.detailMessage
+            : `Dispatched immediately via ${receipt.providerUsed} (List Kill Switch verified clear)`;
       }
 
       res.json({
@@ -3844,6 +3899,10 @@ async function startServer() {
         ok: true,
         requiresVerification: false,
         verified: true,
+        sessionToken: signFlowPilotSessionToken({
+          uid: verifiedAcc.uid,
+          email: verifiedAcc.email,
+        }),
         account: {
           uid: verifiedAcc.uid,
           email: verifiedAcc.email,
@@ -3910,6 +3969,10 @@ async function startServer() {
         ok: true,
         requiresVerification: false,
         verified: true,
+        sessionToken: signFlowPilotSessionToken({
+          uid: updatedAcc.uid,
+          email: updatedAcc.email,
+        }),
         account: {
           uid: updatedAcc.uid,
           email: updatedAcc.email,
@@ -3978,6 +4041,10 @@ async function startServer() {
           ok: true,
           requiresVerification: false,
           verified: true,
+          sessionToken: signFlowPilotSessionToken({
+            uid: existingAcc.uid,
+            email: existingAcc.email,
+          }),
           account: {
             uid: existingAcc.uid,
             email: existingAcc.email,
@@ -4038,6 +4105,10 @@ async function startServer() {
         ok: true,
         requiresVerification: false,
         verified: true,
+        sessionToken: signFlowPilotSessionToken({
+          uid: provisionedAcc.uid,
+          email: provisionedAcc.email,
+        }),
         account: {
           uid: provisionedAcc.uid,
           email: provisionedAcc.email,
@@ -4111,6 +4182,10 @@ async function startServer() {
         ok: true,
         requiresVerification: false,
         verified: true,
+        sessionToken: signFlowPilotSessionToken({
+          uid: googleAcc.uid,
+          email: googleAcc.email,
+        }),
         account: {
           uid: googleAcc.uid,
           email: googleAcc.email,
@@ -4437,83 +4512,252 @@ async function startServer() {
   });
 
   // ==========================================================================
-  // CUSTOM DOMAIN EMAIL AUTOMATION (FREE RESEND PLAN: 1 SHARED DOMAIN FOR 2 USERS)
+  // CUSTOM DOMAIN EMAIL AUTOMATION (CENTRALIZED PLATFORM-MANAGED RESEND)
   // ==========================================================================
 
-  // Endpoint 1: Add or Update Domain for Shared Users ('me' and 'brother')
-  app.post('/api/email/add-domain', async (req, res) => {
+  const handleDomainError = (res: express.Response, err: unknown, fallbackMsg: string) => {
+    if (err instanceof CustomDomainEmailError) {
+      res.status(err.statusCode).json({
+        ok: false,
+        code: err.code,
+        error: err.message,
+      });
+      return;
+    }
+    res.status(500).json({
+      ok: false,
+      code: 'INTERNAL_ERROR',
+      error: err instanceof Error ? err.message : fallbackMsg,
+    });
+  };
+
+  // Connect or retrieve per-account custom domain via Resend Domains API
+  const handleConnectCustomDomain = async (req: express.Request, res: express.Response) => {
     try {
-      const { fromName, fromEmail, userId } = req.body || {};
-      if (!fromEmail || typeof fromEmail !== 'string' || !fromEmail.includes('@')) {
-        res.status(400).json({ ok: false, error: 'Please enter a valid fromEmail address.' });
+      const authUser = await verifyAuthenticatedRequest(req);
+      if (!authUser) {
+        res.status(401).json({
+          ok: false,
+          code: 'UNAUTHORIZED',
+          error: 'Authentication required. Please sign in to connect your custom email domain.',
+        });
         return;
       }
 
-      const result = await addOrUpdateSharedDomain({
+      const { fromName, fromEmail, replyToEmail, region } = req.body || {};
+      const result = await connectUserCustomDomain({
+        ownerId: authUser.uid,
         fromName: String(fromName || ''),
         fromEmail: String(fromEmail || ''),
-        userId: String(userId || 'me'),
+        replyToEmail: replyToEmail ? String(replyToEmail) : undefined,
+        region: region ? String(region) : undefined,
       });
 
       res.json({
         ok: true,
-        domain: result.domain,
-        domainId: result.domainId,
-        records: result.records,
+        domain: result.domain.domain,
+        domainId: result.domain.resendDomainId,
+        domainRecord: result.domain,
+        records: result.domain.records,
+        verified: result.domain.verified,
+        status: result.domain.status,
+        sender: result.sender,
+        senders: result.senders,
+        reusedExisting: result.reusedExisting,
+        resendConfigured: isResendConfigured(),
+        message: result.domain.verified
+          ? `Domain ${result.domain.domain} is verified and ready to send automated emails.`
+          : `Domain ${result.domain.domain} connected. Add the DNS records below to your domain provider and click Verify Domain.`,
+      });
+    } catch (err) {
+      handleDomainError(res, err, 'Failed to connect custom domain.');
+    }
+  };
+  app.post('/api/email/domains', handleConnectCustomDomain);
+  app.post('/api/email/add-domain', handleConnectCustomDomain);
+
+  // Trigger DNS verification via Resend Domains API
+  const handleVerifyCustomDomain = async (req: express.Request, res: express.Response) => {
+    try {
+      const authUser = await verifyAuthenticatedRequest(req);
+      if (!authUser) {
+        res.status(401).json({
+          ok: false,
+          code: 'UNAUTHORIZED',
+          error: 'Authentication required. Please sign in to verify your domain.',
+        });
+        return;
+      }
+
+      const result = await verifyUserEmailDomain(authUser.uid);
+      res.json({
+        ok: true,
         verified: result.verified,
         status: result.status,
-        users: result.users,
-        message: `Custom domain ${result.domain} saved successfully for user ${userId || 'me'}.`,
+        records: result.records,
+        domain: result.domain.domain,
+        domainRecord: result.domain,
+        message: result.verified
+          ? `Domain ${result.domain.domain} is verified! Automated and test emails are now enabled.`
+          : `Domain status is "${result.status}". DNS propagation can take a few minutes—please retry once all records show verified.`,
       });
-    } catch (err: any) {
-      const statusCode = err.message?.includes('For free plan, you must use same domain.') ? 400 : 500;
-      res.status(statusCode).json({
-        ok: false,
-        error: err.message || 'Failed to configure custom domain.',
+    } catch (err) {
+      handleDomainError(res, err, 'Failed to verify custom domain DNS records.');
+    }
+  };
+  app.post('/api/email/domains/verify', handleVerifyCustomDomain);
+  app.post('/api/email/verify', handleVerifyCustomDomain);
+
+  // Get current authenticated user's domain status, DNS records, and sender config
+  const handleGetEmailDomainStatus = async (req: express.Request, res: express.Response) => {
+    try {
+      const authUser = await verifyAuthenticatedRequest(req);
+      if (!authUser) {
+        res.status(401).json({
+          ok: false,
+          code: 'UNAUTHORIZED',
+          error: 'Authentication required. Please sign in to view your custom email domain settings.',
+        });
+        return;
+      }
+
+      const refresh = String(req.query.refresh || '').toLowerCase() === 'true';
+      const state = await getUserEmailDomainStatus(authUser.uid, { refresh });
+
+      res.json({
+        ok: true,
+        domain: state.domain?.domain || '',
+        domainId: state.domain?.resendDomainId || '',
+        domainRecord: state.domain,
+        records: state.domain?.records || [],
+        verified: Boolean(state.domain?.verified),
+        status: state.domain?.status || 'not_started',
+        sender: state.sender,
+        senders: state.senders,
+        resendConfigured: state.resendConfigured,
       });
+    } catch (err) {
+      handleDomainError(res, err, 'Failed to fetch custom domain email status.');
+    }
+  };
+  app.get('/api/email/domains/status', handleGetEmailDomainStatus);
+  app.get('/api/email/settings', handleGetEmailDomainStatus);
+
+  // Remove/disconnect custom domain from user account and Resend
+  app.delete('/api/email/domains', async (req, res) => {
+    try {
+      const authUser = await verifyAuthenticatedRequest(req);
+      if (!authUser) {
+        res.status(401).json({
+          ok: false,
+          code: 'UNAUTHORIZED',
+          error: 'Authentication required.',
+        });
+        return;
+      }
+
+      const result = await deleteUserEmailDomain(authUser.uid);
+      res.json({
+        ok: true,
+        removedDomain: result.removedDomain,
+        message: result.removedDomain
+          ? `Removed domain ${result.removedDomain} from your account.`
+          : 'No custom domain was attached to your account.',
+      });
+    } catch (err) {
+      handleDomainError(res, err, 'Failed to remove custom domain.');
     }
   });
 
-  // Endpoint 2: Verify Domain DNS Records with Resend API
-  const handleVerifyDomain = async (req: express.Request, res: express.Response) => {
+  // Read or update authenticated user's sender identity (From Name / From Email)
+  app.get('/api/email/sender', async (req, res) => {
     try {
-      const domainId = String(req.body?.domainId || req.query?.domainId || '').trim();
-      const result = await verifySharedDomain(domainId || undefined);
+      const authUser = await verifyAuthenticatedRequest(req);
+      if (!authUser) {
+        res.status(401).json({ ok: false, code: 'UNAUTHORIZED', error: 'Authentication required.' });
+        return;
+      }
+      const state = await getUserEmailDomainStatus(authUser.uid);
       res.json({
         ok: true,
-        verified: result.verified,
-        status: result.status,
-        records: result.records,
-        domain: result.domain,
-        message: result.verified
-          ? `✅ Domain ${result.domain} verified. Both emails ready`
-          : `Domain verification status: ${result.status}. DNS records are propagating.`,
+        sender: state.sender,
+        senders: state.senders,
+        domain: state.domain?.domain || '',
+        verified: Boolean(state.domain?.verified),
       });
-    } catch (err: any) {
-      res.status(500).json({
-        ok: false,
-        error: err.message || 'Failed to verify domain DNS records.',
-      });
+    } catch (err) {
+      handleDomainError(res, err, 'Failed to fetch sender identity.');
     }
-  };
-  app.post('/api/email/verify', handleVerifyDomain);
-  app.get('/api/email/verify', handleVerifyDomain);
+  });
 
-  // Endpoint 3: Send Email as Configured User ('me' or 'brother')
+  app.post('/api/email/sender', async (req, res) => {
+    try {
+      const authUser = await verifyAuthenticatedRequest(req);
+      if (!authUser) {
+        res.status(401).json({ ok: false, code: 'UNAUTHORIZED', error: 'Authentication required.' });
+        return;
+      }
+      const { fromName, fromEmail, replyToEmail } = req.body || {};
+      const result = await updateUserEmailSender({
+        ownerId: authUser.uid,
+        fromName: String(fromName || ''),
+        fromEmail: String(fromEmail || ''),
+        replyToEmail: replyToEmail ? String(replyToEmail) : undefined,
+      });
+
+      res.json({
+        ok: true,
+        sender: result.sender,
+        senders: result.senders,
+        domain: result.domain.domain,
+        verified: result.domain.verified,
+        message: `Updated sender identity to ${result.sender.fromName} <${result.sender.fromEmail}>.`,
+      });
+    } catch (err) {
+      handleDomainError(res, err, 'Failed to update sender identity.');
+    }
+  });
+
+  // Fetch delivery/webhook logs scoped to the authenticated user's domain
+  app.get('/api/email/logs', async (req, res) => {
+    try {
+      const authUser = await verifyAuthenticatedRequest(req);
+      if (!authUser) {
+        res.status(401).json({ ok: false, code: 'UNAUTHORIZED', error: 'Authentication required.' });
+        return;
+      }
+      const logs = getUserEmailDeliveryLogs(authUser.uid);
+      res.json({ ok: true, logs });
+    } catch (err) {
+      handleDomainError(res, err, 'Failed to fetch email delivery logs.');
+    }
+  });
+
+  // Send email strictly from authenticated user's VERIFIED custom domain
   app.post('/api/email/send', async (req, res) => {
     try {
-      const { userId = 'me', to, subject, html, text } = req.body || {};
-      if (!to || !subject) {
-        res.status(400).json({ ok: false, error: 'Recipient email (to) and subject are required.' });
+      const authUser = await verifyAuthenticatedRequest(req);
+      if (!authUser) {
+        res.status(401).json({
+          ok: false,
+          success: false,
+          code: 'UNAUTHORIZED',
+          error: 'Authentication required to send custom domain emails.',
+        });
         return;
       }
 
-      const result = await sendEmailAsUser({
-        userId: String(userId),
-        to: String(to),
-        subject: String(subject),
+      const { to, subject, html, text, replyTo, attachments, fromEmail, fromName } = req.body || {};
+      const result = await sendCustomDomainEmail({
+        ownerId: authUser.uid,
+        to,
+        subject: String(subject || ''),
         html: html ? String(html) : undefined,
         text: text ? String(text) : undefined,
+        replyTo: replyTo ? String(replyTo) : undefined,
+        attachments: Array.isArray(attachments) ? attachments : undefined,
+        fromEmailOverride: fromEmail ? String(fromEmail) : undefined,
+        fromNameOverride: fromName ? String(fromName) : undefined,
       });
 
       res.json({
@@ -4523,35 +4767,42 @@ async function startServer() {
         from: result.from,
         to: result.to,
         subject: result.subject,
+        domain: result.domain,
         provider: result.provider,
-        message: `Email successfully sent from ${result.from} to ${result.to}!`,
+        message: `Email sent from ${result.from} to ${result.to.join(', ')}.`,
       });
-    } catch (err: any) {
-      res.status(500).json({
-        ok: false,
-        success: false,
-        error: err.message || 'Failed to dispatch email via Resend API.',
-      });
+    } catch (err) {
+      handleDomainError(res, err, 'Failed to dispatch custom domain email.');
     }
   });
 
-  // Settings Endpoint: Get current shared domain, DNS records, and users
-  app.get('/api/email/settings', async (_req, res) => {
+  // Resend Webhook Listener (Svix-signed raw body verification)
+  app.post('/api/webhooks/resend', async (req, res) => {
     try {
-      const domainRecord = await getActiveEmailDomain();
-      const users = await getEmailUsers();
+      const rawBody =
+        typeof (req as any).rawBody === 'string'
+          ? (req as any).rawBody
+          : JSON.stringify(req.body || {});
+      const svixId = String(req.headers['svix-id'] || '');
+      const svixTimestamp = String(req.headers['svix-timestamp'] || '');
+      const svixSignature = String(req.headers['svix-signature'] || '');
 
-      res.json({
-        ok: true,
-        domain: domainRecord?.domain || '',
-        domainId: domainRecord?.domainId || '',
-        records: domainRecord?.records || [],
-        verified: domainRecord?.verified || false,
-        status: domainRecord?.status || 'not_started',
-        users,
+      const result = await handleResendWebhookEvent({
+        rawBody,
+        svixId,
+        svixTimestamp,
+        svixSignature,
       });
-    } catch (err: any) {
-      res.status(500).json({ ok: false, error: err.message || 'Failed to fetch email settings' });
+
+      if (result.bouncedRecipients) {
+        for (const r of result.bouncedRecipients) {
+          markRecipientGloballySuppressed(r);
+        }
+      }
+
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      handleDomainError(res, err, 'Webhook verification failed.');
     }
   });
 

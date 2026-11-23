@@ -82,6 +82,7 @@ import {
   getStoredCustomLogo,
   setStoredCustomLogo,
 } from './FlowPilotLogo';
+import { EmailDomainStatusSummary } from '../utils/emailDomainValidation';
 
 interface WorkspaceSettingsViewProps {
   workspace: Workspace;
@@ -111,6 +112,7 @@ interface WorkspaceSettingsViewProps {
   onRestoreWorkspaceSnapshot?: (snapshot: WorkspaceSnapshot) => void;
   onNavigateToWhatsAppEmbeddedSignup?: () => void;
   onNavigateToEmailSettings?: () => void;
+  emailDomainStatus?: EmailDomainStatusSummary | null;
 }
 
 export const WorkspaceSettingsView: React.FC<WorkspaceSettingsViewProps> = ({
@@ -133,6 +135,7 @@ export const WorkspaceSettingsView: React.FC<WorkspaceSettingsViewProps> = ({
   onRestoreWorkspaceSnapshot,
   onNavigateToWhatsAppEmbeddedSignup,
   onNavigateToEmailSettings,
+  emailDomainStatus,
 }) => {
   const [backupNotice, setBackupNotice] = useState<string | null>(null);
   const [selectedWebhookEventPreview, setSelectedWebhookEventPreview] = useState<
@@ -375,9 +378,6 @@ export const WorkspaceSettingsView: React.FC<WorkspaceSettingsViewProps> = ({
   const [emailProviderMode, setEmailProviderMode] = useState<EmailProviderMode>(() =>
     getStoredChannelGatewayConfig().email.providerMode || 'builtin_relay'
   );
-  const [resendApiKey, setResendApiKey] = useState(() =>
-    getStoredChannelGatewayConfig().email.resendApiKey || ''
-  );
   const [sendgridApiKey, setSendgridApiKey] = useState(() =>
     getStoredChannelGatewayConfig().email.sendgridApiKey || ''
   );
@@ -430,7 +430,6 @@ export const WorkspaceSettingsView: React.FC<WorkspaceSettingsViewProps> = ({
       },
       email: {
         providerMode: nextEmailMode,
-        resendApiKey: resendApiKey.trim(),
         sendgridApiKey: sendgridApiKey.trim(),
         smtpHost: smtpHost.trim(),
         smtpPort: Number(smtpPort) || 587,
@@ -864,7 +863,6 @@ export const WorkspaceSettingsView: React.FC<WorkspaceSettingsViewProps> = ({
     setAfricasTalkingUsername(storedCfg.sms.africasTalkingUsername || '');
     setAfricasTalkingApiKey(storedCfg.sms.africasTalkingApiKey || '');
     setEmailProviderMode(storedCfg.email.providerMode || 'builtin_relay');
-    setResendApiKey(storedCfg.email.resendApiKey || '');
     setSendgridApiKey(storedCfg.email.sendgridApiKey || '');
     setOutboundWebhookUrl(getStoredOutboundWebhookUrl());
     setDeliveryReceipts(getStoredDeliveryReceipts());
@@ -1802,7 +1800,7 @@ export const WorkspaceSettingsView: React.FC<WorkspaceSettingsViewProps> = ({
           </div>
 
           {/* =============================================================== */}
-          {/* CARD 2: CUSTOM DOMAIN EMAIL AUTOMATION (FREE RESEND PLAN)       */}
+          {/* CARD 2: PLATFORM-MANAGED CUSTOM DOMAIN EMAIL AUTOMATION         */}
           {/* =============================================================== */}
           <div className="p-5 rounded-2xl bg-blue-50/50 border border-blue-200 flex flex-col justify-between space-y-4 shadow-2xs">
             <div className="space-y-3.5">
@@ -1813,34 +1811,61 @@ export const WorkspaceSettingsView: React.FC<WorkspaceSettingsViewProps> = ({
                   </div>
                   <div>
                     <span className="text-[11px] font-bold uppercase tracking-wider text-blue-700">
-                      2 · Email Channel & Resend API
+                      2 · Custom Domain Email
                     </span>
                     <h3 className="font-display text-base font-bold text-slate-950">
                       Custom Domain Email Automation
                     </h3>
                   </div>
                 </div>
-                <span className="text-xs font-bold text-blue-700 bg-blue-100 px-2 py-0.5 rounded-full shrink-0">
-                  Free Resend Tier
+                <span
+                  className={`text-xs font-bold px-2.5 py-0.5 rounded-lg border shrink-0 ${
+                    emailDomainStatus?.verified
+                      ? 'text-emerald-800 bg-emerald-100 border-emerald-200'
+                      : emailDomainStatus?.domain
+                      ? 'text-amber-800 bg-amber-100 border-amber-200'
+                      : 'text-slate-700 bg-slate-100 border-slate-200'
+                  }`}
+                >
+                  {emailDomainStatus?.verified
+                    ? 'Verified'
+                    : emailDomainStatus?.domain
+                    ? 'Pending DNS'
+                    : 'Not Connected'}
                 </span>
               </div>
 
               <p className="text-xs text-slate-600 leading-relaxed">
-                Connect your custom domain (e.g. <strong>musa.com</strong>) for 2 users (<strong>Me</strong> & <strong>Brother</strong>) sharing the same domain on the free Resend plan.
+                Send automated emails from your own business domain—FlowPilot manages the Resend
+                infrastructure centrally with zero API keys needed on your account.
               </p>
 
               <div className="p-3.5 rounded-xl bg-white border border-blue-200/80 space-y-2">
                 <div className="flex items-center justify-between text-xs font-semibold text-slate-700">
-                  <span>User 1 (Me):</span>
-                  <span className="font-mono text-blue-600 font-bold">hello@musa.com</span>
+                  <span>Connected Domain:</span>
+                  <span className="font-mono text-blue-700 font-bold">
+                    {emailDomainStatus?.domain || 'None connected'}
+                  </span>
                 </div>
                 <div className="flex items-center justify-between text-xs font-semibold text-slate-700">
-                  <span>User 2 (Brother):</span>
-                  <span className="font-mono text-blue-600 font-bold">support@musa.com</span>
+                  <span>Sender Identity:</span>
+                  <span className="font-mono text-slate-800 truncate max-w-[200px]">
+                    {emailDomainStatus?.sender
+                      ? `${emailDomainStatus.sender.fromName} <${emailDomainStatus.sender.fromEmail}>`
+                      : 'Configure in domain settings'}
+                  </span>
                 </div>
                 <div className="pt-1 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-500">
-                  <span>Shared DNS Records:</span>
-                  <span className="font-bold text-emerald-700">3 TXT Records (One-Time)</span>
+                  <span>Verification Gate:</span>
+                  <span
+                    className={`font-bold ${
+                      emailDomainStatus?.verified ? 'text-emerald-700' : 'text-amber-700'
+                    }`}
+                  >
+                    {emailDomainStatus?.verified
+                      ? 'Active · Sending Enabled'
+                      : 'Blocked until DNS verified'}
+                  </span>
                 </div>
               </div>
 
@@ -1856,7 +1881,7 @@ export const WorkspaceSettingsView: React.FC<WorkspaceSettingsViewProps> = ({
                 className="w-full py-2.5 px-4 text-xs sm:text-sm font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl cursor-pointer shadow-xs inline-flex items-center justify-center gap-2 transition-colors"
               >
                 <Globe className="w-4 h-4" />
-                <span>Manage Custom Domain & DNS Records</span>
+                <span>Configure Custom Domain Email</span>
               </button>
             </div>
 
@@ -1864,15 +1889,20 @@ export const WorkspaceSettingsView: React.FC<WorkspaceSettingsViewProps> = ({
             <div className="p-3.5 rounded-xl bg-[#0F172A] text-white space-y-1.5">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[11px] font-bold uppercase tracking-wider text-blue-400">
-                  Live Preview · Custom Domain
+                  Platform-Managed Delivery
                 </span>
-                <span className="text-[11px] text-slate-300">Resend API Key Secured</span>
+                <span className="text-[11px] text-slate-300">Centralized Resend</span>
               </div>
               <div className="text-xs sm:text-sm font-mono font-bold text-white truncate">
-                From: <span className="text-blue-300">Musa Store &lt;hello@musa.com&gt;</span>
+                From:{' '}
+                <span className="text-blue-300">
+                  {emailDomainStatus?.sender
+                    ? `${emailDomainStatus.sender.fromName} <${emailDomainStatus.sender.fromEmail}>`
+                    : 'Verify domain at /dashboard/settings/email'}
+                </span>
               </div>
               <p className="text-[11px] text-slate-300">
-                Shared domain enforced: "For free plan, you must use same domain."
+                Automated campaign &amp; workflow sends activate automatically once DNS verifies.
               </p>
             </div>
           </div>

@@ -1,6 +1,6 @@
 import { getPendingFollowUpJobs, updateJobStatus } from './db.js';
 import { sendWhatsAppViaEvolution, buildEvolutionInstanceName } from '../evolutionApi.js';
-import { FollowUpJobRecord } from './types.js';
+import { sendCustomDomainEmail } from '../customDomainEmail.js';
 
 export interface FollowUpCronSummary {
   timestamp: string;
@@ -19,7 +19,7 @@ export interface FollowUpCronSummary {
 /**
  * Runs the follow-up drip job processor:
  * - Finds all followUpJobs where nextActionAt <= now and status == 'pending'
- * - Sends WhatsApp message exclusively via Evolution API (sendWhatsAppViaEvolution)
+ * - Dispatches WhatsApp via Evolution API or Email via verified custom domain (Resend)
  * - Updates job status to 'sent' or 'failed' cleanly
  */
 export async function runFollowUpCron(): Promise<FollowUpCronSummary> {
@@ -41,12 +41,30 @@ export async function runFollowUpCron(): Promise<FollowUpCronSummary> {
   for (const job of pendingJobs) {
     try {
       const targetUser = job.userId || 'default_workspace';
-      const cleanPhone = job.leadPhone;
+      const cleanRecipient = job.leadPhone;
       const messageText = job.message;
 
-      // Dispatch exclusively via Evolution API for this user's instance
+      if (job.actionType === 'action_send_email' && cleanRecipient.includes('@')) {
+        const emailResult = await sendCustomDomainEmail({
+          ownerId: targetUser,
+          to: cleanRecipient,
+          subject: 'Follow-Up from FlowPilot Automation',
+          html: messageText,
+        });
+        await updateJobStatus(job.id, 'sent');
+        summary.sentCount++;
+        summary.jobsProcessed.push({
+          jobId: job.id,
+          leadPhone: job.leadPhone,
+          status: 'sent',
+          messagePreview: `${emailResult.from} -> ${messageText.slice(0, 60)}`,
+        });
+        continue;
+      }
+
+      // Dispatch WhatsApp exclusively via Evolution API for this user's instance
       const instanceName = buildEvolutionInstanceName(targetUser);
-      const evoRes = await sendWhatsAppViaEvolution(instanceName, cleanPhone, messageText);
+      const evoRes = await sendWhatsAppViaEvolution(instanceName, cleanRecipient, messageText);
 
       if (evoRes.ok) {
         await updateJobStatus(job.id, 'sent');
@@ -57,10 +75,10 @@ export async function runFollowUpCron(): Promise<FollowUpCronSummary> {
           status: 'sent',
           messagePreview: messageText.slice(0, 80),
         });
-        console.log(`[FollowUp Cron] ✓ Sent drip follow-up to ${cleanPhone} via ${instanceName} (Job ID: ${job.id})`);
+        console.log(`[FollowUp Cron] ✓ Sent drip follow-up to ${cleanRecipient} via ${instanceName} (Job ID: ${job.id})`);
       } else {
         const reason = evoRes.error || evoRes.detail || `Instance ${instanceName} is disconnected.`;
-        console.warn(`[FollowUp Cron] Notice for job ${job.id} (${cleanPhone}): ${reason}`);
+        console.warn(`[FollowUp Cron] Notice for job ${job.id} (${cleanRecipient}): ${reason}`);
         await updateJobStatus(job.id, 'failed', reason);
         summary.failedCount++;
         summary.jobsProcessed.push({
@@ -98,7 +116,7 @@ export function startFollowUpCronDaemon(): void {
   if (cronInterval) return;
 
   console.log('[FollowUp Cron] Starting automated 60-second drip follow-up runner');
-  
+
   // Initial check after 5 seconds
   setTimeout(() => {
     runFollowUpCron().catch((err) => console.error('[FollowUp Cron] Initial run error:', err));

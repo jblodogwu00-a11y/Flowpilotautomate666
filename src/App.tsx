@@ -100,6 +100,11 @@ import {
   deliverChannelMessage,
   personalizeAutomationMessage,
 } from './services/messageDeliveryService';
+import { EmailDomainStatusSummary } from './utils/emailDomainValidation';
+import {
+  EMPTY_EMAIL_DOMAIN_STATUS,
+  fetchCustomDomainStatus,
+} from './services/customDomainEmailClient';
 
 import { FlowPilotLogo } from './components/FlowPilotLogo';
 import { LandingPage } from './components/LandingPage';
@@ -140,6 +145,8 @@ export default function App() {
   const { user, userProfile, loading: authLoading, logout } = useAuth();
   const [cloudSyncState, setCloudSyncState] = useState<CloudSyncState>('local_only');
   const [syncNotice, setSyncNotice] = useState<string | null>(null);
+  const [emailDomainStatus, setEmailDomainStatus] =
+    useState<EmailDomainStatusSummary>(EMPTY_EMAIL_DOMAIN_STATUS);
 
   // Active UI Theme
   const [themeMode, setThemeMode] = useState<ThemeMode>(getStoredThemeMode);
@@ -309,6 +316,24 @@ export default function App() {
       setIsPublicLanding(false);
     }
   }, [user, isPublicLanding]);
+
+  // Fetch authenticated user's custom domain email status
+  useEffect(() => {
+    if (authLoading) return;
+    if (!user) {
+      setEmailDomainStatus(EMPTY_EMAIL_DOMAIN_STATUS);
+      return;
+    }
+    let cancelled = false;
+    fetchCustomDomainStatus({ refresh: false })
+      .then((summary) => {
+        if (!cancelled) setEmailDomainStatus(summary);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [authLoading, user]);
 
   // Active Workspace Navigation Tab
   const [activeTab, setActiveTab] = useState<ActiveTab>(() =>
@@ -2240,6 +2265,14 @@ export default function App() {
               navigateBackFromEmailSettings();
               setActiveTab('workflow_builder');
             }}
+            isAuthenticated={Boolean(user)}
+            onOpenAuth={() => {
+              setAuthModalMode('signin');
+              setAuthModalOpen(true);
+            }}
+            initialStatus={emailDomainStatus}
+            onStatusChanged={setEmailDomainStatus}
+            defaultSenderName={snapshot.workspace.senderName || snapshot.workspace.name}
           />
         </div>
       </ErrorBoundary>
@@ -2360,15 +2393,37 @@ export default function App() {
           {!isPublicLanding && (
             <div className="hidden lg:flex items-center gap-2">
               <button
-                onClick={() => setActiveTab('email_domain')}
+                onClick={() => navigateToEmailSettings()}
                 className="group flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 hover:border-blue-500/50 transition-colors text-xs cursor-pointer whitespace-nowrap"
-                title="Manage Custom Domain & DNS"
+                title="Manage Custom Domain Email Settings"
               >
-                <span className="inline-flex rounded-full h-2 w-2 bg-emerald-500 shrink-0" />
+                <span
+                  className={`inline-flex rounded-full h-2 w-2 shrink-0 ${
+                    emailDomainStatus.verified
+                      ? 'bg-emerald-500'
+                      : emailDomainStatus.domain
+                      ? 'bg-amber-500'
+                      : 'bg-slate-400'
+                  }`}
+                />
                 <span className="font-mono text-slate-600 dark:text-slate-400 group-hover:text-blue-600 dark:group-hover:text-blue-400">
-                  passiveincome.work.gd
+                  {emailDomainStatus.domain || 'Setup Custom Domain'}
                 </span>
-                <span className="text-[10px] text-emerald-600 font-semibold">DNS Ready</span>
+                <span
+                  className={`text-[10px] font-semibold ${
+                    emailDomainStatus.verified
+                      ? 'text-emerald-600'
+                      : emailDomainStatus.domain
+                      ? 'text-amber-600'
+                      : 'text-blue-600'
+                  }`}
+                >
+                  {emailDomainStatus.verified
+                    ? 'Verified'
+                    : emailDomainStatus.domain
+                    ? 'Pending DNS'
+                    : 'Connect'}
+                </span>
               </button>
             </div>
           )}
@@ -2688,6 +2743,7 @@ export default function App() {
                   chatbots={snapshot.chatbots}
                   tasks={snapshot.tasks}
                   activities={snapshot.activities}
+                  emailDomainStatus={emailDomainStatus}
                   onNavigate={(tab) => setActiveTab(tab)}
                   onQuickAction={handleQuickAction}
                   onOpenDiagnostics={() => setDiagnosticsModalOpen(true)}
@@ -2793,6 +2849,8 @@ export default function App() {
                     onCreateList={handleCreateList}
                     onNavigateToLists={() => setActiveTab('lists')}
                     onBackToDashboard={() => setActiveTab('dashboard')}
+                    emailDomainStatus={emailDomainStatus}
+                    onNavigateToEmailSettings={() => navigateToEmailSettings()}
                   />
                 </div>
               )}
@@ -2802,6 +2860,14 @@ export default function App() {
                   <CustomDomainEmailSettings
                     onBack={() => setActiveTab('dashboard')}
                     onNavigateToAutomations={() => setActiveTab('workflow_builder')}
+                    isAuthenticated={Boolean(user)}
+                    onOpenAuth={() => {
+                      setAuthModalMode('signin');
+                      setAuthModalOpen(true);
+                    }}
+                    initialStatus={emailDomainStatus}
+                    onStatusChanged={setEmailDomainStatus}
+                    defaultSenderName={snapshot.workspace.senderName || snapshot.workspace.name}
                   />
                 </div>
               )}
@@ -2958,6 +3024,7 @@ export default function App() {
                   onRestoreWorkspaceSnapshot={handleRestoreWorkspaceSnapshot}
                   onNavigateToWhatsAppEmbeddedSignup={navigateToWhatsAppEmbeddedSignup}
                   onNavigateToEmailSettings={navigateToEmailSettings}
+                  emailDomainStatus={emailDomainStatus}
                 />
               )}
 

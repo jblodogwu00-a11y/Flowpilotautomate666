@@ -1,7 +1,7 @@
 import { getWorkflowById, createFollowUpJob } from './db.js';
 import { WorkflowRecord, DelayUnit, FollowUpJobRecord } from './types.js';
 import { sendWhatsAppViaEvolution, buildEvolutionInstanceName } from '../evolutionApi.js';
-import { sendEmailAsUser } from '../customDomainEmail.js';
+import { sendCustomDomainEmail } from '../customDomainEmail.js';
 
 export interface WorkflowExecutionResult {
   workflowId: string;
@@ -244,22 +244,24 @@ export async function executeWorkflow(
 
       // ACTION: Send Email
       if (type === 'action_send_email') {
-        const senderPersona = currentNode.data?.emailSenderPersona || 'me';
+        const targetOwnerId = workflow.userId || options.userId || '';
         const msg = currentNode.data?.message || '';
-        let delivered = true;
+        const subject = currentNode.data?.emailSubject || `Update from ${workflow.name}`;
+        let delivered = false;
 
-        if (leadPhone && leadPhone.includes('@')) {
+        if (leadPhone && leadPhone.includes('@') && targetOwnerId) {
           try {
-            await sendEmailAsUser({
-              userId: senderPersona,
+            await sendCustomDomainEmail({
+              ownerId: targetOwnerId,
               to: leadPhone,
-              subject: `Update from ${workflow.name}`,
+              subject,
               html: msg,
-              text: msg,
+              text: msg.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(),
             });
             delivered = true;
           } catch (err: any) {
-            console.warn('[Workflow Runner] Email dispatch notice:', err.message);
+            console.warn('[Workflow Runner] Email dispatch blocked/notice:', err.message);
+            delivered = false;
           }
         }
 

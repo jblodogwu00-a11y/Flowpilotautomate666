@@ -901,6 +901,11 @@ export const CampaignsView: React.FC<CampaignsViewProps> = ({
       privateProfile,
     });
 
+    if (receipt.status === 'failed') {
+      setTestEmailFeedback(`Blocked: ${receipt.detailMessage}`);
+      return;
+    }
+
     setTestEmailFeedback(
       `Live ${channel.toUpperCase()} test dispatched via ${receipt.providerUsed} (From: ${
         receipt.fromIdentity
