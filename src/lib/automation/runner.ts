@@ -13,8 +13,114 @@ export interface WorkflowExecutionResult {
     actionType: string;
     message: string;
     delivered: boolean;
+    errorDetail?: string;
   }>;
   scheduledJobs: FollowUpJobRecord[];
+}
+
+export function htmlToWhatsAppTextServer(input: string): string {
+  const raw = String(input || '');
+  if (!raw.trim()) return '';
+  if (!/<\/?[a-z][\s\S]*>/i.test(raw)) {
+    return raw.trim();
+  }
+  let out = raw
+    .replace(/<!--[\s\S]*?-->/g, '')
+    .replace(/<\s*(script|style)[^>]*>[\s\S]*?<\/\s*\1\s*>/gi, '');
+
+  out = out.replace(/<h[1-6][^>]*>([\s\S]*?)<\/h[1-6]>/gi, (_, inner) => {
+    const clean = inner.replace(/<[^>]+>/g, '').trim();
+    return clean ? `\n*${clean}*\n` : '\n';
+  });
+  out = out.replace(
+    /<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi,
+    (_, href: string, inner: string) => {
+      const label = inner.replace(/<[^>]+>/g, '').trim();
+      const url = href.trim();
+      if (!url || url.startsWith('javascript:')) return label;
+      return !label || label === url ? url : `${label} (${url})`;
+    }
+  );
+  out = out.replace(/<(strong|b)\b[^>]*>([\s\S]*?)<\/\1>/gi, (_, _t, inner) => {
+    const clean = inner.replace(/\*/g, '').trim();
+    return clean ? `*${clean}*` : '';
+  });
+  out = out.replace(/<(em|i)\b[^>]*>([\s\S]*?)<\/\1>/gi, (_, _t, inner) => {
+    const clean = inner.trim();
+    return clean ? `_${clean}_` : '';
+  });
+  out = out.replace(/<(del|s|strike)\b[^>]*>([\s\S]*?)<\/\1>/gi, (_, _t, inner) => {
+    const clean = inner.trim();
+    return clean ? `~${clean}~` : '';
+  });
+  out = out.replace(/<li\b[^>]*>([\s\S]*?)<\/li>/gi, (_, inner) => {
+    const clean = inner.trim();
+    return clean ? `\n• ${clean}` : '';
+  });
+  out = out
+    .replace(/<\/?(ul|ol)\b[^>]*>/gi, '\n')
+    .replace(/<br\b[^>]*\/?>/gi, '\n')
+    .replace(/<\/(p|div|blockquote|tr)>/gi, '\n\n')
+    .replace(/<(p|div|blockquote|tr)\b[^>]*>/gi, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+
+  return out;
+}
+
+export function htmlToPlainTextServer(input: string): string {
+  return htmlToWhatsAppTextServer(input)
+    .replace(/\*([^*\n]+)\*/g, '$1')
+    .replace(/(^|\s)_([^_\n]+)_(?=\s|$|[.,!?])/g, '$1$2')
+    .replace(/~([^~\n]+)~/g, '$1')
+    .trim();
+}
+
+export function matchesKeywordRule(
+  inboundText: string,
+  rawRule: string,
+  matchType: string = 'contains'
+): boolean {
+  const mode = String(matchType || 'contains').toLowerCase();
+  if (mode === 'any_inbound' || mode === 'any') {
+    return true;
+  }
+  const lowerInbound = String(inboundText || '').toLowerCase().trim();
+  const tokens = String(rawRule || '')
+    .split(',')
+    .map((t) => t.toLowerCase().trim())
+    .filter(Boolean);
+
+  if (tokens.length === 0) return false;
+
+  return tokens.some((token) => {
+    if (mode === 'exact') return lowerInbound === token;
+    if (mode === 'startswith' || mode === 'starts_with') return lowerInbound.startsWith(token);
+    return lowerInbound.includes(token);
+  });
+}
+
+function personalizeWorkflowText(
+  template: string,
+  ctx: { leadName?: string; leadPhone?: string; leadEmail?: string; listName?: string }
+): string {
+  const fullName = (ctx.leadName || '').trim() || 'Friend';
+  const firstName = fullName.split(/\s+/)[0] || 'Friend';
+  const listName = (ctx.listName || '').trim() || 'General Contacts';
+  return String(template || '')
+    .replace(/\{\{\s*first_name\s*\}\}/gi, firstName)
+    .replace(/\{\{\s*full_name\s*\}\}/gi, fullName)
+    .replace(/\{\{\s*list_name\s*\}\}/gi, listName)
+    .replace(/\{\{\s*email\s*\}\}/gi, ctx.leadEmail || '')
+    .replace(/\{\{\s*phone\s*\}\}/gi, ctx.leadPhone || '');
 }
 
 /**
@@ -48,6 +154,11 @@ export async function executeWorkflow(
     userId?: string;
     workflowOverride?: WorkflowRecord;
     sock?: any;
+    leadEmail?: string;
+    leadName?: string;
+    channel?: 'whatsapp' | 'email' | 'sms';
+    listName?: string;
+    bypassTriggerCheck?: boolean;
   } = {}
 ): Promise<WorkflowExecutionResult> {
   const workflow = options.workflowOverride || (await getWorkflowById(workflowId));
@@ -79,7 +190,7 @@ export async function executeWorkflow(
   try {
     nodes = JSON.parse(workflow.nodesJson || '[]');
     edges = JSON.parse(workflow.edgesJson || '[]');
-  } catch (err) {
+  } catch {
     return {
       workflowId: workflow.id,
       workflowName: workflow.name,
@@ -106,7 +217,6 @@ export async function executeWorkflow(
     if (n && n.id) nodesById.set(n.id, n);
   }
 
-  // Find incoming and outgoing edges per node
   const outgoingEdges = new Map<string, any[]>();
   for (const e of edges) {
     if (!e || !e.source || !e.target) continue;
@@ -115,7 +225,6 @@ export async function executeWorkflow(
     outgoingEdges.set(e.source, list);
   }
 
-  // 1. Find trigger nodes (Trigger: WhatsApp Reply, Email Reply, Keyword Trigger)
   const triggerNodes = nodes.filter((n) => {
     const t = n.data?.nodeType || n.type || '';
     return t.startsWith('trigger_') || t === 'trigger';
@@ -131,21 +240,43 @@ export async function executeWorkflow(
     scheduledJobs: [],
   };
 
-  const lowerMsg = (leadMessage || '').toLowerCase().trim();
+  const cleanMsg = String(leadMessage || '').trim();
+  const inboundChannel = options.channel || 'whatsapp';
+  const recipientEmail =
+    (options.leadEmail || '').trim() ||
+    (leadPhone && leadPhone.includes('@') ? leadPhone.trim() : '');
+  const personalizeCtx = {
+    leadName: options.leadName,
+    leadPhone,
+    leadEmail: recipientEmail,
+    listName: options.listName,
+  };
 
-  // Process starting paths
+  let matchedAtLeastOneStart = false;
+
   for (const startNode of startNodes) {
     const nodeType = startNode.data?.nodeType || startNode.type || '';
 
-    // If trigger specifies a keyword, verify message matches
-    if (nodeType === 'trigger_keyword' && startNode.data?.triggerKeyword) {
-      const kw = String(startNode.data.triggerKeyword).toLowerCase().trim();
-      if (!lowerMsg.includes(kw)) {
-        continue; // Does not match this trigger
+    if (!options.bypassTriggerCheck) {
+      if (nodeType === 'trigger_form_submission') {
+        continue;
+      }
+      if (nodeType === 'trigger_email_reply' && inboundChannel !== 'email') {
+        continue;
+      }
+      if (
+        (nodeType === 'trigger_keyword' || nodeType === 'whatsapp_keyword') &&
+        startNode.data?.triggerKeyword
+      ) {
+        const kw = String(startNode.data.triggerKeyword || startNode.data?.keyword || '');
+        if (!matchesKeywordRule(cleanMsg, kw, startNode.data?.matchType || 'contains')) {
+          continue;
+        }
       }
     }
 
-    // Traverse along edges
+    matchedAtLeastOneStart = true;
+
     const queue: string[] = (outgoingEdges.get(startNode.id) || []).map((e) => e.target);
     const visited = new Set<string>();
 
@@ -157,21 +288,31 @@ export async function executeWorkflow(
       const currentNode = nodesById.get(currentId);
       if (!currentNode) continue;
 
-      const type = currentNode.data?.nodeType || currentNode.type || '';
+      const rawType = String(currentNode.type || '');
+      const type = String(currentNode.data?.nodeType || rawType || '');
 
-      // CONDITION: Message Contains
-      if (type === 'condition_message_contains' || type.startsWith('condition_')) {
-        const keyword = String(currentNode.data?.keyword || '').toLowerCase().trim();
-        const matches = keyword ? lowerMsg.includes(keyword) : true;
+      // CONDITION: Message Contains (supports both React Flow type='condition' and nodeType='condition_message_contains')
+      if (
+        type === 'condition' ||
+        type === 'condition_message_contains' ||
+        type.startsWith('condition_') ||
+        rawType === 'condition'
+      ) {
+        const keyword = String(
+          currentNode.data?.keyword || currentNode.data?.triggerKeyword || ''
+        ).trim();
+        const matches = keyword
+          ? matchesKeywordRule(cleanMsg, keyword, currentNode.data?.matchType || 'contains')
+          : true;
 
         const branchEdges = outgoingEdges.get(currentId) || [];
         for (const edge of branchEdges) {
-          // If sourceHandle is specified ('true' vs 'false')
-          if (edge.sourceHandle === 'true' && matches) {
+          const handle = String(edge.sourceHandle || '').toLowerCase();
+          if ((handle === 'true' || handle === 'yes') && matches) {
             queue.push(edge.target);
-          } else if (edge.sourceHandle === 'false' && !matches) {
+          } else if ((handle === 'false' || handle === 'no') && !matches) {
             queue.push(edge.target);
-          } else if (!edge.sourceHandle && matches) {
+          } else if (!handle && matches) {
             queue.push(edge.target);
           }
         }
@@ -179,52 +320,71 @@ export async function executeWorkflow(
       }
 
       // DELAY NODE: Wait Node with Minutes, Hours, Days drip
-      if (type === 'delay_wait' || type.startsWith('delay_')) {
+      if (type === 'delay_wait' || type === 'delay' || type.startsWith('delay')) {
         const delayValue = Math.max(1, Number(currentNode.data?.delayValue) || 5);
         const delayUnit: DelayUnit = (currentNode.data?.delayUnit as DelayUnit) || 'Minutes';
 
-        // Find subsequent action node to schedule
         const nextEdges = outgoingEdges.get(currentId) || [];
         for (const edge of nextEdges) {
           const nextNode = nodesById.get(edge.target);
           if (nextNode) {
             const nextType = nextNode.data?.nodeType || nextNode.type || '';
-            const msg = nextNode.data?.message || 'Hello from your scheduled Follow-Up automation!';
+            const rawMsg =
+              nextNode.data?.message || 'Hello from your scheduled Follow-Up automation!';
+            const personalizedJobMsg = personalizeWorkflowText(rawMsg, personalizeCtx);
 
             const job = await createFollowUpJob({
               workflowId: workflow.id,
               userId: workflow.userId || options.userId,
-              leadPhone,
+              leadPhone: leadPhone || recipientEmail,
               delayValue,
               delayUnit,
-              message: msg,
+              message:
+                nextType === 'action_send_whatsapp'
+                  ? htmlToWhatsAppTextServer(personalizedJobMsg)
+                  : personalizedJobMsg,
               actionType: nextType,
             });
 
             result.scheduledJobs.push(job);
           }
         }
-        // Delay node schedules downstream nodes into followUpJobs, so halt synchronous execution here
         continue;
       }
 
       // ACTION: Send WhatsApp Message (Immediate)
       if (type === 'action_send_whatsapp') {
-        const messageText = currentNode.data?.message || 'Thank you for reaching out!';
+        const rawTemplate = currentNode.data?.message || 'Thank you for reaching out!';
+        const personalized = personalizeWorkflowText(rawTemplate, personalizeCtx);
+        const messageText = htmlToWhatsAppTextServer(personalized);
         const targetUser = workflow.userId || options.userId || 'default_workspace';
 
         let delivered = false;
-        try {
-          const instanceName = buildEvolutionInstanceName(targetUser);
-          const evoRes = await sendWhatsAppViaEvolution(instanceName, leadPhone, messageText);
-          if (evoRes.ok) {
-            delivered = true;
-            console.log(`[Workflow Runner] Auto responded to ${leadPhone} via Evolution (${instanceName}) · Workflow "${workflow.name}" (Node: ${currentId})`);
-          } else {
-            console.warn(`[Workflow Runner] Could not send WhatsApp to ${leadPhone} (${instanceName}): ${evoRes.error || evoRes.detail}`);
+        let errorDetail: string | undefined;
+        if (!leadPhone || leadPhone.includes('@')) {
+          errorDetail = 'Valid WhatsApp phone number is missing for this lead.';
+        } else {
+          try {
+            const instanceName = buildEvolutionInstanceName(targetUser);
+            const evoRes = await sendWhatsAppViaEvolution(instanceName, leadPhone, messageText);
+            if (evoRes.ok) {
+              delivered = true;
+              console.log(
+                `[Workflow Runner] Auto responded to ${leadPhone} via Evolution (${instanceName}) · Workflow "${workflow.name}" (Node: ${currentId})`
+              );
+            } else {
+              errorDetail = evoRes.detail || evoRes.error || 'Evolution WhatsApp delivery failed';
+              console.warn(
+                `[Workflow Runner] Could not send WhatsApp to ${leadPhone} (${instanceName}): ${errorDetail}`
+              );
+            }
+          } catch (sendErr: any) {
+            errorDetail = sendErr?.message || String(sendErr);
+            console.warn(
+              `[Workflow Runner] WhatsApp dispatch notice for ${leadPhone}:`,
+              errorDetail
+            );
           }
-        } catch (sendErr: any) {
-          console.warn(`[Workflow Runner] WhatsApp dispatch notice for ${leadPhone}:`, sendErr?.message || sendErr);
         }
 
         result.immediateActionsDispatched.push({
@@ -232,9 +392,9 @@ export async function executeWorkflow(
           actionType: type,
           message: messageText,
           delivered,
+          ...(errorDetail ? { errorDetail } : {}),
         });
 
-        // Continue to next nodes
         const nextEdges = outgoingEdges.get(currentId) || [];
         for (const e of nextEdges) {
           queue.push(e.target);
@@ -245,22 +405,32 @@ export async function executeWorkflow(
       // ACTION: Send Email
       if (type === 'action_send_email') {
         const targetOwnerId = workflow.userId || options.userId || '';
-        const msg = currentNode.data?.message || '';
-        const subject = currentNode.data?.emailSubject || `Update from ${workflow.name}`;
+        const rawTemplate = currentNode.data?.message || '';
+        const personalizedHtml = personalizeWorkflowText(rawTemplate, personalizeCtx);
+        const subject = personalizeWorkflowText(
+          currentNode.data?.emailSubject || `Update from ${workflow.name}`,
+          personalizeCtx
+        );
         let delivered = false;
+        let errorDetail: string | undefined;
 
-        if (leadPhone && leadPhone.includes('@') && targetOwnerId) {
+        if (!recipientEmail || !recipientEmail.includes('@')) {
+          errorDetail = 'Valid recipient email address is missing for this lead.';
+        } else if (!targetOwnerId) {
+          errorDetail = 'Authenticated workspace owner ID is required to send custom domain email.';
+        } else {
           try {
             await sendCustomDomainEmail({
               ownerId: targetOwnerId,
-              to: leadPhone,
+              to: recipientEmail,
               subject,
-              html: msg,
-              text: msg.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim(),
+              html: personalizedHtml,
+              text: htmlToPlainTextServer(personalizedHtml),
             });
             delivered = true;
           } catch (err: any) {
-            console.warn('[Workflow Runner] Email dispatch blocked/notice:', err.message);
+            errorDetail = err?.message || 'Email dispatch blocked';
+            console.warn('[Workflow Runner] Email dispatch blocked/notice:', errorDetail);
             delivered = false;
           }
         }
@@ -268,8 +438,9 @@ export async function executeWorkflow(
         result.immediateActionsDispatched.push({
           nodeId: currentId,
           actionType: type,
-          message: msg,
+          message: personalizedHtml,
           delivered,
+          ...(errorDetail ? { errorDetail } : {}),
         });
         const nextEdges = outgoingEdges.get(currentId) || [];
         for (const e of nextEdges) {
@@ -279,7 +450,7 @@ export async function executeWorkflow(
       }
 
       // ACTION: End Flow
-      if (type === 'action_end_flow') {
+      if (type === 'action_end_flow' || type === 'action_end') {
         break;
       }
 
@@ -289,6 +460,11 @@ export async function executeWorkflow(
         queue.push(e.target);
       }
     }
+  }
+
+  if (!matchedAtLeastOneStart) {
+    result.executed = false;
+    result.reason = 'No trigger node matched the inbound channel or keyword.';
   }
 
   return result;

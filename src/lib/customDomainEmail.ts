@@ -1055,6 +1055,52 @@ export async function checkCustomDomainSendReadiness(ownerId: string): Promise<{
   };
 }
 
+function parseEmailAddressHeader(raw: string): { name: string; email: string } {
+  const str = String(raw || '').trim();
+  const angleMatch = str.match(/^(.*)<([^>]+)>$/);
+  if (angleMatch) {
+    return {
+      name: angleMatch[1].replace(/^["']|["']$/g, '').trim() || angleMatch[2].split('@')[0],
+      email: angleMatch[2].trim().toLowerCase(),
+    };
+  }
+  const emailOnly = str.replace(/^["']|["']$/g, '').trim().toLowerCase();
+  return {
+    name: emailOnly.split('@')[0] || 'Email Lead',
+    email: emailOnly,
+  };
+}
+
+export function resolveOwnerByRecipientEmail(
+  recipients: string[]
+): { ownerId: string; domain: string } | null {
+  const store = loadEmailStore();
+  for (const rawAddr of recipients) {
+    const { email } = parseEmailAddressHeader(rawAddr);
+    const domain = normalizeDomain(email.split('@')[1] || '');
+    if (!domain) continue;
+    for (const [ownerId, rec] of Object.entries(store.domainsByOwner)) {
+      if (rec.domain.toLowerCase() === domain) {
+        return { ownerId, domain: rec.domain };
+      }
+    }
+  }
+  return null;
+}
+
+export interface ResendInboundEmailPayload {
+  ownerId?: string;
+  domain?: string;
+  resendEmailId?: string;
+  fromEmail: string;
+  fromName: string;
+  to: string[];
+  subject: string;
+  text: string;
+  html: string;
+  receivedAt: string;
+}
+
 export async function handleResendWebhookEvent(params: {
   rawBody: string;
   svixId: string;
@@ -1065,6 +1111,7 @@ export async function handleResendWebhookEvent(params: {
   eventType: string;
   domainUpdated?: string;
   bouncedRecipients?: string[];
+  inboundEmail?: ResendInboundEmailPayload;
 }> {
   const webhookSecret = (process.env.RESEND_WEBHOOK_SECRET || '').trim();
   if (!webhookSecret || webhookSecret === 'your_resend_webhook_secret_here') {
@@ -1109,6 +1156,7 @@ export async function handleResendWebhookEvent(params: {
   const store = loadEmailStore();
   let domainUpdated: string | undefined;
   const bouncedRecipients: string[] = [];
+  let inboundEmail: ResendInboundEmailPayload | undefined;
 
   if (eventType.startsWith('domain.')) {
     const resendId = String(eventData.id || '');
@@ -1147,8 +1195,57 @@ export async function handleResendWebhookEvent(params: {
       bouncedRecipients.push(...toList);
     }
 
+    let resolvedOwner: { ownerId: string; domain: string } | null = null;
+    if (eventType === 'email.received') {
+      const emailId = String(eventData.email_id || eventData.id || '').trim();
+      resolvedOwner = resolveOwnerByRecipientEmail(toList);
+      const parsedFrom = parseEmailAddressHeader(String(eventData.from || ''));
+      let textBody = typeof eventData.text === 'string' ? eventData.text : '';
+      let htmlBody = typeof eventData.html === 'string' ? eventData.html : '';
+      let subject = eventData.subject ? String(eventData.subject) : '(No Subject)';
+
+      if (emailId && (!textBody || !htmlBody)) {
+        try {
+          const receivingApi = (resend as any).emails?.receiving;
+          if (receivingApi && typeof receivingApi.get === 'function') {
+            const fetched = await receivingApi.get(emailId);
+            const full = fetched?.data || fetched;
+            if (full) {
+              if (!textBody && typeof full.text === 'string') textBody = full.text;
+              if (!htmlBody && typeof full.html === 'string') htmlBody = full.html;
+              if ((!subject || subject === '(No Subject)') && full.subject) {
+                subject = String(full.subject);
+              }
+            }
+          }
+        } catch (fetchErr: any) {
+          console.warn('[Resend Webhook] Could not fetch receiving email body:', fetchErr?.message || fetchErr);
+        }
+      }
+
+      if (!textBody && htmlBody) {
+        textBody = htmlBody.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      }
+
+      inboundEmail = {
+        ownerId: resolvedOwner?.ownerId,
+        domain: resolvedOwner?.domain,
+        resendEmailId: emailId || undefined,
+        fromEmail: parsedFrom.email,
+        fromName: parsedFrom.name,
+        to: toList,
+        subject,
+        text: textBody,
+        html: htmlBody,
+        receivedAt: event?.created_at || nowIso,
+      };
+    } else if (eventData.from) {
+      resolvedOwner = resolveOwnerByRecipientEmail([String(eventData.from)]);
+    }
+
     store.webhookLogs.unshift({
       id: `wh_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      ownerId: resolvedOwner?.ownerId,
       resendEmailId: eventData.email_id ? String(eventData.email_id) : undefined,
       eventType,
       from: eventData.from ? String(eventData.from) : undefined,
@@ -1169,6 +1266,7 @@ export async function handleResendWebhookEvent(params: {
     eventType,
     domainUpdated,
     bouncedRecipients: bouncedRecipients.length > 0 ? bouncedRecipients : undefined,
+    inboundEmail,
   };
 }
 
@@ -1181,6 +1279,7 @@ export function getUserEmailDeliveryLogs(ownerId: string): EmailDeliveryLogEntry
     .filter((entry) => {
       if (entry.ownerId && entry.ownerId === cleanOwnerId) return true;
       if (entry.from && entry.from.toLowerCase().includes(`@${domain}`)) return true;
+      if (entry.to && entry.to.toLowerCase().includes(`@${domain}`)) return true;
       return false;
     })
     .slice(0, 30);

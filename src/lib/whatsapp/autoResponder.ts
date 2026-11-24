@@ -1,7 +1,11 @@
 import { proto } from '@whiskeysockets/baileys';
 import { extractMessageText, SpamCooldownCache, globalSpamCache } from './listener.js';
 import { getWorkflowsForUser } from '../automation/db.js';
-import { executeWorkflow, WorkflowExecutionResult } from '../automation/runner.js';
+import {
+  executeWorkflow,
+  matchesKeywordRule,
+  WorkflowExecutionResult,
+} from '../automation/runner.js';
 
 export interface AutoResponderWorkflowOptions {
   userId?: string;
@@ -65,8 +69,6 @@ export function startAutoResponderWorkflowListener(
         return;
       }
 
-      const lowerMessage = leadMessage.toLowerCase().trim();
-
       // 2. Evaluate workflows
       for (const workflow of activeWorkflows) {
         let shouldTrigger = false;
@@ -78,26 +80,31 @@ export function startAutoResponderWorkflowListener(
           continue;
         }
 
-        // Check if any trigger node matches
+        // Check if any trigger or condition node matches
         for (const node of nodes) {
-          const type = node.data?.nodeType || node.type || '';
+          const rawType = String(node.type || '');
+          const type = String(node.data?.nodeType || rawType || '');
 
           if (type === 'trigger_whatsapp_reply') {
             shouldTrigger = true;
             break;
           }
 
-          if (type === 'trigger_keyword') {
-            const kw = String(node.data?.triggerKeyword || node.data?.keyword || '').toLowerCase().trim();
-            if (kw && lowerMessage.includes(kw)) {
+          if (type === 'trigger_keyword' || type === 'whatsapp_keyword') {
+            const kw = String(node.data?.triggerKeyword || node.data?.keyword || '');
+            if (matchesKeywordRule(leadMessage, kw, node.data?.matchType || 'contains')) {
               shouldTrigger = true;
               break;
             }
           }
 
-          if (type === 'condition_message_contains') {
-            const kw = String(node.data?.keyword || '').toLowerCase().trim();
-            if (kw && lowerMessage.includes(kw)) {
+          if (
+            type === 'condition_message_contains' ||
+            type === 'condition' ||
+            rawType === 'condition'
+          ) {
+            const kw = String(node.data?.keyword || node.data?.triggerKeyword || '');
+            if (matchesKeywordRule(leadMessage, kw, node.data?.matchType || 'contains')) {
               shouldTrigger = true;
               break;
             }
@@ -111,6 +118,7 @@ export function startAutoResponderWorkflowListener(
             userId,
             workflowOverride: workflow,
             sock,
+            channel: 'whatsapp',
           });
 
           // Record in anti-spam cache

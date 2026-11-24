@@ -57,6 +57,8 @@ import {
 } from 'lucide-react';
 import { DelayUnit, WorkflowNodeType } from '../lib/automation/types';
 import {
+  ActivityChannel,
+  ActivityEventType,
   AudienceList,
   Automation,
   AutomationStatus,
@@ -65,10 +67,13 @@ import {
   Contact,
   ListCategory,
   TriggerType,
+  UserPrivateProfile,
+  Workspace,
   sanitizeString,
   sanitizeStringArray,
 } from '../types';
 import { EmailEditor } from './EmailEditor';
+import { executeClientWorkflowGraph } from '../utils/workflowClientExecutor';
 
 // ============================================================================
 // TRIGGER METADATA CATALOG
@@ -617,7 +622,7 @@ const WORKFLOW_BLUEPRINTS = [
         id: 'c1',
         type: 'condition',
         position: { x: 300, y: 220 },
-        data: { keyword: 'price' },
+        data: { nodeType: 'condition_message_contains', keyword: 'price' },
       },
       {
         id: 'a_yes',
@@ -832,6 +837,7 @@ function rehydrateAutomationToCanvas(auto: Automation): {
               type: 'condition',
               position: { x, y },
               data: {
+                nodeType: 'condition_message_contains',
                 keyword: ln.config?.conditionValue || 'yes',
               },
             });
@@ -1011,9 +1017,18 @@ export interface AutomationBuilderUIProps {
   onBackToDashboard?: () => void;
   emailDomainStatus?: import('../utils/emailDomainValidation').EmailDomainStatusSummary | null;
   onNavigateToEmailSettings?: () => void;
+  workspace?: Workspace;
+  privateProfile?: UserPrivateProfile;
+  onLogActivity?: (
+    eventType: ActivityEventType,
+    title: string,
+    detail: string,
+    channel: ActivityChannel
+  ) => Promise<void>;
 }
 
 export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
+  userId,
   isAuthenticated = false,
   cloudSyncState = 'local_only',
   onOpenAuth,
@@ -1033,6 +1048,9 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
   onBackToDashboard,
   emailDomainStatus,
   onNavigateToEmailSettings,
+  workspace,
+  privateProfile,
+  onLogActivity,
 }) => {
   // Mode: 'list' (Saved Workflows Hub) or 'canvas' (Visual Drag-and-Drop Builder)
   const [viewMode, setViewMode] = useState<'list' | 'canvas'>('list');
@@ -1078,8 +1096,11 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
 
   // Test Simulation Modal
   const [testModalOpen, setTestModalOpen] = useState(false);
+  const [testLeadName, setTestLeadName] = useState('Alex Morgan');
   const [testPhone, setTestPhone] = useState('2348012345678');
+  const [testEmail, setTestEmail] = useState('lead@example.com');
   const [testMessage, setTestMessage] = useState('Hey, what is the price for this service?');
+  const [deliverLiveTest, setDeliverLiveTest] = useState(true);
   const [testResult, setTestResult] = useState<any>(null);
   const [isRunningTest, setIsRunningTest] = useState(false);
 
@@ -1785,75 +1806,58 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
     setEditingEmailNodeId(null);
   };
 
-  // Client-side Workflow Execution Simulator (zero /api dependency)
+  // Workflow Execution Simulator + Live Channel Dispatch
   const handleExecuteTest = async () => {
     setIsRunningTest(true);
     setTestResult(null);
     try {
-      const trace: any[] = [];
-      const visited = new Set<string>();
-      let current: FlowCustomNode | undefined =
-        nodes.find((n) => n.type === 'trigger') || nodes[0];
+      const result = await executeClientWorkflowGraph({
+        automationName: workflowName,
+        automationId: editingAutomationId || undefined,
+        nodes,
+        edges,
+        inboundText: testMessage,
+        bypassKeywordTriggerCheck: false,
+        deliverLive: deliverLiveTest,
+        lead: {
+          fullName: testLeadName.trim() || 'Alex Morgan',
+          email: testEmail.trim(),
+          phone: testPhone.trim(),
+          listName: targetList,
+        },
+        workspace,
+        privateProfile,
+        userId,
+      });
 
-      while (current && !visited.has(current.id) && trace.length < 25) {
-        visited.add(current.id);
-        if (current.type === 'trigger') {
-          trace.push({
-            step: trace.length + 1,
-            type: 'trigger',
-            label: current.data?.label || 'Trigger Fired',
-            targetList,
-            leadPhone: testPhone,
-          });
-          const nextEdge = edges.find((e) => e.source === current?.id);
-          current = nextEdge ? nodes.find((n) => n.id === nextEdge.target) : undefined;
-        } else if (current.type === 'condition') {
-          const kw = String(current.data?.keyword || 'price').toLowerCase();
-          const matched = testMessage.toLowerCase().includes(kw);
-          trace.push({
-            step: trace.length + 1,
-            type: 'condition',
-            keyword: kw,
-            matched,
-            branchTaken: matched ? 'true (Yes)' : 'false (No)',
-          });
-          const branchEdge =
-            edges.find(
-              (e) =>
-                e.source === current?.id &&
-                e.sourceHandle === (matched ? 'true' : 'false')
-            ) || edges.find((e) => e.source === current?.id);
-          current = branchEdge ? nodes.find((n) => n.id === branchEdge.target) : undefined;
-        } else if (current.type === 'delay') {
-          trace.push({
-            step: trace.length + 1,
-            type: 'delay',
-            wait: `${current.data?.delayValue || 5} ${current.data?.delayUnit || 'Minutes'}`,
-            status: 'scheduled_in_queue',
-          });
-          const nextEdge = edges.find((e) => e.source === current?.id);
-          current = nextEdge ? nodes.find((n) => n.id === nextEdge.target) : undefined;
-        } else {
-          trace.push({
-            step: trace.length + 1,
-            type: current.data?.nodeType || 'action',
-            recipient: testPhone,
-            messagePreview: (current.data?.message || '').replace(
-              /\{\{first_name\}\}/gi,
-              'Alex'
-            ),
-          });
-          const nextEdge = edges.find((e) => e.source === current?.id);
-          current = nextEdge ? nodes.find((n) => n.id === nextEdge.target) : undefined;
+      if (deliverLiveTest && result.receipts.length > 0 && onLogActivity) {
+        for (const r of result.receipts) {
+          await onLogActivity(
+            'automation_triggered',
+            r.status === 'failed'
+              ? `Workflow Test Blocked (${r.channel.toUpperCase()}): ${workflowName}`
+              : `Workflow Test Dispatched (${r.channel.toUpperCase()}): ${workflowName}`,
+            r.detailMessage || r.bodyPreview,
+            r.channel
+          );
         }
       }
 
       setTestResult({
-        ok: true,
+        ok: result.executed,
+        reason: result.reason,
         workflow: workflowName,
         targetList,
-        stepsExecuted: trace.length,
-        trace,
+        liveDeliveryEnabled: deliverLiveTest,
+        stepsExecuted: result.stepsExecuted,
+        trace: result.trace,
+        receipts: result.receipts.map((r) => ({
+          channel: r.channel,
+          status: r.status,
+          to: r.toRecipient,
+          provider: r.providerUsed,
+          detail: r.detailMessage,
+        })),
       });
     } finally {
       setIsRunningTest(false);
@@ -3435,21 +3439,47 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
             </div>
 
             <div className="space-y-3 text-xs">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Test Lead Name
+                  </label>
+                  <input
+                    type="text"
+                    value={testLeadName}
+                    onChange={(e) => setTestLeadName(e.target.value)}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-xl"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">
+                    Simulated Lead Phone
+                  </label>
+                  <input
+                    type="text"
+                    value={testPhone}
+                    onChange={(e) => setTestPhone(e.target.value)}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-xl font-mono"
+                  />
+                </div>
+              </div>
+
               <div>
                 <label className="block font-bold text-slate-700 mb-1">
-                  Simulated Lead Phone
+                  Simulated Lead Email (for Email Actions)
                 </label>
                 <input
-                  type="text"
-                  value={testPhone}
-                  onChange={(e) => setTestPhone(e.target.value)}
+                  type="email"
+                  value={testEmail}
+                  onChange={(e) => setTestEmail(e.target.value)}
+                  placeholder="lead@example.com"
                   className="w-full px-3 py-2 border border-slate-300 rounded-xl font-mono"
                 />
               </div>
 
               <div>
                 <label className="block font-bold text-slate-700 mb-1">
-                  Incoming Message Payload
+                  Incoming Message Payload (Tested Against Trigger &amp; Condition Keywords)
                 </label>
                 <input
                   type="text"
@@ -3460,8 +3490,28 @@ export const AutomationBuilderUI: React.FC<AutomationBuilderUIProps> = ({
                 />
               </div>
 
+              <label className="flex items-center gap-2 p-2.5 rounded-xl bg-slate-50 border border-slate-200 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={deliverLiveTest}
+                  onChange={(e) => setDeliverLiveTest(e.target.checked)}
+                  className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                />
+                <span className="font-semibold text-slate-700">
+                  Deliver real messages via connected WhatsApp / Resend Email channels
+                </span>
+              </label>
+
               {testResult && (
-                <div className="p-3 bg-slate-900 text-emerald-400 rounded-xl font-mono text-[11px] max-h-48 overflow-y-auto">
+                <div
+                  className={`p-3 rounded-xl font-mono text-[11px] max-h-56 overflow-y-auto ${
+                    testResult.ok === false ||
+                    (Array.isArray(testResult.receipts) &&
+                      testResult.receipts.some((r: any) => r.status === 'failed'))
+                      ? 'bg-slate-900 text-amber-300'
+                      : 'bg-slate-900 text-emerald-400'
+                  }`}
+                >
                   <pre>{JSON.stringify(testResult, null, 2)}</pre>
                 </div>
               )}

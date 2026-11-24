@@ -54,7 +54,13 @@ import {
   getAllFollowUpJobs,
   createFollowUpJob,
 } from './src/lib/automation/db.js';
-import { executeWorkflow } from './src/lib/automation/runner.js';
+import {
+  executeWorkflow,
+  matchesKeywordRule,
+  htmlToWhatsAppTextServer,
+  htmlToPlainTextServer,
+} from './src/lib/automation/runner.js';
+import type { WorkflowRecord } from './src/lib/automation/types.js';
 import {
   startFollowUpCronDaemon,
   runFollowUpCron,
@@ -616,6 +622,8 @@ const inboundWebhookQueue: Array<{
   subject?: string;
   listName?: string;
   receivedAt: string;
+  alreadyHandledByServer?: boolean;
+  autoReplies?: string[];
 }> = [];
 
 export interface PublicLeadSubmissionEvent {
@@ -2082,7 +2090,7 @@ async function startServer() {
   });
 
   // 5. Inbound Webhook Endpoint for Real Lead Replies (WhatsApp / Email / SMS)
-  app.post('/api/webhooks/inbound', (req, res) => {
+  app.post('/api/webhooks/inbound', async (req, res) => {
     const {
       channel = 'whatsapp',
       leadName = 'Inbound Lead',
@@ -2091,23 +2099,16 @@ async function startServer() {
       message = '',
       subject = '',
       listName = 'General Contacts',
+      userId: bodyUserId = '',
+      skipServerAutomation = false,
     } = req.body || {};
 
     const cleanChannel: 'whatsapp' | 'email' | 'sms' =
       channel === 'email' || channel === 'sms' ? channel : 'whatsapp';
 
     const cleanMessage = String(message || '').trim();
-    const item = {
-      id: `inb_wh_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-      channel: cleanChannel,
-      leadName: String(leadName || 'Inbound Lead'),
-      leadEmail: String(leadEmail || ''),
-      leadPhone: String(leadPhone || ''),
-      message: cleanMessage,
-      subject: String(subject || ''),
-      listName: String(listName || 'General Contacts'),
-      receivedAt: new Date().toISOString(),
-    };
+    const cleanEmail = String(leadEmail || '').trim();
+    const cleanPhone = String(leadPhone || '').trim();
 
     // Detect STOP / UNSUBSCRIBE / CANCEL opt-out keywords automatically
     const normalizedKeyword = cleanMessage.toUpperCase().replace(/[^A-Z]/g, '');
@@ -2116,9 +2117,9 @@ async function startServer() {
       ['STOP', 'UNSUBSCRIBE', 'STOPALL', 'OPTOUT'].includes(normalizedKeyword);
 
     if (isOptOutKeyword) {
-      if (item.leadEmail) markRecipientGloballySuppressed(item.leadEmail);
-      if (item.leadPhone) markRecipientGloballySuppressed(item.leadPhone);
-      const unsubRecipient = item.leadEmail || item.leadPhone || item.leadName;
+      if (cleanEmail) markRecipientGloballySuppressed(cleanEmail);
+      if (cleanPhone) markRecipientGloballySuppressed(cleanPhone);
+      const unsubRecipient = cleanEmail || cleanPhone || String(leadName || 'Lead');
       trackingComplianceQueue.unshift({
         id: `trk_stop_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
         type: 'unsubscribe',
@@ -2129,7 +2130,6 @@ async function startServer() {
       if (trackingComplianceQueue.length > 200) {
         trackingComplianceQueue.pop();
       }
-      // Immediately halt any queued scheduled jobs for this contact
       for (const job of scheduledAutomationJobs) {
         if (job.status !== 'queued') continue;
         const killCheck = evaluateServerJobKillSwitch(job);
@@ -2142,6 +2142,54 @@ async function startServer() {
       }
     }
 
+    let resolvedUid = String(bodyUserId || req.headers['x-user-id'] || '').trim();
+    if (!resolvedUid) {
+      const cleanDigits = cleanPhone.replace(/[^0-9]/g, '');
+      for (const [snapKey, snap] of serverWorkspaceSnapshotsByUid.entries()) {
+        const contacts = Array.isArray((snap as any)?.contacts) ? (snap as any).contacts : [];
+        const match = contacts.find(
+          (c: any) =>
+            (cleanEmail && c.email?.toLowerCase() === cleanEmail.toLowerCase()) ||
+            (cleanDigits && c.phone?.replace(/[^0-9]/g, '') === cleanDigits)
+        );
+        if (match) {
+          resolvedUid = snapKey;
+          break;
+        }
+      }
+      if (!resolvedUid && serverWorkspaceSnapshotsByUid.size === 1) {
+        resolvedUid = Array.from(serverWorkspaceSnapshotsByUid.keys())[0];
+      }
+    }
+
+    let automationResult: any = null;
+    if (!isOptOutKeyword && !skipServerAutomation && resolvedUid && cleanMessage) {
+      automationResult = await processInboundAutomation({
+        userId: resolvedUid,
+        channel: cleanChannel,
+        leadPhone: cleanPhone,
+        leadEmail: cleanEmail,
+        leadName: String(leadName || 'Inbound Lead'),
+        subject: String(subject || ''),
+        text: cleanMessage,
+        listName: String(listName || 'General Contacts'),
+      });
+    }
+
+    const item = {
+      id: `inb_wh_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      channel: cleanChannel,
+      leadName: String(leadName || 'Inbound Lead'),
+      leadEmail: cleanEmail,
+      leadPhone: cleanPhone,
+      message: cleanMessage,
+      subject: String(subject || ''),
+      listName: String(listName || 'General Contacts'),
+      receivedAt: new Date().toISOString(),
+      alreadyHandledByServer: Boolean(automationResult),
+      autoReplies: automationResult?.autoReplies || [],
+    };
+
     inboundWebhookQueue.unshift(item);
     if (inboundWebhookQueue.length > 50) {
       inboundWebhookQueue.pop();
@@ -2150,6 +2198,7 @@ async function startServer() {
     res.json({
       ok: true,
       optOutTriggered: isOptOutKeyword,
+      automationResult,
       received: item,
     });
   });
@@ -2290,6 +2339,41 @@ async function startServer() {
 
         console.log(`[WhatsApp Webhook] Message from: ${from} (${leadName}) | Text: "${text}"`);
 
+        // Resolve workspace userId when available
+        let resolvedUserId = String(req.query.userId || req.headers['x-user-id'] || '').trim();
+        if (!resolvedUserId) {
+          const cleanDigits = String(from || '').replace(/[^0-9]/g, '');
+          for (const [snapKey, snap] of serverWorkspaceSnapshotsByUid.entries()) {
+            const contacts = Array.isArray((snap as any)?.contacts) ? (snap as any).contacts : [];
+            if (
+              cleanDigits &&
+              contacts.some((c: any) => c.phone?.replace(/[^0-9]/g, '') === cleanDigits)
+            ) {
+              resolvedUserId = snapKey;
+              break;
+            }
+          }
+          if (!resolvedUserId && serverWorkspaceSnapshotsByUid.size === 1) {
+            resolvedUserId = Array.from(serverWorkspaceSnapshotsByUid.keys())[0];
+          }
+        }
+
+        let handledByUserAutomation = false;
+        let autoReplies: string[] = [];
+        if (resolvedUserId && text) {
+          const autoRes = await processInboundAutomation({
+            userId: resolvedUserId,
+            channel: 'whatsapp',
+            leadPhone: from,
+            leadName,
+            text,
+          });
+          if (autoRes.workflowsTriggered > 0 || autoRes.autoRepliesSent > 0) {
+            handledByUserAutomation = true;
+            autoReplies = autoRes.autoReplies;
+          }
+        }
+
         // Record in FlowPilot internal CRM & Inbound Queue so it appears in the Omnichannel Inbox
         inboundWebhookQueue.unshift({
           id: `inb_wa_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
@@ -2301,27 +2385,21 @@ async function startServer() {
           subject: 'WhatsApp Inbound Message',
           listName: 'General Contacts',
           receivedAt: new Date().toISOString(),
+          alreadyHandledByServer: handledByUserAutomation || Boolean(resolvedUserId),
+          autoReplies,
         });
 
-        // Determine Keyword Auto-Reply logic:
-        // - If message contains "yes" -> reply "Here is the video: [YOUR VIDEO LINK]. Watch and reply DONE"
-        // - If "done" -> reply "Nice! You ready to start today? Reply READY"
-        // - Else -> reply "I got your message. Reply YES to get started"
-        const lowerText = text.toLowerCase().trim();
-        let replyMessage = '';
-
-        if (lowerText.includes('yes')) {
-          replyMessage = 'Here is the video: [YOUR VIDEO LINK]. Watch and reply DONE';
-        } else if (lowerText.includes('done')) {
-          replyMessage = 'Nice! You ready to start today? Reply READY';
-        } else {
-          replyMessage = 'I got your message. Reply YES to get started';
-        }
-
-        console.log(`[WhatsApp Webhook] Auto-reply formulated for ${from}: "${replyMessage}"`);
-
-        // Dispatch reply via WhatsApp Cloud API
-        if (from) {
+        // Legacy Cloud API fallback only if no user-configured workflow or auto-responder ran
+        if (!handledByUserAutomation && from) {
+          const lowerText = text.toLowerCase().trim();
+          let replyMessage = '';
+          if (lowerText.includes('yes')) {
+            replyMessage = 'Here is the video: [YOUR VIDEO LINK]. Watch and reply DONE';
+          } else if (lowerText.includes('done')) {
+            replyMessage = 'Nice! You ready to start today? Reply READY';
+          } else {
+            replyMessage = 'I got your message. Reply YES to get started';
+          }
           await sendWhatsAppCloudMessage(from, replyMessage);
         }
       }
@@ -2795,52 +2873,114 @@ async function startServer() {
   };
 
   /**
-   * Helper: Execute automations for incoming WhatsApp message:
-   * 1. Call visual automation workflows (executeWorkflow)
-   * 2. Auto Responder checks:
-   *    - If text contains keyword, send reply
-   *    - If first message, send welcome
-   *    - If no reply after 1 day, schedule follow-up job
+   * Unified inbound automation engine for WhatsApp, Email, and SMS replies.
+   * Evaluates BOTH visual workflow nodes (from workflows_store.json + synced workspace snapshot)
+   * AND live Auto-Responder keyword rules.
    */
-  const runAutomation = async (userId: string, leadPhone: string, text: string) => {
-    const cleanPhone = String(leadPhone || '').replace(/[^0-9]/g, '');
-    const cleanText = String(text || '').trim();
-    const lowerText = cleanText.toLowerCase();
+  const processInboundAutomation = async (params: {
+    userId: string;
+    channel: 'whatsapp' | 'email' | 'sms';
+    leadPhone?: string;
+    leadEmail?: string;
+    leadName?: string;
+    subject?: string;
+    text: string;
+    listName?: string;
+  }) => {
+    const userId = String(params.userId || 'default_workspace').trim();
+    const channel = params.channel || 'whatsapp';
+    const cleanPhone = String(params.leadPhone || '').replace(/[^0-9]/g, '');
+    const cleanEmail = String(params.leadEmail || '').trim().toLowerCase();
+    const cleanText = String(params.text || '').trim();
+    const leadName = String(params.leadName || '').trim() || (cleanEmail ? cleanEmail.split('@')[0] : cleanPhone ? `+${cleanPhone}` : 'Lead');
     const instanceName = buildEvolutionInstanceName(userId);
+    const snapshot: any = getWorkspaceSnapshotForUser(userId);
 
-    console.log(`[runAutomation] User: ${userId} | Lead: +${cleanPhone} | Text: "${cleanText}"`);
+    console.log(`[processInboundAutomation] User: ${userId} | Channel: ${channel} | Lead: ${cleanEmail || '+' + cleanPhone} | Text: "${cleanText}"`);
 
     const results = {
       workflowsTriggered: 0,
       autoRepliesSent: 0,
       followUpScheduled: false,
+      autoReplies: [] as string[],
+      errors: [] as string[],
     };
 
-    // 1. Existing visual automation workflows (executeWorkflow)
+    // 1. Merge visual automation workflows from DB + synced workspace snapshot
     try {
-      const userWorkflows = await getWorkflowsForUser(userId);
-      const activeWorkflows = userWorkflows.filter((w) => w.enabled);
+      const dbWorkflows = await getWorkflowsForUser(userId);
+      const workflowMap = new Map<string, WorkflowRecord>();
+      for (const wf of dbWorkflows) {
+        if (wf && wf.id) workflowMap.set(wf.id, wf);
+      }
+
+      const snapshotAutos: any[] = Array.isArray(snapshot?.automations) ? snapshot.automations : [];
+      for (const auto of snapshotAutos) {
+        if (!auto || !auto.id) continue;
+        let nodesJson = '[]';
+        let edgesJson = '[]';
+        if (auto.flowGraphJson) {
+          try {
+            const parsed = JSON.parse(auto.flowGraphJson);
+            if (Array.isArray(parsed?.nodes)) {
+              nodesJson = JSON.stringify(parsed.nodes);
+            }
+            if (Array.isArray(parsed?.edges)) {
+              edgesJson = JSON.stringify(parsed.edges);
+            }
+          } catch {
+            // ignore malformed graph json
+          }
+        }
+        workflowMap.set(auto.id, {
+          id: auto.id,
+          userId: auto.ownerId || userId,
+          name: auto.name || 'Automation Workflow',
+          nodesJson,
+          edgesJson,
+          enabled: auto.status === 'active',
+          createdAt: auto.createdAt || new Date().toISOString(),
+          updatedAt: auto.updatedAt || new Date().toISOString(),
+        });
+      }
+
+      const activeWorkflows = Array.from(workflowMap.values()).filter((w) => w.enabled);
 
       for (const wf of activeWorkflows) {
         let shouldTrigger = false;
         try {
           const nodes = JSON.parse(wf.nodesJson || '[]');
+          const hasFormOnlyTrigger = nodes.some(
+            (n: any) => (n.data?.nodeType || n.type || '') === 'trigger_form_submission'
+          );
+
           for (const node of nodes) {
-            const type = node.data?.nodeType || node.type || '';
-            if (type === 'trigger_whatsapp_reply') {
+            const rawType = String(node.type || '');
+            const type = String(node.data?.nodeType || rawType || '');
+
+            if (type === 'trigger_whatsapp_reply' && channel === 'whatsapp') {
               shouldTrigger = true;
               break;
             }
-            if (type === 'trigger_keyword') {
-              const kw = String(node.data?.triggerKeyword || node.data?.keyword || '').toLowerCase().trim();
-              if (kw && lowerText.includes(kw)) {
+            if (type === 'trigger_email_reply' && channel === 'email') {
+              shouldTrigger = true;
+              break;
+            }
+            if (type === 'trigger_keyword' || type === 'whatsapp_keyword') {
+              const kw = String(node.data?.triggerKeyword || node.data?.keyword || '');
+              if (matchesKeywordRule(cleanText, kw, node.data?.matchType || 'contains')) {
                 shouldTrigger = true;
                 break;
               }
             }
-            if (type === 'condition_message_contains') {
-              const kw = String(node.data?.keyword || '').toLowerCase().trim();
-              if (kw && lowerText.includes(kw)) {
+            if (
+              !hasFormOnlyTrigger &&
+              (type === 'condition_message_contains' ||
+                type === 'condition' ||
+                rawType === 'condition')
+            ) {
+              const kw = String(node.data?.keyword || node.data?.triggerKeyword || '');
+              if (matchesKeywordRule(cleanText, kw, node.data?.matchType || 'contains')) {
                 shouldTrigger = true;
                 break;
               }
@@ -2851,110 +2991,168 @@ async function startServer() {
         }
 
         if (shouldTrigger) {
-          console.log(`[runAutomation] Triggering visual workflow "${wf.name}" (${wf.id})`);
-          await executeWorkflow(wf.id, cleanPhone, cleanText, { userId, workflowOverride: wf });
-          results.workflowsTriggered++;
+          console.log(`[processInboundAutomation] Triggering workflow "${wf.name}" (${wf.id})`);
+          const wfRes = await executeWorkflow(wf.id, cleanPhone || cleanEmail, cleanText, {
+            userId,
+            workflowOverride: wf,
+            leadEmail: cleanEmail || undefined,
+            leadName,
+            channel,
+            listName: params.listName,
+          });
+          if (wfRes.executed) {
+            results.workflowsTriggered++;
+            for (const act of wfRes.immediateActionsDispatched) {
+              if (act.delivered) {
+                results.autoReplies.push(act.message);
+              } else if (act.errorDetail) {
+                results.errors.push(`${wf.name}: ${act.errorDetail}`);
+              }
+            }
+          }
         }
       }
     } catch (err: any) {
-      console.warn(`[runAutomation] Visual workflow runner error:`, err?.message || err);
+      console.warn('[processInboundAutomation] Visual workflow runner error:', err?.message || err);
     }
 
     // 2. FlowPilot AutoResponder rules (from workspace snapshot)
     try {
-      const snapshot: any = getWorkspaceSnapshotForUser(userId);
       const autoResponders: any[] = Array.isArray(snapshot?.autoResponders)
-        ? snapshot.autoResponders.filter((a: any) => a.status !== 'paused')
+        ? snapshot.autoResponders.filter((a: any) => a.status !== 'paused' && a.status !== 'draft')
         : [];
+
+      const snapshotContacts: any[] = Array.isArray(snapshot?.contacts) ? snapshot.contacts : [];
+      const matchedContact = snapshotContacts.find(
+        (c: any) =>
+          (cleanEmail && c.email?.toLowerCase() === cleanEmail) ||
+          (cleanPhone && c.phone?.replace(/[^0-9]/g, '') === cleanPhone)
+      );
+      const effectiveList = params.listName || matchedContact?.listName || '';
 
       let keywordMatched = false;
 
-      // Rule A: If text contains keyword, send reply
       for (const ar of autoResponders) {
-        const kw = String(ar.triggerMessage || ar.keyword || '').toLowerCase().trim();
-        const reply = String(ar.responseMessage || ar.replyMessage || '').trim();
+        if (ar.channel && ar.channel !== channel) continue;
+        if (
+          effectiveList &&
+          ar.targetList &&
+          ar.targetList.toLowerCase() !== 'general contacts' &&
+          ar.targetList.trim().toLowerCase() !== effectiveList.trim().toLowerCase()
+        ) {
+          continue;
+        }
+
+        const kw = String(ar.triggerMessage || ar.keyword || '').trim();
+        const rawReply = String(ar.responseMessage || ar.replyMessage || '').trim();
         const matchType = ar.matchType || 'contains';
 
-        if (!kw || !reply) continue;
+        if (!rawReply) continue;
+        if (matchType !== 'any_inbound' && !kw) continue;
 
-        let matched = false;
-        if (matchType === 'exact') matched = lowerText === kw;
-        else if (matchType === 'startsWith') matched = lowerText.startsWith(kw);
-        else matched = lowerText.includes(kw);
+        const matched = matchesKeywordRule(cleanText, kw, matchType);
+        if (!matched) continue;
 
-        if (matched) {
-          keywordMatched = true;
-          console.log(`[runAutomation] AutoResponder Keyword match: "${kw}" -> Replying to +${cleanPhone}`);
-          await sendWhatsAppViaEvolution(instanceName, cleanPhone, reply);
+        keywordMatched = true;
+        const firstName = leadName.split(/\s+/)[0] || 'Friend';
+        const personalizedReply = rawReply
+          .replace(/\{\{\s*first_name\s*\}\}/gi, firstName)
+          .replace(/\{\{\s*full_name\s*\}\}/gi, leadName)
+          .replace(/\{\{\s*list_name\s*\}\}/gi, ar.targetList || effectiveList || 'General Contacts');
+
+        let sentOk = false;
+        if (channel === 'whatsapp' && cleanPhone) {
+          const waBody = htmlToWhatsAppTextServer(personalizedReply);
+          const waRes = await sendWhatsAppViaEvolution(instanceName, cleanPhone, waBody);
+          sentOk = waRes.ok;
+          if (!waRes.ok) {
+            results.errors.push(`Auto-Responder "${ar.name}": ${waRes.detail || waRes.error || 'WhatsApp delivery failed'}`);
+          } else {
+            results.autoReplies.push(waBody);
+          }
+        } else if (channel === 'email' && cleanEmail) {
+          try {
+            await sendCustomDomainEmail({
+              ownerId: userId,
+              to: cleanEmail,
+              subject: ar.subjectLine || (params.subject ? `Re: ${params.subject}` : `Re: ${kw.slice(0, 40)}`),
+              html: personalizedReply,
+              text: htmlToPlainTextServer(personalizedReply),
+            });
+            sentOk = true;
+            results.autoReplies.push(htmlToPlainTextServer(personalizedReply));
+          } catch (mailErr: any) {
+            results.errors.push(`Auto-Responder "${ar.name}": ${mailErr?.message || 'Email delivery blocked'}`);
+          }
+        }
+
+        ar.triggeredCount = (ar.triggeredCount || 0) + 1;
+        if (sentOk) {
           results.autoRepliesSent++;
           ar.sentCount = (ar.sentCount || 0) + 1;
-          ar.triggeredCount = (ar.triggeredCount || 0) + 1;
-          break; // Send primary matched response
+        }
+        break;
+      }
+
+      // First-message WhatsApp welcome fallback
+      if (channel === 'whatsapp' && cleanPhone && !keywordMatched) {
+        const inboxThreads: any[] = Array.isArray(snapshot?.inboxThreads) ? snapshot.inboxThreads : [];
+        const existingThread = inboxThreads.find(
+          (t) => t.leadPhone && t.leadPhone.replace(/[^0-9]/g, '') === cleanPhone
+        );
+        if (!existingThread && snapshot?.workspace?.welcomeMessage) {
+          const welcomeWa = htmlToWhatsAppTextServer(String(snapshot.workspace.welcomeMessage));
+          const welcomeRes = await sendWhatsAppViaEvolution(instanceName, cleanPhone, welcomeWa);
+          if (welcomeRes.ok) {
+            results.autoRepliesSent++;
+            results.autoReplies.push(welcomeWa);
+          }
         }
       }
 
-      // Check lead history in inbox / contacts
-      const inboxThreads: any[] = Array.isArray(snapshot?.inboxThreads) ? snapshot.inboxThreads : [];
-      const existingThread = inboxThreads.find(
-        (t) => t.leadPhone && t.leadPhone.replace(/[^0-9]/g, '') === cleanPhone
-      );
-      const isFirstMessage = !existingThread;
-
-      // Rule B: If first message, send welcome
-      if (isFirstMessage && !keywordMatched) {
-        const welcomeResponder = autoResponders.find(
-          (ar: any) =>
-            ar.triggerMessage?.toLowerCase().includes('welcome') ||
-            ar.targetList?.toLowerCase().includes('welcome') ||
-            ar.name?.toLowerCase().includes('welcome')
-        );
-
-        const welcomeText =
-          welcomeResponder?.responseMessage ||
-          welcomeResponder?.replyMessage ||
-          snapshot?.workspace?.welcomeMessage ||
-          'Hello! Thank you for reaching out. How can we help you today?';
-
-        console.log(`[runAutomation] First message from +${cleanPhone} -> Sending welcome reply`);
-        await sendWhatsAppViaEvolution(instanceName, cleanPhone, welcomeText);
-        results.autoRepliesSent++;
+      if (results.autoRepliesSent > 0 && snapshot) {
+        flushWorkspacesStoreToDisk();
       }
 
-      // Rule C: If no reply after 1 day, send follow-up
-      // Schedules a drip job into followUpJobs table (processed automatically by followUpCron daemon)
-      try {
-        const followUpMessage =
-          snapshot?.workspace?.followUpMessage ||
-          'Hi again! Just following up to see if you had any questions on our previous message.';
-
-        const nextActionAt = Date.now() + 24 * 60 * 60 * 1000; // 1 day from now
-        await createFollowUpJob({
-          workflowId: 'evolution_autoresponder_1day',
-          userId,
-          leadPhone: cleanPhone,
-          delayValue: 1,
-          delayUnit: 'Days',
-          message: followUpMessage,
-          actionType: 'action_send_whatsapp',
-        });
-        results.followUpScheduled = true;
-        console.log(`[runAutomation] Scheduled 1-day follow-up for +${cleanPhone}`);
-      } catch (fErr: any) {
-        console.warn(`[runAutomation] Could not schedule 1-day follow-up job:`, fErr?.message || fErr);
+      // 1-day follow-up drip on WhatsApp only if workspace configured a followUpMessage
+      if (channel === 'whatsapp' && cleanPhone && snapshot?.workspace?.followUpMessage) {
+        try {
+          await createFollowUpJob({
+            workflowId: 'evolution_autoresponder_1day',
+            userId,
+            leadPhone: cleanPhone,
+            delayValue: 1,
+            delayUnit: 'Days',
+            message: htmlToWhatsAppTextServer(String(snapshot.workspace.followUpMessage)),
+            actionType: 'action_send_whatsapp',
+          });
+          results.followUpScheduled = true;
+        } catch {
+          // non-fatal
+        }
       }
 
-      // Record activity in CRM
       recordServerActivity(userId, {
-        eventType: 'whatsapp_replied',
-        title: `WhatsApp from +${cleanPhone}`,
-        detail: `Lead: "${cleanText.slice(0, 80)}" · Auto-replies: ${results.autoRepliesSent}`,
-        channel: 'whatsapp',
+        eventType: channel === 'email' ? 'automation_triggered' : 'whatsapp_replied',
+        title: `${channel.toUpperCase()} inbound from ${cleanEmail || '+' + cleanPhone}`,
+        detail: `Lead: "${cleanText.slice(0, 80)}" · Workflows: ${results.workflowsTriggered} · Auto-replies: ${results.autoRepliesSent}`,
+        channel,
       });
     } catch (err: any) {
-      console.warn(`[runAutomation] AutoResponder evaluation error:`, err?.message || err);
+      console.warn('[processInboundAutomation] AutoResponder evaluation error:', err?.message || err);
     }
 
     return results;
+  };
+
+  const runAutomation = async (userId: string, leadPhone: string, text: string, leadName?: string) => {
+    return processInboundAutomation({
+      userId,
+      channel: 'whatsapp',
+      leadPhone,
+      leadName,
+      text,
+    });
   };
 
   /**
@@ -3033,6 +3231,9 @@ async function startServer() {
 
       console.log(`[Evolution Webhook] Process lead message: Instance "${instance}" -> User "${userId}" | Phone: +${leadPhone} | Text: "${text}"`);
 
+      // Call automation function first so inbound queue records autoReplies & handled flag
+      const autoRes = await runAutomation(userId, leadPhone, text, data.pushName);
+
       // Add to inbound inbox queue so it shows in the CRM & Omnichannel Inbox
       inboundWebhookQueue.unshift({
         id: `inb_wa_evo_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
@@ -3044,10 +3245,9 @@ async function startServer() {
         subject: `Inbound WhatsApp (${instance})`,
         listName: 'General Contacts',
         receivedAt: new Date().toISOString(),
+        alreadyHandledByServer: true,
+        autoReplies: autoRes?.autoReplies || [],
       });
-
-      // Call automation function
-      await runAutomation(userId, leadPhone, text);
     } catch (err: any) {
       console.error(`[Evolution Webhook] Error processing message:`, err?.message || err);
     }
@@ -4463,22 +4663,39 @@ async function startServer() {
 
   app.post('/api/workflows/execute', async (req, res) => {
     try {
-      const { workflowId, workflow, leadPhone, leadMessage, userId } = req.body || {};
+      const {
+        workflowId,
+        workflow,
+        leadPhone,
+        leadEmail,
+        leadName,
+        leadMessage,
+        channel,
+        listName,
+        bypassTriggerCheck,
+        userId,
+      } = req.body || {};
       const resolvedId = String(workflowId || (workflow && workflow.id) || 'test_workflow').trim();
       const phone = String(leadPhone || '').trim();
+      const email = String(leadEmail || '').trim();
 
-      if (!phone) {
-        res.status(400).json({ ok: false, error: 'leadPhone is required' });
+      if (!phone && !email) {
+        res.status(400).json({ ok: false, error: 'leadPhone or leadEmail is required' });
         return;
       }
 
       const result = await executeWorkflow(
         resolvedId,
-        phone,
+        phone || email,
         String(leadMessage || '').trim(),
         {
           userId: String(userId || (workflow && workflow.userId) || 'default_workspace').trim(),
           workflowOverride: workflow || undefined,
+          leadEmail: email || undefined,
+          leadName: leadName ? String(leadName) : undefined,
+          channel: channel === 'email' || channel === 'sms' ? channel : 'whatsapp',
+          listName: listName ? String(listName) : undefined,
+          bypassTriggerCheck: Boolean(bypassTriggerCheck),
         }
       );
 
@@ -4800,7 +5017,40 @@ async function startServer() {
         }
       }
 
-      res.json({ ok: true, ...result });
+      let automationResult: any = null;
+      if (result.inboundEmail) {
+        const inb = result.inboundEmail;
+        const bodyText = inb.text || htmlToPlainTextServer(inb.html) || inb.subject;
+        if (inb.ownerId && bodyText) {
+          automationResult = await processInboundAutomation({
+            userId: inb.ownerId,
+            channel: 'email',
+            leadEmail: inb.fromEmail,
+            leadName: inb.fromName,
+            subject: inb.subject,
+            text: bodyText,
+          });
+        }
+
+        inboundWebhookQueue.unshift({
+          id: `inb_resend_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+          channel: 'email',
+          leadName: inb.fromName || inb.fromEmail || 'Email Lead',
+          leadEmail: inb.fromEmail,
+          leadPhone: '',
+          message: bodyText,
+          subject: inb.subject,
+          listName: 'General Contacts',
+          receivedAt: inb.receivedAt,
+          alreadyHandledByServer: Boolean(inb.ownerId),
+          autoReplies: automationResult?.autoReplies || [],
+        });
+        if (inboundWebhookQueue.length > 50) {
+          inboundWebhookQueue.pop();
+        }
+      }
+
+      res.json({ ok: true, ...result, automationResult });
     } catch (err) {
       handleDomainError(res, err, 'Webhook verification failed.');
     }

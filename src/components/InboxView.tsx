@@ -24,6 +24,7 @@ import {
   InboxMessageItem,
   Contact,
   AudienceList,
+  Automation,
   Campaign,
   AutoResponder,
   ChannelType,
@@ -39,6 +40,13 @@ import {
   buildDirectChannelUrl,
   MessageDeliveryReceipt,
 } from '../services/messageDeliveryService';
+import { formatRichMessageForChannel } from '../utils/richMessageFormat';
+import {
+  matchesKeywordExpression,
+  doesAutomationMatchInboundMessage,
+  executeClientWorkflowGraph,
+  parseWorkflowGraphNodesAndEdges,
+} from '../utils/workflowClientExecutor';
 
 interface InboxViewProps {
   threads: InboxThread[];
@@ -46,6 +54,7 @@ interface InboxViewProps {
   lists: AudienceList[];
   campaigns: Campaign[];
   autoResponders: AutoResponder[];
+  automations?: Automation[];
   senderName: string;
   workspace?: Workspace;
   privateProfile?: UserPrivateProfile;
@@ -108,6 +117,7 @@ export const InboxView: React.FC<InboxViewProps> = ({
   lists,
   campaigns,
   autoResponders,
+  automations = [],
   senderName,
   workspace,
   privateProfile,
@@ -544,15 +554,15 @@ export const InboxView: React.FC<InboxViewProps> = ({
       if (ar.status !== 'live') return false;
       if (ar.channel !== channel) return false;
       const listMatches =
+        !ar.targetList ||
+        ar.targetList.toLowerCase() === 'general contacts' ||
         ar.targetList.trim().toLowerCase() === defaultList.trim().toLowerCase();
       if (!listMatches) return false;
-      if (ar.matchType === 'any_inbound') return true;
-      if (ar.matchType === 'exact') {
-        return chosen.leadReply.trim().toLowerCase() === ar.triggerMessage.trim().toLowerCase();
-      }
-      return chosen.leadReply
-        .toLowerCase()
-        .includes(ar.triggerMessage.trim().toLowerCase());
+      return matchesKeywordExpression(
+        chosen.leadReply,
+        ar.triggerMessage,
+        ar.matchType || 'contains'
+      );
     });
 
     if (matchingAutoResponder) {
@@ -560,6 +570,8 @@ export const InboxView: React.FC<InboxViewProps> = ({
         .replace(/\{\{\s*first_name\s*\}\}/gi, chosen.name.split(' ')[0])
         .replace(/\{\{\s*full_name\s*\}\}/gi, chosen.name)
         .replace(/\{\{\s*list_name\s*\}\}/gi, defaultList);
+
+      const formattedAutoReply = formatRichMessageForChannel(personalizedAutoReply, channel);
 
       initialMessages.push({
         id: generateSafeId('msg_ar'),
@@ -575,13 +587,54 @@ export const InboxView: React.FC<InboxViewProps> = ({
         to: channel === 'email' ? chosen.email : chosen.phone,
         leadName: chosen.name,
         subject: matchingAutoResponder.subjectLine || chosen.subjectOrContext,
-        body: personalizedAutoReply,
+        body: formattedAutoReply,
         listName: defaultList,
         source: 'auto_responder',
         workspace,
         privateProfile,
       });
       setLastDeliveryReceipt(autoReceipt);
+    }
+
+    // Evaluate active Automation Workflows matching inbound keyword or condition branches
+    let triggeredWorkflowCount = 0;
+    for (const auto of automations) {
+      if (!doesAutomationMatchInboundMessage(auto, channel, chosen.leadReply, defaultList)) continue;
+      const { nodes, edges } = parseWorkflowGraphNodesAndEdges(auto.flowGraphJson);
+      const wfRun = await executeClientWorkflowGraph({
+        automationName: auto.name,
+        automationId: auto.id,
+        nodes,
+        edges,
+        inboundText: chosen.leadReply,
+        triggerChannel: channel,
+        deliverLive: true,
+        lead: {
+          fullName: chosen.name,
+          email: chosen.email,
+          phone: chosen.phone,
+          listName: defaultList,
+        },
+        workspace,
+        privateProfile,
+        userId: workspace?.ownerId,
+      });
+      if (wfRun.executed) triggeredWorkflowCount++;
+      for (const step of wfRun.trace) {
+        if (step.messagePreview) {
+          initialMessages.push({
+            id: generateSafeId('msg_wf'),
+            sender: 'autoresponder',
+            senderName: `Workflow (${auto.name})`,
+            channel: step.channel || channel,
+            body: step.messagePreview,
+            timestamp: `Today, ${nowFormatted} (Workflow)`,
+          });
+        }
+      }
+      if (wfRun.receipts.length > 0) {
+        setLastDeliveryReceipt(wfRun.receipts[wfRun.receipts.length - 1]);
+      }
     }
 
     const newId = await onCreateThread({
@@ -597,7 +650,8 @@ export const InboxView: React.FC<InboxViewProps> = ({
         500,
         chosen.leadReply
       ),
-      lastSender: 'lead',
+      lastSender:
+        matchingAutoResponder || triggeredWorkflowCount > 0 ? 'autoresponder' : 'lead',
       status: 'unread',
       unreadCount: 1,
       messagesJson: JSON.stringify(initialMessages),
@@ -686,13 +740,15 @@ export const InboxView: React.FC<InboxViewProps> = ({
         if (ar.status !== 'live') return false;
         if (ar.channel !== incomingChannel) return false;
         const listMatches =
+          !ar.targetList ||
+          ar.targetList.toLowerCase() === 'general contacts' ||
           ar.targetList.trim().toLowerCase() === cleanList.trim().toLowerCase();
         if (!listMatches) return false;
-        if (ar.matchType === 'any_inbound') return true;
-        if (ar.matchType === 'exact') {
-          return cleanReply.trim().toLowerCase() === ar.triggerMessage.trim().toLowerCase();
-        }
-        return cleanReply.toLowerCase().includes(ar.triggerMessage.trim().toLowerCase());
+        return matchesKeywordExpression(
+          cleanReply,
+          ar.triggerMessage,
+          ar.matchType || 'contains'
+        );
       });
 
       if (matchingAutoResponder) {
@@ -700,6 +756,11 @@ export const InboxView: React.FC<InboxViewProps> = ({
           .replace(/\{\{\s*first_name\s*\}\}/gi, cleanName.split(' ')[0] || 'there')
           .replace(/\{\{\s*full_name\s*\}\}/gi, cleanName)
           .replace(/\{\{\s*list_name\s*\}\}/gi, cleanList);
+
+        const formattedAutoReply = formatRichMessageForChannel(
+          personalizedAutoReply,
+          incomingChannel
+        );
 
         messages.push({
           id: generateSafeId('msg_ar'),
@@ -718,13 +779,54 @@ export const InboxView: React.FC<InboxViewProps> = ({
               : cleanPhone || '+1 (555) 019-9900',
           leadName: cleanName,
           subject: matchingAutoResponder.subjectLine || cleanContext,
-          body: personalizedAutoReply,
+          body: formattedAutoReply,
           listName: cleanList,
           source: 'auto_responder',
           workspace,
           privateProfile,
         });
         setLastDeliveryReceipt(autoReceipt);
+      }
+
+      // Also evaluate active Automation Workflows with inbound/keyword/condition triggers
+      let triggeredWorkflowCount = 0;
+      for (const auto of automations) {
+        if (!doesAutomationMatchInboundMessage(auto, incomingChannel, cleanReply, cleanList)) continue;
+        const { nodes, edges } = parseWorkflowGraphNodesAndEdges(auto.flowGraphJson);
+        const wfRun = await executeClientWorkflowGraph({
+          automationName: auto.name,
+          automationId: auto.id,
+          nodes,
+          edges,
+          inboundText: cleanReply,
+          triggerChannel: incomingChannel,
+          deliverLive: true,
+          lead: {
+            fullName: cleanName,
+            email: cleanEmail,
+            phone: cleanPhone,
+            listName: cleanList,
+          },
+          workspace,
+          privateProfile,
+          userId: workspace?.ownerId,
+        });
+        if (wfRun.executed) triggeredWorkflowCount++;
+        for (const step of wfRun.trace) {
+          if (step.messagePreview) {
+            messages.push({
+              id: generateSafeId('msg_wf'),
+              sender: 'autoresponder',
+              senderName: `Workflow (${auto.name})`,
+              channel: step.channel || incomingChannel,
+              body: step.messagePreview,
+              timestamp: `Today, ${nowFormatted} (Workflow)`,
+            });
+          }
+        }
+        if (wfRun.receipts.length > 0) {
+          setLastDeliveryReceipt(wfRun.receipts[wfRun.receipts.length - 1]);
+        }
       }
 
       const newId = await onCreateThread({
@@ -736,7 +838,8 @@ export const InboxView: React.FC<InboxViewProps> = ({
         subjectOrContext: cleanContext,
         lastLeadMessage: cleanReply,
         lastMessagePreview: sanitizeString(`${cleanName}: ${cleanReply}`, 500, cleanReply),
-        lastSender: matchingAutoResponder ? 'autoresponder' : 'lead',
+        lastSender:
+          matchingAutoResponder || triggeredWorkflowCount > 0 ? 'autoresponder' : 'lead',
         status: 'unread',
         unreadCount: 1,
         messagesJson: JSON.stringify(messages),
@@ -752,8 +855,14 @@ export const InboxView: React.FC<InboxViewProps> = ({
       setIncomingOutboundMsg('');
       setIncomingLeadReply('');
       setFeedbackBanner(
-        matchingAutoResponder
-          ? `Received new ${CHANNEL_LABELS[incomingChannel]} reply from ${cleanName} and automatically dispatched Auto Responder "${matchingAutoResponder.name}"!`
+        matchingAutoResponder || triggeredWorkflowCount > 0
+          ? `Received new ${CHANNEL_LABELS[incomingChannel]} reply from ${cleanName} and dispatched ${
+              matchingAutoResponder ? `Auto Responder "${matchingAutoResponder.name}"` : ''
+            }${matchingAutoResponder && triggeredWorkflowCount > 0 ? ' + ' : ''}${
+              triggeredWorkflowCount > 0
+                ? `${triggeredWorkflowCount} Automation Workflow${triggeredWorkflowCount > 1 ? 's' : ''}`
+                : ''
+            }!`
           : `Received new ${CHANNEL_LABELS[incomingChannel]} reply from ${cleanName}. You can now reply manually via ${CHANNEL_LABELS[incomingChannel]}!`
       );
     } finally {

@@ -58,6 +58,7 @@ import {
   formatRichMessageForChannel,
   renderWhatsAppFormattedHtml,
 } from '../utils/richMessageFormat';
+import { matchesKeywordExpression } from '../utils/workflowClientExecutor';
 
 interface AutoRespondersViewProps {
   autoResponders: AutoResponder[];
@@ -669,16 +670,12 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
       }
     }
 
-    const inboundClean = simulatedInboundText.trim().toLowerCase();
-    const triggerClean = testingResponder.triggerMessage.trim().toLowerCase();
     const mode = testingResponder.matchType || 'contains';
-
-    const isMatch =
-      mode === 'any_inbound'
-        ? true
-        : mode === 'exact'
-        ? inboundClean === triggerClean
-        : inboundClean.includes(triggerClean) || triggerClean.includes(inboundClean);
+    const isMatch = matchesKeywordExpression(
+      simulatedInboundText,
+      testingResponder.triggerMessage,
+      mode
+    );
 
     const firstName = selectedTestLeadName.split(' ')[0] || 'Friend';
     const personalizedReply = testingResponder.responseMessage
@@ -689,6 +686,28 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
       personalizedReply,
       testingResponder.channel
     );
+
+    const effectiveWorkspace: Workspace | undefined = workspace
+      ? { ...workspace, ownerId: userId || workspace.ownerId }
+      : userId
+      ? {
+          id: 'default_workspace',
+          ownerId: userId,
+          name: 'FlowPilot Workspace',
+          category: 'smb',
+          timezone: 'UTC',
+          currency: 'USD',
+          senderName: 'FlowPilot Operator',
+          whatsappConnected: resolvedWhatsappIdentity.hasConfiguredPhone,
+          smsConnected: false,
+          emailConnected: false,
+          notifyNewLeads: true,
+          notifyCampaigns: true,
+          whatsappPhoneId: resolvedWhatsappIdentity.connectedPhone || '',
+          createdAt: '',
+          updatedAt: '',
+        }
+      : undefined;
 
     let deliveryReceipt: MessageDeliveryReceipt | undefined;
     let isDeliveryFailed = false;
@@ -714,7 +733,7 @@ export const AutoRespondersView: React.FC<AutoRespondersViewProps> = ({
           testingResponder.channel === 'whatsapp' && resolvedWhatsappIdentity.profileName
             ? resolvedWhatsappIdentity.profileName
             : undefined,
-        workspace,
+        workspace: effectiveWorkspace,
         privateProfile,
       });
 

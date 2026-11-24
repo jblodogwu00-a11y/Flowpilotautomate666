@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
   LayoutDashboard,
   Inbox,
@@ -71,6 +71,7 @@ import {
   saveLocalWorkspaceSnapshot,
   buildStarterWorkspaceSnapshot,
   normalizeWorkspaceSnapshot,
+  pushServerWorkspaceSnapshot,
 } from './services/accountPersistenceService';
 import {
   CloudSyncState,
@@ -95,11 +96,20 @@ import {
 } from 'firebase/firestore';
 import { auth, db } from './firebase';
 import { checkEvolutionConnectionState } from './lib/evolutionClient';
-import { formatWhatsAppPhoneFromJid } from './utils/richMessageFormat';
+import {
+  formatWhatsAppPhoneFromJid,
+  formatRichMessageForChannel,
+} from './utils/richMessageFormat';
 import {
   deliverChannelMessage,
-  personalizeAutomationMessage,
+  pollAndConsumeInboundWebhooks,
 } from './services/messageDeliveryService';
+import {
+  doesAutomationMatchInboundMessage,
+  executeClientWorkflowGraph,
+  matchesKeywordExpression,
+  parseWorkflowGraphNodesAndEdges,
+} from './utils/workflowClientExecutor';
 import { EmailDomainStatusSummary } from './utils/emailDomainValidation';
 import {
   EMPTY_EMAIL_DOMAIN_STATUS,
@@ -1686,64 +1696,29 @@ export default function App() {
 
         if (auto.flowGraphJson) {
           try {
-            const parsed = JSON.parse(auto.flowGraphJson);
-            const gNodes: any[] = Array.isArray(parsed?.nodes) ? parsed.nodes : [];
-            const gEdges: any[] = Array.isArray(parsed?.edges) ? parsed.edges : [];
-            const visited = new Set<string>();
-            let cursor = gNodes.find((n) => n.type === 'trigger');
-            let stepsWalked = 0;
-
-            while (cursor && !visited.has(cursor.id) && stepsWalked < 5) {
-              visited.add(cursor.id);
-              stepsWalked += 1;
-
-              if (cursor.type === 'delay') {
-                // Stop immediate execution at first wait timer
-                break;
-              }
-
-              if (cursor.type === 'action') {
-                const rawMsg =
-                  cursor.data?.message ||
-                  `Hi {{first_name}}! Thanks for submitting ${asset.title}.`;
-                const personalizedBody = personalizeAutomationMessage(rawMsg, {
+            const { nodes: gNodes, edges: gEdges } = parseWorkflowGraphNodesAndEdges(
+              auto.flowGraphJson
+            );
+            if (gNodes.length > 0) {
+              void executeClientWorkflowGraph({
+                automationName: auto.name,
+                automationId: auto.id,
+                nodes: gNodes,
+                edges: gEdges,
+                inboundText: extra?.company || asset.title || '',
+                bypassKeywordTriggerCheck: true,
+                deliverLive: true,
+                lead: {
                   fullName: lead.fullName,
                   email: lead.email,
                   phone: lead.phone,
                   company: extra?.company,
                   listName: asset.targetList || 'General',
-                  senderName: snapshot.workspace.senderName,
-                  automationId: auto.id,
-                });
-
-                if (cursor.data?.nodeType === 'action_send_whatsapp' && lead.phone) {
-                  deliverChannelMessage({
-                    channel: 'whatsapp',
-                    to: lead.phone,
-                    leadName: lead.fullName,
-                    body: personalizedBody,
-                    listName: asset.targetList || 'General',
-                    source: 'automation_workflow',
-                    workspace: snapshot.workspace,
-                    privateProfile: snapshot.privateProfile,
-                  }).catch(() => {});
-                } else if (cursor.data?.nodeType === 'action_send_email' && lead.email) {
-                  deliverChannelMessage({
-                    channel: 'email',
-                    to: lead.email,
-                    leadName: lead.fullName,
-                    subject: cursor.data?.emailSubject || auto.name,
-                    body: personalizedBody,
-                    listName: asset.targetList || 'General',
-                    source: 'automation_workflow',
-                    workspace: snapshot.workspace,
-                    privateProfile: snapshot.privateProfile,
-                  }).catch(() => {});
-                }
-              }
-
-              const nextEdge = gEdges.find((e) => e.source === cursor.id);
-              cursor = nextEdge ? gNodes.find((n) => n.id === nextEdge.target) : undefined;
+                },
+                workspace: snapshot.workspace,
+                privateProfile: snapshot.privateProfile,
+                userId: activeUid,
+              }).catch(() => {});
             }
           } catch {
             // Safe guard against non-canvas legacy graphs
@@ -1778,6 +1753,218 @@ export default function App() {
       updateSnapshot,
     ]
   );
+
+  // Mirror local/Firestore workspace changes (workflows, auto-responders, contacts, lists)
+  // to Express server so inbound webhooks (Evolution WhatsApp & Resend email.received) execute fresh rules.
+  const lastServerSnapshotSyncRef = useRef<string>('');
+  useEffect(() => {
+    if (authLoading || isFormRoute || isPrivacyRoute) return;
+    if (!activeUid || activeUid === 'guest_sandbox') return;
+    if (cloudSyncState === 'syncing') return;
+
+    const fingerprint = JSON.stringify({
+      uid: activeUid,
+      autos: snapshot.automations.map((a) => `${a.id}:${a.status}:${a.updatedAt}`),
+      ars: snapshot.autoResponders.map((r) => `${r.id}:${r.status}:${r.triggerMessage}:${r.responseMessage}:${r.updatedAt}`),
+      lists: snapshot.lists.length,
+      contacts: snapshot.contacts.length,
+      wa: snapshot.workspace.whatsappPhoneId || '',
+      sender: snapshot.workspace.senderName || '',
+    });
+
+    if (lastServerSnapshotSyncRef.current === fingerprint) return;
+
+    const timer = window.setTimeout(() => {
+      lastServerSnapshotSyncRef.current = fingerprint;
+      void pushServerWorkspaceSnapshot(
+        activeUid,
+        user?.email || snapshot.privateProfile.email || '',
+        snapshot
+      );
+    }, 800);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    authLoading,
+    isFormRoute,
+    isPrivacyRoute,
+    activeUid,
+    cloudSyncState,
+    user?.email,
+    snapshot,
+  ]);
+
+  // Poll server inboundWebhookQueue (Resend email.received, Evolution WhatsApp, /api/webhooks/inbound)
+  // so inbound messages appear in Unified Inbox and execute any un-dispatched triggers.
+  const snapshotRef = useRef(snapshot);
+  snapshotRef.current = snapshot;
+
+  useEffect(() => {
+    if (authLoading || isFormRoute || isPrivacyRoute) return;
+    let isDisposed = false;
+
+    const syncInboundQueue = async () => {
+      const items = await pollAndConsumeInboundWebhooks();
+      if (isDisposed || items.length === 0) return;
+
+      const cur = snapshotRef.current;
+      for (const item of items) {
+        const nowFormatted = new Date().toLocaleTimeString([], {
+          hour: '2-digit',
+          minute: '2-digit',
+        });
+        const messages: Array<{
+          id: string;
+          sender: 'lead' | 'operator' | 'autoresponder' | 'outbound_original';
+          senderName: string;
+          channel: ChannelType;
+          subject?: string;
+          body: string;
+          timestamp: string;
+        }> = [
+          {
+            id: generateSafeId('msg_in'),
+            sender: 'lead',
+            senderName: item.leadName || 'Inbound Lead',
+            channel: item.channel,
+            ...(item.subject ? { subject: item.subject } : {}),
+            body: item.message,
+            timestamp: `Today, ${nowFormatted}`,
+          },
+        ];
+
+        const serverReplies = Array.isArray((item as any).autoReplies)
+          ? ((item as any).autoReplies as string[])
+          : [];
+        const serverHandled = Boolean((item as any).alreadyHandledByServer);
+
+        if (serverHandled && serverReplies.length > 0) {
+          for (const replyText of serverReplies) {
+            messages.push({
+              id: generateSafeId('msg_ar'),
+              sender: 'autoresponder',
+              senderName: 'FlowPilot Auto-Pilot',
+              channel: item.channel,
+              body: replyText,
+              timestamp: `Today, ${nowFormatted} (Auto-Pilot)`,
+            });
+          }
+        } else if (!serverHandled) {
+          const effectiveList = item.listName || 'General Contacts';
+          const matchingAr = cur.autoResponders.find((ar) => {
+            if (ar.status !== 'live') return false;
+            if (ar.channel !== item.channel) return false;
+            const listOk =
+              !ar.targetList ||
+              ar.targetList.toLowerCase() === 'general contacts' ||
+              ar.targetList.trim().toLowerCase() === effectiveList.trim().toLowerCase();
+            if (!listOk) return false;
+            return matchesKeywordExpression(
+              item.message,
+              ar.triggerMessage,
+              ar.matchType || 'contains'
+            );
+          });
+
+          if (matchingAr) {
+            const firstName = (item.leadName || 'Friend').split(/\s+/)[0] || 'Friend';
+            const rawReply = matchingAr.responseMessage
+              .replace(/\{\{\s*first_name\s*\}\}/gi, firstName)
+              .replace(/\{\{\s*full_name\s*\}\}/gi, item.leadName || 'Friend')
+              .replace(/\{\{\s*list_name\s*\}\}/gi, effectiveList);
+            const formatted = formatRichMessageForChannel(rawReply, item.channel);
+
+            messages.push({
+              id: generateSafeId('msg_ar'),
+              sender: 'autoresponder',
+              senderName: `Auto Responder (${matchingAr.name})`,
+              channel: item.channel,
+              body: rawReply,
+              timestamp: `Today, ${nowFormatted} (Auto-Pilot)`,
+            });
+
+            void deliverChannelMessage({
+              channel: item.channel,
+              to: item.channel === 'email' ? item.leadEmail : item.leadPhone,
+              leadName: item.leadName || 'Inbound Lead',
+              subject: matchingAr.subjectLine || item.subject || 'Automated Reply',
+              body: formatted,
+              listName: effectiveList,
+              source: 'auto_responder',
+              workspace: { ...cur.workspace, ownerId: activeUid },
+              privateProfile: cur.privateProfile,
+            }).catch(() => {});
+          }
+
+          for (const auto of cur.automations) {
+            if (!doesAutomationMatchInboundMessage(auto, item.channel, item.message, effectiveList)) {
+              continue;
+            }
+            const { nodes, edges } = parseWorkflowGraphNodesAndEdges(auto.flowGraphJson);
+            const wfRun = await executeClientWorkflowGraph({
+              automationName: auto.name,
+              automationId: auto.id,
+              nodes,
+              edges,
+              inboundText: item.message,
+              triggerChannel: item.channel,
+              deliverLive: true,
+              lead: {
+                fullName: item.leadName,
+                email: item.leadEmail,
+                phone: item.leadPhone,
+                listName: effectiveList,
+              },
+              workspace: cur.workspace,
+              privateProfile: cur.privateProfile,
+              userId: activeUid,
+            });
+            for (const step of wfRun.trace) {
+              if (step.messagePreview) {
+                messages.push({
+                  id: generateSafeId('msg_wf'),
+                  sender: 'autoresponder',
+                  senderName: `Workflow (${auto.name})`,
+                  channel: step.channel || item.channel,
+                  body: step.messagePreview,
+                  timestamp: `Today, ${nowFormatted} (Workflow)`,
+                });
+              }
+            }
+          }
+        }
+
+        await handleCreateThread({
+          leadName: sanitizeString(item.leadName, 120, 'Inbound Lead'),
+          leadEmail: sanitizeString(item.leadEmail, 150, ''),
+          leadPhone: sanitizeString(item.leadPhone, 40, ''),
+          listName: sanitizeString(item.listName || 'General Contacts', 100, 'General Contacts'),
+          channel: item.channel,
+          subjectOrContext: sanitizeString(item.subject || `Inbound ${item.channel}`, 160, 'Inbound Reply'),
+          lastLeadMessage: sanitizeString(item.message, 2000, ''),
+          lastMessagePreview: sanitizeString(
+            `${item.leadName || 'Lead'}: ${item.message}`,
+            500,
+            item.message
+          ),
+          lastSender: messages.length > 1 ? 'autoresponder' : 'lead',
+          status: 'unread',
+          unreadCount: 1,
+          messagesJson: JSON.stringify(messages),
+        });
+      }
+    };
+
+    const interval = window.setInterval(() => {
+      void syncInboundQueue();
+    }, 8000);
+    void syncInboundQueue();
+
+    return () => {
+      isDisposed = true;
+      window.clearInterval(interval);
+    };
+  }, [authLoading, isFormRoute, isPrivacyRoute, activeUid, handleCreateThread]);
 
   // --------------------------------------------------------------------------
   // CHATBOTS HANDLERS
@@ -2758,6 +2945,7 @@ export default function App() {
                   lists={snapshot.lists}
                   campaigns={snapshot.campaigns}
                   autoResponders={snapshot.autoResponders}
+                  automations={snapshot.automations}
                   senderName={snapshot.workspace.senderName || user?.displayName || 'Workspace Operator'}
                   workspace={snapshot.workspace}
                   privateProfile={snapshot.privateProfile}
@@ -2851,6 +3039,9 @@ export default function App() {
                     onBackToDashboard={() => setActiveTab('dashboard')}
                     emailDomainStatus={emailDomainStatus}
                     onNavigateToEmailSettings={() => navigateToEmailSettings()}
+                    workspace={snapshot.workspace}
+                    privateProfile={snapshot.privateProfile}
+                    onLogActivity={handleLogActivity}
                   />
                 </div>
               )}
