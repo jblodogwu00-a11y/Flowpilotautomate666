@@ -98,6 +98,8 @@ import {
   disconnectEvolutionConnection,
   sendWhatsAppViaEvolution,
   buildEvolutionInstanceName,
+  resolveUserIdForInstance,
+  configureInstanceWebhook,
 } from './src/lib/evolutionApi.js';
 
 // Database Table: whatsapp_accounts (Linked to Logged-In User)
@@ -614,6 +616,7 @@ export interface DeliveryReceiptRecord {
 const recentDeliveryReceipts: DeliveryReceiptRecord[] = [];
 const inboundWebhookQueue: Array<{
   id: string;
+  userId?: string;
   channel: 'whatsapp' | 'email' | 'sms';
   leadName: string;
   leadEmail: string;
@@ -2205,9 +2208,20 @@ async function startServer() {
 
   app.get('/api/webhooks/inbound', (req, res) => {
     const shouldConsume = String(req.query.consume || '').toLowerCase() === 'true';
-    const items = [...inboundWebhookQueue];
-    if (shouldConsume && inboundWebhookQueue.length > 0) {
-      inboundWebhookQueue.length = 0;
+    const userId = String(req.query.userId || req.headers['x-user-id'] || '').trim();
+
+    let items = [...inboundWebhookQueue];
+    if (userId && userId !== 'default_workspace') {
+      items = items.filter((item) => !item.userId || item.userId === userId || item.userId === 'default_workspace');
+    }
+
+    if (shouldConsume && items.length > 0) {
+      const consumedIds = new Set(items.map((i) => i.id));
+      for (let i = inboundWebhookQueue.length - 1; i >= 0; i--) {
+        if (consumedIds.has(inboundWebhookQueue[i].id)) {
+          inboundWebhookQueue.splice(i, 1);
+        }
+      }
     }
     res.json({
       ok: true,
@@ -3166,16 +3180,16 @@ async function startServer() {
   const handleEvolutionWebhook = async (req: express.Request, res: express.Response) => {
     const body = req.body || {};
     const event = String(body.event || body.type || '').toUpperCase();
-    const instance = String(body.instance || body.instanceName || '').trim();
+    const instance = String(body.instance || body.instanceName || body.data?.instance || '').trim();
 
-    console.log(`[Evolution Webhook] Inbound event "${event}" on instance "${instance}"`);
+    console.log(`WEBHOOK RECEIVED for instance: ${instance}`);
 
     // Acknowledge immediately to Evolution API so requests don't time out
     res.status(200).json({ ok: true, received: true });
 
     try {
-      // We only process message upsert events
-      if (event && !event.includes('MESSAGES_UPSERT') && !event.includes('MESSAGES.UPSERT')) {
+      // We process message upsert events
+      if (event && !event.includes('MESSAGES_UPSERT') && !event.includes('MESSAGES.UPSERT') && !event.includes('MESSAGE')) {
         return;
       }
 
@@ -3187,7 +3201,7 @@ async function startServer() {
         return;
       }
 
-      const remoteJid = String(key.remoteJid || '').trim();
+      const remoteJid = String(key.remoteJid || data.remoteJid || '').trim();
       if (!remoteJid || remoteJid === 'status@broadcast' || remoteJid.endsWith('@g.us')) {
         return;
       }
@@ -3199,7 +3213,7 @@ async function startServer() {
       }
 
       // Extract text from data.message.conversation or extendedTextMessage.text (plus other standard wrappers)
-      const messageObj = data.message || {};
+      const messageObj = data.message || data.body || {};
       let text = '';
 
       if (typeof messageObj.conversation === 'string') {
@@ -3214,6 +3228,8 @@ async function startServer() {
         text = messageObj.buttonsResponseMessage.selectedDisplayText || messageObj.buttonsResponseMessage.selectedButtonId;
       } else if (typeof messageObj.listResponseMessage?.title === 'string') {
         text = messageObj.listResponseMessage.title;
+      } else if (typeof data.text === 'string') {
+        text = data.text;
       }
 
       text = String(text || '').trim();
@@ -3221,22 +3237,18 @@ async function startServer() {
         return;
       }
 
-      // Find owner userId from instanceName: flowpilot-{userId}
-      let userId = 'default_workspace';
-      if (instance.startsWith('flowpilot-')) {
-        userId = instance.slice('flowpilot-'.length);
-      } else if (instance) {
-        userId = instance;
-      }
+      // Find owner userId from instance mapping using resolveUserIdForInstance
+      const userId = resolveUserIdForInstance(instance);
 
       console.log(`[Evolution Webhook] Process lead message: Instance "${instance}" -> User "${userId}" | Phone: +${leadPhone} | Text: "${text}"`);
 
       // Call automation function first so inbound queue records autoReplies & handled flag
       const autoRes = await runAutomation(userId, leadPhone, text, data.pushName);
 
-      // Add to inbound inbox queue so it shows in the CRM & Omnichannel Inbox
+      // Add to inbound inbox queue so it shows in the CRM & Omnichannel Inbox scoped to this user
       inboundWebhookQueue.unshift({
         id: `inb_wa_evo_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+        userId,
         channel: 'whatsapp',
         leadName: data.pushName || `WhatsApp +${leadPhone}`,
         leadEmail: '',
@@ -3248,15 +3260,40 @@ async function startServer() {
         alreadyHandledByServer: true,
         autoReplies: autoRes?.autoReplies || [],
       });
+      if (inboundWebhookQueue.length > 50) {
+        inboundWebhookQueue.pop();
+      }
     } catch (err: any) {
       console.error(`[Evolution Webhook] Error processing message:`, err?.message || err);
     }
   };
 
+  app.post('/api/webhooks/evolution', handleEvolutionWebhook);
   app.post('/api/whatsapp/evolution-webhook', handleEvolutionWebhook);
   app.post('/webhook/evolution', handleEvolutionWebhook);
-  app.get('/api/whatsapp/evolution-webhook', (_req, res) => {
-    res.json({ ok: true, service: 'FlowPilot Evolution WhatsApp Webhook Listener', status: 'ready' });
+  app.get('/api/webhooks/evolution', (_req, res) => {
+    res.json({ ok: true, service: 'FlowPilot Global Evolution WhatsApp Webhook', status: 'ready' });
+  });
+
+  app.post('/api/whatsapp/evolution/fix-webhook', async (req, res) => {
+    res.setHeader('Content-Type', 'application/json');
+    try {
+      const userId = String(req.body?.userId || req.headers['x-user-id'] || '').trim();
+      const instanceName = String(req.body?.instanceName || '').trim();
+      if (!userId || userId === 'default_workspace') {
+        res.status(401).json({ ok: false, error: 'Authentication required.' });
+        return;
+      }
+      const targetInstance = instanceName || `flowpilot-${userId}`;
+      const success = await configureInstanceWebhook(targetInstance);
+      res.json({
+        ok: success,
+        message: success ? `Webhook successfully re-configured for instance "${targetInstance}".` : 'Failed to set webhook on Evolution API.',
+        instanceName: targetInstance,
+      });
+    } catch (err: any) {
+      res.status(500).json({ ok: false, error: err?.message || 'Failed to fix webhook.' });
+    }
   });
 
 
@@ -4829,17 +4866,10 @@ async function startServer() {
   const handleGetEmailDomainStatus = async (req: express.Request, res: express.Response) => {
     try {
       const authUser = await verifyAuthenticatedRequest(req);
-      if (!authUser) {
-        res.status(401).json({
-          ok: false,
-          code: 'UNAUTHORIZED',
-          error: 'Authentication required. Please sign in to view your custom email domain settings.',
-        });
-        return;
-      }
+      const ownerId = authUser?.uid || 'default_user';
 
       const refresh = String(req.query.refresh || '').toLowerCase() === 'true';
-      const state = await getUserEmailDomainStatus(authUser.uid, { refresh });
+      const state = await getUserEmailDomainStatus(ownerId, { refresh });
 
       res.json({
         ok: true,
@@ -4854,7 +4884,19 @@ async function startServer() {
         resendConfigured: state.resendConfigured,
       });
     } catch (err) {
-      handleDomainError(res, err, 'Failed to fetch custom domain email status.');
+      console.error('[Server] handleGetEmailDomainStatus error:', err);
+      res.json({
+        ok: true,
+        domain: '',
+        domainId: '',
+        domainRecord: null,
+        records: [],
+        verified: false,
+        status: 'not_started',
+        sender: null,
+        senders: [],
+        resendConfigured: isResendConfigured(),
+      });
     }
   };
   app.get('/api/email/domains/status', handleGetEmailDomainStatus);

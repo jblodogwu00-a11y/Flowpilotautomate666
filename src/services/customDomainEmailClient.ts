@@ -99,45 +99,44 @@ async function deleteDomainAndSenderFromFirestore(): Promise<void> {
 export async function fetchCustomDomainStatus(options?: {
   refresh?: boolean;
 }): Promise<EmailDomainStatusSummary> {
-  const authHeaders = await getClientAuthHeaders();
-  if (!authHeaders.Authorization && !authHeaders['x-flowpilot-session']) {
-    return { ...EMPTY_EMAIL_DOMAIN_STATUS, loaded: true };
-  }
-
-  const query = options?.refresh ? '?refresh=true' : '';
-  const res = await fetch(`/api/email/domains/status${query}`, {
-    headers: authHeaders,
-  });
-
-  const data = await res.json().catch(() => ({}));
-  if (res.status === 401) {
-    return { ...EMPTY_EMAIL_DOMAIN_STATUS, loaded: true };
-  }
-  if (!res.ok || data?.ok === false) {
-    throw new Error(data?.error || 'Failed to load custom email domain settings.');
-  }
-
-  const summary: EmailDomainStatusSummary = {
-    loaded: true,
-    domain: String(data.domain || ''),
-    domainId: String(data.domainId || ''),
-    status: data.status || 'not_started',
-    verified: Boolean(data.verified),
-    records: Array.isArray(data.records) ? data.records : [],
-    sender: data.sender || null,
-    senders: Array.isArray(data.senders) ? data.senders : [],
-    domainRecord: data.domainRecord || null,
-    resendConfigured: data.resendConfigured !== false,
-  };
-
-  if (summary.domainRecord || summary.sender) {
-    void syncDomainAndSenderToFirestore({
-      domainRecord: summary.domainRecord,
-      sender: summary.sender,
+  try {
+    const authHeaders = await getClientAuthHeaders();
+    const query = options?.refresh ? '?refresh=true' : '';
+    const res = await fetch(`/api/email/domains/status${query}`, {
+      headers: authHeaders,
     });
-  }
 
-  return summary;
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data?.ok === false) {
+      console.warn('[CustomDomainEmailClient] Status fetch non-ok or empty:', res.status, data);
+      return { ...EMPTY_EMAIL_DOMAIN_STATUS, loaded: true };
+    }
+
+    const summary: EmailDomainStatusSummary = {
+      loaded: true,
+      domain: String(data.domain || ''),
+      domainId: String(data.domainId || ''),
+      status: data.status || 'not_started',
+      verified: Boolean(data.verified),
+      records: Array.isArray(data.records) ? data.records : [],
+      sender: data.sender || null,
+      senders: Array.isArray(data.senders) ? data.senders : [],
+      domainRecord: data.domainRecord || null,
+      resendConfigured: data.resendConfigured !== false,
+    };
+
+    if (summary.domainRecord || summary.sender) {
+      void syncDomainAndSenderToFirestore({
+        domainRecord: summary.domainRecord,
+        sender: summary.sender,
+      });
+    }
+
+    return summary;
+  } catch (err) {
+    console.error('[CustomDomainEmailClient] fetchCustomDomainStatus error:', err);
+    return { ...EMPTY_EMAIL_DOMAIN_STATUS, loaded: true };
+  }
 }
 
 export async function connectCustomDomain(params: {

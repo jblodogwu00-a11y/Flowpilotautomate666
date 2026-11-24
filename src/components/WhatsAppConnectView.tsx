@@ -19,6 +19,7 @@ import {
   disconnectEvolutionInstance,
   requestEvolutionPairingCode,
   sendEvolutionTextMessage,
+  fixWebhookForUser,
 } from '../lib/evolutionClient';
 
 export interface WhatsAppConnectedStatus {
@@ -57,6 +58,8 @@ export const WhatsAppConnectView: React.FC<WhatsAppConnectViewProps> = ({
   const [timerActive, setTimerActive] = useState<boolean>(false);
   const [disconnecting, setDisconnecting] = useState<boolean>(false);
   const [errorNotice, setErrorNotice] = useState<string | null>(null);
+  const [fixingWebhook, setFixingWebhook] = useState<boolean>(false);
+  const [webhookMessage, setWebhookMessage] = useState<string | null>(null);
 
   // Test Message Form State
   const [testNumber, setTestNumber] = useState<string>('');
@@ -206,6 +209,19 @@ export const WhatsAppConnectView: React.FC<WhatsAppConnectViewProps> = ({
     }
   };
 
+  const handleFixWebhook = async () => {
+    setFixingWebhook(true);
+    setWebhookMessage(null);
+    try {
+      const res = await fixWebhookForUser(userId);
+      setWebhookMessage(res.message);
+    } catch (err: any) {
+      setWebhookMessage(err?.message || 'Failed to fix webhook.');
+    } finally {
+      setFixingWebhook(false);
+    }
+  };
+
   // Send Test Message directly via Evolution API
   const handleSendTestMessage = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -326,7 +342,7 @@ export const WhatsAppConnectView: React.FC<WhatsAppConnectViewProps> = ({
               </button>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 pt-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 pt-2">
               <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800">
                 <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Connection Method</p>
                 <p className="text-sm font-semibold text-slate-800 dark:text-slate-200 mt-1">8-Digit Pairing Code</p>
@@ -341,6 +357,29 @@ export const WhatsAppConnectView: React.FC<WhatsAppConnectViewProps> = ({
                 <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Workflow Triggers</p>
                 <p className="text-sm font-semibold text-slate-800 dark:text-slate-200 mt-1">Auto-Responders Active</p>
                 <p className="text-[11px] text-slate-500 mt-0.5">Inbound listener enabled</p>
+              </div>
+              <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800 flex flex-col justify-between">
+                <div>
+                  <p className="text-[11px] font-bold uppercase tracking-wider text-slate-400">Webhook Status</p>
+                  <p className="text-sm font-semibold text-emerald-600 dark:text-emerald-400 mt-1 flex items-center gap-1.5">
+                    <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                    Connected / Active
+                  </p>
+                  <p className="text-[11px] text-slate-500 mt-0.5">/api/webhooks/evolution</p>
+                </div>
+                <div className="mt-3">
+                  <button
+                    onClick={handleFixWebhook}
+                    disabled={fixingWebhook}
+                    className="px-3 py-1.5 text-[11px] font-bold rounded-lg bg-emerald-100 dark:bg-emerald-950 text-emerald-800 dark:text-emerald-200 hover:bg-emerald-200 transition-colors cursor-pointer disabled:opacity-50 inline-flex items-center gap-1"
+                  >
+                    <RefreshCw className={`w-3 h-3 ${fixingWebhook ? 'animate-spin' : ''}`} />
+                    <span>{fixingWebhook ? 'Re-setting...' : 'Fix Webhook'}</span>
+                  </button>
+                  {webhookMessage && (
+                    <p className="text-[10px] text-emerald-700 dark:text-emerald-300 mt-1">{webhookMessage}</p>
+                  )}
+                </div>
               </div>
             </div>
 

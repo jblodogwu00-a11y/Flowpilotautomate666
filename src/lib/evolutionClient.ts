@@ -285,6 +285,9 @@ export async function createAndConnectEvolutionInstance(
       }
     }
 
+    // Automatically set webhook for instance
+    await configureClientInstanceWebhook(instanceName).catch(() => {});
+
     // Optional restart if user clicked Reconnect on an existing instance
     if (forceRestart) {
       try {
@@ -758,4 +761,45 @@ export async function requestEvolutionPairingCode(
       error: errMsg,
     };
   }
+}
+
+export async function configureClientInstanceWebhook(instanceName: string): Promise<boolean> {
+  const appUrl = 'https://flowpilotautomate666-4js9.vercel.app';
+  const targetUrl = `${appUrl}/api/webhooks/evolution`;
+  try {
+    const res = await fetch(`${EVOLUTION_URL}/webhook/set/${encodeURIComponent(instanceName)}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        apikey: EVOLUTION_API_KEY,
+      },
+      body: JSON.stringify({
+        enabled: true,
+        url: targetUrl,
+        byEvents: false,
+        events: ['MESSAGES_UPSERT'],
+        webhook: {
+          enabled: true,
+          url: targetUrl,
+          byEvents: false,
+          events: ['MESSAGES_UPSERT'],
+        },
+      }),
+    });
+    console.log(`[Evolution Client] Webhook set for "${instanceName}" to "${targetUrl}": status ${res.status}`);
+    return res.ok;
+  } catch (err) {
+    console.warn('[Evolution Client] configureClientInstanceWebhook notice:', err);
+    return false;
+  }
+}
+
+export async function fixWebhookForUser(userId: string): Promise<{ ok: boolean; message: string }> {
+  const cleanUid = sanitizeEvolutionId(userId, 'user');
+  const instanceName = buildEvolutionInstanceName(cleanUid);
+  const success = await configureClientInstanceWebhook(instanceName);
+  return {
+    ok: success,
+    message: success ? `Webhook successfully updated for instance "${instanceName}".` : 'Failed to update webhook on Evolution API.',
+  };
 }

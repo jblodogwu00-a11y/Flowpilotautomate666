@@ -313,37 +313,94 @@ export async function inspectInstanceSummary(instanceName: string): Promise<{
   };
 }
 
+const WHATSAPP_INSTANCES_STORE_PATH = path.join(__dirname, '../../.data/whatsapp_instances_store.json');
+
+function registerInstanceOwner(instanceName: string, userId: string): void {
+  try {
+    const dir = path.dirname(WHATSAPP_INSTANCES_STORE_PATH);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    let store: { instances: Record<string, string> } = { instances: {} };
+    if (fs.existsSync(WHATSAPP_INSTANCES_STORE_PATH)) {
+      const raw = fs.readFileSync(WHATSAPP_INSTANCES_STORE_PATH, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.instances) {
+        store.instances = parsed.instances;
+      }
+    }
+    store.instances[instanceName] = userId;
+    fs.writeFileSync(WHATSAPP_INSTANCES_STORE_PATH, JSON.stringify(store, null, 2), 'utf-8');
+  } catch (err) {
+    console.warn('[Evolution API] Register instance owner notice:', err);
+  }
+}
+
+export function resolveUserIdForInstance(instanceName: string): string {
+  const cleanInstance = String(instanceName || '').trim();
+  if (!cleanInstance) return 'default_workspace';
+
+  try {
+    if (fs.existsSync(WHATSAPP_INSTANCES_STORE_PATH)) {
+      const parsed = JSON.parse(fs.readFileSync(WHATSAPP_INSTANCES_STORE_PATH, 'utf-8'));
+      if (parsed && parsed.instances && parsed.instances[cleanInstance]) {
+        return String(parsed.instances[cleanInstance]);
+      }
+    }
+  } catch {
+    // Non-fatal
+  }
+
+  if (cleanInstance.startsWith('flowpilot-')) {
+    return cleanInstance.slice('flowpilot-'.length);
+  }
+  if (cleanInstance.startsWith('user_')) {
+    const parts = cleanInstance.split('_');
+    if (parts.length >= 2 && parts[1]) {
+      return parts[1];
+    }
+  }
+
+  return cleanInstance;
+}
+
 /**
  * Configure webhook URL on the Evolution instance so messages.upsert events
- * are routed directly to FlowPilot's POST /api/whatsapp/evolution-webhook
+ * are routed directly to FlowPilot's global POST /api/webhooks/evolution
  */
 export async function configureInstanceWebhook(
   instanceName: string,
   webhookUrl?: string
 ): Promise<boolean> {
-  const appUrl =
-    typeof process !== 'undefined' && process.env?.APP_URL
-      ? process.env.APP_URL.replace(/\/+$/, '')
+  const envVal =
+    typeof process !== 'undefined'
+      ? process.env?.APP_URL || process.env?.NEXT_PUBLIC_APP_URL || ''
       : '';
+  const appUrl = envVal ? envVal.replace(/\/+$/, '') : 'https://flowpilotautomate666-4js9.vercel.app';
   const targetUrl =
     webhookUrl ||
-    (appUrl
-      ? `${appUrl}/api/whatsapp/evolution-webhook`
-      : 'http://localhost:3000/api/whatsapp/evolution-webhook');
+    `${appUrl}/api/webhooks/evolution`;
+
+  const payload = {
+    enabled: true,
+    url: targetUrl,
+    byEvents: false,
+    events: ['MESSAGES_UPSERT'],
+    webhook: {
+      enabled: true,
+      url: targetUrl,
+      byEvents: false,
+      events: ['MESSAGES_UPSERT'],
+    },
+  };
 
   const res = await evolutionFetch(`/webhook/set/${encodeURIComponent(instanceName)}`, {
     method: 'POST',
-    body: {
-      webhook: {
-        enabled: true,
-        url: targetUrl,
-        byEvents: false,
-        events: ['MESSAGES_UPSERT'],
-      },
-    },
+    body: payload,
   });
 
-  return res.ok;
+  console.log(`[Evolution] Set webhook for instance "${instanceName}" to "${targetUrl}": status ${res.status}`);
+  return res.ok || res.status === 200 || res.status === 201;
 }
 
 export async function initializeEvolutionConnection(params: {
@@ -425,6 +482,9 @@ export async function initializeEvolutionConnection(params: {
       };
     }
   }
+
+  // Register instance owner mapping
+  registerInstanceOwner(instanceName, userId);
 
   // Automatically ensure the instance is subscribed to our webhook
   configureInstanceWebhook(instanceName, params.webhookUrl).catch(() => {});
